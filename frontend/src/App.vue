@@ -21,7 +21,7 @@ async function signOut() {
 <template>
   <div v-if="showShell" class="min-h-screen bg-cream">
     <header class="border-b border-slate-200/80 bg-white">
-      <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
+      <div class="flex h-16 w-full items-center justify-between px-4 sm:px-6 lg:px-8">
         <RouterLink to="/lectures" class="flex items-center gap-3" aria-label="Positive Mentions home">
           <span class="grid h-9 w-9 place-items-center rounded-xl bg-brand-600 text-white shadow-sm">
             <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2">
@@ -44,4 +44,3 @@ async function signOut() {
   </div>
   <RouterView v-else />
 </template>
-

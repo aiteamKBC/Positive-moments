@@ -153,7 +153,7 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
+  <div class="w-full px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
     <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
       <div>
         <p class="text-sm font-semibold text-brand-700">Lecture intelligence</p>

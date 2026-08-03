@@ -1,0 +1,7 @@
+RewriteEngine On
+
+# Always use the valid TLS certificate instead of serving the app over HTTP.
+# The forwarded-protocol check avoids redirect loops when LiteSpeed is behind a proxy.
+RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !https
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
