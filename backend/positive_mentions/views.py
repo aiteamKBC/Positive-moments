@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 
 from django.conf import settings
@@ -37,9 +38,17 @@ def environment_dashboard_user(username, password):
     ):
         return None
 
+    dashboard_email = (
+        f"dashboard-{hashlib.sha256(configured_username.encode()).hexdigest()[:24]}"
+        "@local.invalid"
+    )
     user, created = get_user_model().objects.get_or_create(
         username=configured_username,
-        defaults={"is_active": True, "is_staff": False},
+        defaults={
+            "email": dashboard_email,
+            "is_active": True,
+            "is_staff": False,
+        },
     )
     if created:
         user.set_unusable_password()

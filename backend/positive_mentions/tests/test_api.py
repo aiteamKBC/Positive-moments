@@ -99,6 +99,7 @@ class PositiveMentionsApiTests(TransactionTestCase):
 
         shared_user = get_user_model().objects.get(username="shared-dashboard")
         self.assertFalse(shared_user.has_usable_password())
+        self.assertTrue(shared_user.email.endswith("@local.invalid"))
 
         self.assertEqual(self.client.post("/api/auth/logout/").status_code, 204)
         self.assertEqual(self.client.get("/api/auth/me/").status_code, 401)
