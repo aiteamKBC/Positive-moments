@@ -5,13 +5,17 @@ from urllib.parse import parse_qs, urlsplit
 
 from django.contrib.auth import get_user_model
 from django.db import connection
-from django.test import TransactionTestCase
+from django.test import TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
 from positive_mentions.models import DoctorSession, PositiveClipAsset
 from positive_mentions.utils import encode_session_id
 
 
+@override_settings(
+    DASHBOARD_USERNAME="shared-dashboard",
+    DASHBOARD_PASSWORD="correct-horse-battery-staple",
+)
 class PositiveMentionsApiTests(TransactionTestCase):
     reset_sequences = True
 
@@ -34,12 +38,10 @@ class PositiveMentionsApiTests(TransactionTestCase):
         super().tearDownClass()
 
     def setUp(self):
-        self.user = get_user_model().objects.create_user(
-            username="staff", password="correct-horse", is_staff=True
-        )
         self.client = APIClient()
         response = self.client.post("/api/auth/login/", {
-            "username": "staff", "password": "correct-horse",
+            "username": "shared-dashboard",
+            "password": "correct-horse-battery-staple",
         }, format="json")
         self.token = response.data["token"]
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {self.token}")
@@ -88,11 +90,16 @@ class PositiveMentionsApiTests(TransactionTestCase):
         self.assertEqual(anonymous.get("/api/positive-mentions/summary/").status_code, 401)
         self.assertEqual(anonymous.get("/api/positive-mentions/lectures/").status_code, 401)
 
-    def test_login_rejects_bad_credentials_and_logout_revokes_token(self):
+    def test_environment_login_rejects_bad_credentials_and_logout_revokes_token(self):
         bad = APIClient().post("/api/auth/login/", {
-            "username": "staff", "password": "wrong",
+            "username": "shared-dashboard",
+            "password": "wrong",
         }, format="json")
         self.assertEqual(bad.status_code, 400)
+
+        shared_user = get_user_model().objects.get(username="shared-dashboard")
+        self.assertFalse(shared_user.has_usable_password())
+
         self.assertEqual(self.client.post("/api/auth/logout/").status_code, 204)
         self.assertEqual(self.client.get("/api/auth/me/").status_code, 401)
 

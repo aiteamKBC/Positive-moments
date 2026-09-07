@@ -1,4 +1,7 @@
-from django.contrib.auth import authenticate
+import secrets
+
+from django.conf import settings
+from django.contrib.auth import authenticate, get_user_model
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
@@ -23,12 +26,35 @@ from .utils import decode_session_id, normalize_clips, timestamp_to_seconds, tim
 WATCH_PREROLL_SECONDS = 60
 
 
+def environment_dashboard_user(username, password):
+    configured_username = settings.DASHBOARD_USERNAME
+    configured_password = settings.DASHBOARD_PASSWORD
+    if not configured_username or not configured_password:
+        return None
+    if not (
+        secrets.compare_digest(str(username), configured_username)
+        and secrets.compare_digest(str(password), configured_password)
+    ):
+        return None
+
+    user, created = get_user_model().objects.get_or_create(
+        username=configured_username,
+        defaults={"is_active": True, "is_staff": False},
+    )
+    if created:
+        user.set_unusable_password()
+        user.save(update_fields=["password"])
+    return user if user.is_active else None
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def login_view(request):
     username = request.data.get("username", "")
     password = request.data.get("password", "")
-    user = authenticate(request, username=username, password=password)
+    user = environment_dashboard_user(username, password)
+    if user is None:
+        user = authenticate(request, username=username, password=password)
     if user is None or not user.is_active:
         return Response(
             {"code": "invalid_credentials", "detail": "Invalid username or password."},

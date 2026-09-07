@@ -1,6 +1,6 @@
 # Positive Mentions
 
-Positive Mentions is an authenticated internal dashboard for browsing V5 lecture
+Positive Mentions is an internal dashboard for browsing V5 lecture
 analysis results, reviewing positive learner quotes, and opening SharePoint recordings
 at the exact moment a quote occurred.
 
@@ -45,6 +45,8 @@ DJANGO_SECRET_KEY=replace-with-a-long-random-production-secret
 DJANGO_DEBUG=true
 DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
 CORS_ALLOWED_ORIGINS=http://localhost:5173
+DASHBOARD_USERNAME=positive_mentions
+DASHBOARD_PASSWORD=replace-with-a-strong-shared-password
 ```
 
 `DATABASE_URL` is the only place the Neon connection string should be stored. The
@@ -55,7 +57,7 @@ startup parameter. Never commit `.env`.
 When no `DATABASE_URL` is present, Django uses local SQLite for auth/setup work only;
 lecture data will not exist there. Real lecture data always comes from Neon.
 
-Apply Django's own authentication, admin, session, and token migrations:
+Apply Django's own admin and database migrations:
 
 ```powershell
 cd .\backend
@@ -64,18 +66,6 @@ python manage.py migrate
 
 These migrations do not create or modify `qa_doctors_sessions`; that model has
 `managed = False`.
-
-### Create the first admin/staff user
-
-With the backend environment activated:
-
-```powershell
-cd .\backend
-python manage.py createsuperuser
-```
-
-Follow the prompts. The same credentials work on the frontend login page and at
-`/admin/`.
 
 ### Run the backend
 
@@ -111,25 +101,23 @@ VITE_API_BASE_URL=https://your-api-host.example/api
 
 ## Authentication
 
-The initial implementation uses Django users and REST Framework tokens:
+Set `DASHBOARD_USERNAME` and `DASHBOARD_PASSWORD` in the backend environment to
+provide a shared dashboard login. The password is read only by Django and is never
+sent to the browser except during the HTTPS login request. On first login, Django
+creates a non-staff user for token ownership and stores an unusable password for it.
+Existing active Django accounts can also sign in with their own passwords.
 
-- Login returns a token stored by the frontend.
-- Every Positive Mentions endpoint requires that token.
-- Logout revokes the active token.
-- Database credentials are never sent to the browser.
-
-Authentication calls are isolated in `frontend/src/services/api.ts` and the backend
-auth URLs/views so Microsoft Entra ID can replace this layer later.
+Do not commit `backend/.env`. Production environment variables must be configured
+separately in the hosting platform; changing the local file does not update a running
+production deployment.
 
 ## API endpoints
 
-All endpoints below require `Authorization: Token <token>`, except login.
-
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
-| POST | `/api/auth/login/` | Authenticate with username/password |
-| POST | `/api/auth/logout/` | Revoke the current token |
-| GET | `/api/auth/me/` | Return the current user |
+| POST | `/api/auth/login/` | Authenticate and return an API token |
+| POST | `/api/auth/logout/` | Revoke the current API token |
+| GET | `/api/auth/me/` | Return the authenticated user |
 | GET | `/api/positive-mentions/summary/` | Database-calculated dashboard totals |
 | GET | `/api/positive-mentions/lectures/` | Filtered, paginated lecture list |
 | GET | `/api/positive-mentions/lectures/<session-key>/` | Lecture and normalized clips |

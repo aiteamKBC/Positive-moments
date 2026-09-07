@@ -39,7 +39,7 @@ async function submit() {
       </div>
       <p class="mt-6 text-xs font-bold uppercase tracking-[0.2em] text-brand-700">Internal workspace</p>
       <h1 class="mt-2 text-3xl font-bold tracking-tight text-ink">Welcome to Positive Mentions</h1>
-      <p class="mt-2 text-sm leading-6 text-muted">Sign in with your staff account to review positive learner moments.</p>
+      <p class="mt-2 text-sm leading-6 text-muted">Sign in with the shared dashboard account.</p>
 
       <form class="mt-8 space-y-5" @submit.prevent="submit">
         <div>
@@ -55,8 +55,7 @@ async function submit() {
           {{ loading ? 'Signing in…' : 'Sign in' }}
         </button>
       </form>
-      <p class="mt-6 text-center text-xs text-slate-400">Company staff access only</p>
+      <p class="mt-6 text-center text-xs text-slate-400">Authorized access only</p>
     </section>
   </main>
 </template>
-

@@ -35,6 +35,8 @@ DEBUG = env_bool("DJANGO_DEBUG", True)
 ALLOWED_HOSTS = [value.strip() for value in os.getenv(
     "DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1"
 ).split(",") if value.strip()]
+DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
