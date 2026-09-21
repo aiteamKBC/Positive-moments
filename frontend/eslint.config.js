@@ -14,6 +14,15 @@ export default tseslint.config(
         localStorage: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
+        // DOM types used by the Operations Console's form handlers. Declared
+        // one by one, like the rest of this list, rather than switching the
+        // whole config to `globals.browser` - the short list is a useful
+        // record of what the frontend actually touches.
+        Event: 'readonly',
+        HTMLInputElement: 'readonly',
+        HTMLSelectElement: 'readonly',
+        document: 'readonly',
+        navigator: 'readonly',
       },
     },
     rules: {

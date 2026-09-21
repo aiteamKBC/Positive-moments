@@ -5,6 +5,14 @@ export interface Summary {
   total_positive_clips: number
   recordings_available: number
   recordings_missing: number
+  /** Clip PRODUCTION, which is not the same question as clip detection. */
+  lectures_with_ready_clips: number
+  ready_clips: number
+}
+
+export interface MomentCategory {
+  category: string
+  count: number
 }
 
 export interface Lecture {
@@ -21,6 +29,8 @@ export interface Lecture {
   recording_link_status: string | null
   has_ready_clips: boolean
   ready_clips_count: number
+  top_categories: MomentCategory[]
+  moment_count: number
 }
 
 export interface DialogueLine {

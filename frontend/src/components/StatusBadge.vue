@@ -1,21 +1,27 @@
 <script setup lang="ts">
+/**
+ * The one semantic status badge.
+ *
+ * Callers pass a backend token and, optionally, the tone it deserves. Nothing
+ * here guesses a tone by pattern-matching on substrings - that is how "not
+ * eligible" once came out green because it contained "eligible".
+ */
 import { computed } from 'vue'
-import { formatStatus } from '../utils/format'
+import { TONE_CLASS, humanise, type Tone } from '../utils/labels'
 
-const props = defineProps<{ value?: string | null }>()
-const tone = computed(() => {
-  const value = props.value?.toLowerCase() ?? ''
-  if (['completed', 'complete', 'success', 'ready', 'accept'].some((item) => value.includes(item))) {
-    return 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-600/10'
-  }
-  if (['error', 'failed', 'reject'].some((item) => value.includes(item))) {
-    return 'bg-rose-50 text-rose-700 ring-1 ring-rose-600/10'
-  }
-  return 'bg-amber-50 text-amber-700 ring-1 ring-amber-600/10'
-})
+const props = withDefaults(defineProps<{
+  label?: string | null
+  value?: string | null
+  tone?: Tone
+  title?: string | null
+}>(), { label: undefined, value: undefined, title: undefined, tone: 'neutral' })
+
+const text = computed(() => props.label ?? humanise(props.value))
 </script>
 
 <template>
-  <span class="badge" :class="tone">{{ formatStatus(value) }}</span>
+  <span :class="TONE_CLASS[tone]" :title="title ?? value ?? undefined">
+    <slot name="icon" />
+    {{ text }}
+  </span>
 </template>
-

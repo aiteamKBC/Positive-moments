@@ -1,18 +1,27 @@
 <script setup lang="ts">
-defineProps<{ message: string }>()
+/**
+ * What the operator sees when the API cannot answer.
+ *
+ * The message shown is the platform's own safe error text - a code and a short
+ * sentence. Nothing here renders a stack trace, a SQL statement, a connection
+ * string or a raw exception, and there is no branch that could: the component
+ * only ever prints the single string it is handed.
+ */
+import AppIcon from './AppIcon.vue'
+
+defineProps<{ message: string; title?: string }>()
 defineEmits<{ retry: [] }>()
 </script>
 
 <template>
   <div class="surface flex flex-col items-center px-6 py-14 text-center" role="alert">
-    <span class="grid h-12 w-12 place-items-center rounded-full bg-rose-50 text-rose-600">
-      <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2">
-        <circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/>
-      </svg>
+    <span class="grid h-11 w-11 place-items-center rounded-full bg-rose-50 text-rose-600">
+      <AppIcon name="alert" :size="20" />
     </span>
-    <h2 class="mt-4 text-lg font-bold">We couldn’t load this data</h2>
-    <p class="mt-1 max-w-md text-sm text-muted">{{ message }}</p>
-    <button type="button" class="btn-primary mt-5" @click="$emit('retry')">Retry</button>
+    <h2 class="mt-4 text-base font-bold text-ink">{{ title ?? 'This could not be loaded' }}</h2>
+    <p class="mt-1.5 max-w-md text-sm leading-6 text-muted">{{ message }}</p>
+    <button type="button" class="btn-secondary mt-5" @click="$emit('retry')">
+      <AppIcon name="refresh" :size="16" /> Try again
+    </button>
   </div>
 </template>
-

@@ -1,245 +1,485 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+/**
+ * One lecture, in full. The single canonical detail page, keyed by lecture_id.
+ *
+ * The page states the platform's own answers and derives none of them. In
+ * particular `retry_eligibility` and the recover-attendance plan come from the
+ * server, so a disabled action is disabled for a reason the platform can name,
+ * and a confirmation dialog shows the plan the server generated rather than
+ * one this component imagined.
+ *
+ * There is no Force Reprocess here and there is no generic action runner. The
+ * three guarded endpoints are the whole mutation surface.
+ *
+ * The tabs are prepared for Lecture Parts and Media, which do not exist yet -
+ * so they are not shown. An empty tab promising future media would be a lie
+ * told in navigation.
+ */
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
+import ActionPlanDialog from '../components/ActionPlanDialog.vue'
+import AppIcon from '../components/AppIcon.vue'
+import AttendanceCell from '../components/operations/AttendanceCell.vue'
+import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
+import PageHeader from '../components/PageHeader.vue'
+import SectionPanel from '../components/SectionPanel.vue'
+import StageChip from '../components/operations/StageChip.vue'
+import StageMatrix from '../components/operations/StageMatrix.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import { getLecture, getWatchUrl } from '../services/api'
-import type { DialogueLine, LectureDetail, PositiveClip } from '../types'
+import TabNav from '../components/TabNav.vue'
+import TechnicalDetails from '../components/TechnicalDetails.vue'
 import {
-  errorMessage,
-  formatConfidence,
-  formatDate,
-  formatStatus,
-  openSafely,
-} from '../utils/format'
+  getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan,
+  recoverAttendance, retryLecture,
+} from '../services/operations'
+import type { DirectoryEntry, LectureDetail } from '../types/operations'
+import { businessDate, businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
+import {
+  actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
+  retryReason, stageLabel,
+} from '../utils/labels'
 
 const route = useRoute()
+const router = useRouter()
+
 const lecture = ref<LectureDetail | null>(null)
+const entry = ref<DirectoryEntry | null>(null)
+const recoverPlan = ref<Record<string, unknown> | null>(null)
 const loading = ref(true)
 const error = ref('')
-const watchLoading = ref<number | null>(null)
-const watchError = ref('')
+const notice = ref('')
+const actionKind = ref<'Retry' | 'Recover attendance' | ''>('')
+const actionPlan = ref<Record<string, unknown> | null>(null)
+const actionBusy = ref(false)
+
+const lectureId = computed(() => String(route.params.lectureId))
+const tab = computed(() => (typeof route.query.tab === 'string' ? route.query.tab : 'overview'))
+
+function selectTab(id: string) {
+  router.replace({ query: { ...route.query, tab: id === 'overview' ? undefined : id } })
+}
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    lecture.value = await getLecture(String(route.params.sessionId))
+    const detail = await getLecture(lectureId.value)
+    lecture.value = detail
+    const directory = await getDirectory(detail.session_date, detail.session_date)
+    entry.value = directory.lectures.find((row) => row.lecture_id === detail.lecture_id) ?? null
+    recoverPlan.value = await getRecoverAttendancePlan(lectureId.value).catch(() => null)
   } catch (caught) {
-    error.value = errorMessage(caught, 'The lecture details could not be loaded.')
+    error.value = caught instanceof Error ? caught.message : 'This lecture could not be loaded.'
   } finally {
     loading.value = false
   }
 }
-
-async function watchMoment(index: number) {
-  if (!lecture.value?.recording_available) return
-  watchLoading.value = index
-  watchError.value = ''
-  try {
-    const url = await getWatchUrl(lecture.value.session_key, index)
-    openSafely(url)
-  } catch (caught) {
-    watchError.value = errorMessage(caught, 'This positive moment could not be opened.')
-  } finally {
-    watchLoading.value = null
-  }
-}
-
-function dialogueText(line: DialogueLine | string) {
-  if (typeof line === 'string') return { speaker: '', text: line, start: '' }
-  return {
-    speaker: line.speaker ?? '',
-    text: line.text ?? line.quote ?? '',
-    start: line.start ?? '',
-  }
-}
-
-function transcriptLines(clip: PositiveClip) {
-  const lines = clip.dialogue
-    .map(dialogueText)
-    .filter((line) => line.text.trim())
-
-  if (lines.length) return lines
-
-  return [{
-    speaker: clip.speaker ?? '',
-    text: quote(clip),
-    start: clip.start ?? '',
-  }]
-}
-
-function displayTimestamp(value: string) {
-  return value ? value.replace(/\.\d+$/, '') : 'Time unavailable'
-}
-
-function quote(clip: PositiveClip) {
-  return clip.positive_quote || clip.quote || 'Positive learner feedback'
-}
-
-function formatClipDuration(value: number) {
-  if (!Number.isFinite(value)) return ''
-  if (value < 60) return `${Math.round(value)} sec`
-  const minutes = Math.floor(value / 60)
-  const seconds = Math.round(value % 60)
-  return `${minutes}m ${seconds}s`
-}
-
 onMounted(load)
+watch(lectureId, load)
+
+const stages = computed(() => lecture.value?.stages)
+const qa = computed(() => stages.value?.QA_EVALUATION ?? null)
+const perfect = computed(() => stages.value?.PERFECT_ELIGIBILITY ?? null)
+const attendanceStage = computed(() => stages.value?.ATTENDANCE ?? null)
+const recoverAvailable = computed(() => recoverPlan.value?.available === true)
+const momentKey = computed(() => entry.value?.legacy_session_key ?? null)
+const momentCount = computed(() => entry.value?.positive_clips_count ?? 0)
+const analysed = computed(() => entry.value?.clips_analysis_completeness === 'positive_clips_v5_final')
+
+const tabs = computed(() => [
+  { id: 'overview', label: 'Overview' },
+  { id: 'pipeline', label: 'Pipeline' },
+  { id: 'qa', label: 'Quality' },
+  { id: 'moments', label: 'Positive Moments', count: analysed.value ? momentCount.value : null },
+])
+
+const versionEntries = computed<[string, string][]>(() => {
+  const detail = lecture.value
+  if (!detail) return []
+  const rows: [string, string][] = [['lecture_id', detail.lecture_id],
+    ['orchestration_version', detail.orchestration_version]]
+  for (const [key, value] of Object.entries(detail.versions ?? {})) {
+    rows.push([key, Array.isArray(value) ? value.join(', ') : String(value)])
+  }
+  if (detail.duplicate_resolution?.winner_lecture_id) {
+    rows.push(['duplicate_winner_lecture_id', detail.duplicate_resolution.winner_lecture_id])
+  }
+  return rows
+})
+
+async function openAction(kind: 'Retry' | 'Recover attendance') {
+  actionKind.value = kind
+  actionPlan.value = null
+  notice.value = ''
+  try {
+    actionPlan.value = kind === 'Retry'
+      ? await getRetryPlan(lectureId.value)
+      : await getRecoverAttendancePlan(lectureId.value)
+  } catch (caught) {
+    actionKind.value = ''
+    notice.value = caught instanceof Error ? caught.message : 'The action plan could not be loaded.'
+  }
+}
+
+async function confirmAction() {
+  if (!actionKind.value || !actionPlan.value) return
+  actionBusy.value = true
+  try {
+    if (actionKind.value === 'Retry') {
+      await retryLecture(lectureId.value, String(actionPlan.value.action ?? ''))
+    } else {
+      await recoverAttendance(lectureId.value)
+    }
+    actionKind.value = ''
+    actionPlan.value = null
+    await load()
+    notice.value = 'The action completed and this lecture has been re-read from persisted state.'
+  } catch (caught) {
+    notice.value = caught instanceof Error
+      ? caught.message
+      : 'The guarded action was refused. Nothing was changed.'
+  } finally {
+    actionBusy.value = false
+  }
+}
 </script>
 
 <template>
-  <div class="w-full px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
-    <RouterLink to="/lectures" class="inline-flex items-center gap-2 text-sm font-semibold text-brand-700 hover:text-brand-800">
-      <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 18-6-6 6-6"/></svg>
-      Back to lectures
+  <div class="page stack">
+    <RouterLink class="btn-quiet" :to="{ name: 'lectures' }">
+      <AppIcon name="chevronLeft" :size="14" /> Lectures
     </RouterLink>
 
-    <LoadingSkeleton v-if="loading" class="mt-6" :rows="3" />
-    <ErrorState v-else-if="error" class="mt-6" :message="error" @retry="load" />
+    <LoadingSkeleton v-if="loading" variant="cards" :rows="4" />
+    <ErrorState v-else-if="error" :message="error" @retry="load" />
 
     <template v-else-if="lecture">
-      <section class="surface relative mt-6 overflow-hidden p-6 sm:p-8">
-        <div class="absolute right-0 top-0 h-40 w-40 translate-x-1/3 -translate-y-1/3 rounded-full bg-brand-100/70" />
-        <div class="relative">
-          <div class="flex flex-col justify-between gap-6 sm:flex-row sm:items-start">
-            <div class="max-w-2xl">
-              <div class="flex flex-wrap items-center gap-2">
-                <StatusBadge :value="lecture.clips_status" />
-                <span class="badge bg-brand-50 text-brand-700">{{ lecture.positive_clips_count || 0 }} positive moments</span>
-                <span class="badge bg-emerald-50 text-emerald-700">{{ lecture.ready_clips_count }} of {{ lecture.clips.length }} clips ready</span>
-              </div>
-              <h1 class="mt-4 text-2xl font-bold tracking-tight sm:text-3xl">{{ lecture.subject || 'Untitled lecture' }}</h1>
-              <div class="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted">
-                <span>{{ lecture.trainer || 'Trainer not assigned' }}</span>
-                <span>{{ formatDate(lecture.date) }}</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              class="btn-primary shrink-0"
-              :disabled="!lecture.recording_available"
-              @click="lecture.recording_url && openSafely(lecture.recording_url)"
+      <PageHeader :kicker="entry?.trainer ?? 'Lecture'" :title="lecture.subject">
+        <template #meta>
+          <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-sm text-muted">
+            <span class="inline-flex items-center gap-1.5">
+              <AppIcon name="calendar" :size="15" />{{ businessDateLong(lecture.session_date) }}
+            </span>
+            <span
+              v-if="cairoTimeRange(entry?.scheduled_start ?? lecture.scheduled_start, entry?.scheduled_end)"
+              class="inline-flex items-center gap-1.5"
             >
-              <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="m9 7 8 5-8 5V7Z"/><circle cx="12" cy="12" r="9"/>
-              </svg>
-              {{ lecture.recording_available ? 'Watch full lecture' : 'Recording link pending' }}
-            </button>
+              <AppIcon name="clock" :size="15" />
+              {{ cairoTimeRange(entry?.scheduled_start ?? lecture.scheduled_start, entry?.scheduled_end) }} Cairo
+            </span>
+            <span v-if="entry?.trainer" class="inline-flex items-center gap-1.5">
+              <AppIcon name="users" :size="15" />{{ entry.trainer }}
+            </span>
           </div>
-        </div>
-      </section>
-
-      <div class="mt-8 flex items-end justify-between">
-        <div>
-          <p class="text-sm font-semibold text-brand-700">Analysis results</p>
-          <h2 class="mt-1 text-2xl font-bold">Positive moments</h2>
-        </div>
-        <span class="text-sm text-muted">{{ lecture.clips.length }} moment{{ lecture.clips.length === 1 ? '' : 's' }}</span>
-      </div>
-
-      <p v-if="watchError" class="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{{ watchError }}</p>
-
-      <div v-if="lecture.clips.length" class="mt-5 space-y-5">
-        <article v-for="(clip, index) in lecture.clips" :key="`${clip.start}-${index}`" class="surface overflow-hidden">
-          <div class="border-l-4 border-brand-500 p-5 sm:p-7">
-            <div>
-              <div class="min-w-0">
-                <div class="flex flex-wrap items-center gap-2 text-xs font-semibold">
-                  <span class="rounded-lg bg-slate-100 px-2.5 py-1.5 text-slate-600">{{ clip.start || 'Start unavailable' }} — {{ clip.end || 'End unavailable' }}</span>
-                  <span v-if="clip.category" class="rounded-lg bg-brand-50 px-2.5 py-1.5 text-brand-700">{{ formatStatus(clip.category) }}</span>
-                  <span v-if="clip.feedback_target" class="rounded-lg bg-cyan-50 px-2.5 py-1.5 text-cyan-700">{{ formatStatus(clip.feedback_target) }}</span>
-                  <span v-if="clip.clip_asset" class="rounded-lg bg-emerald-50 px-2.5 py-1.5 text-emerald-700">Clip ready</span>
-                  <span v-else class="rounded-lg bg-amber-50 px-2.5 py-1.5 text-amber-700">Clip pending</span>
-                </div>
-                <div v-if="clip.clip_asset" class="mt-4 rounded-xl border border-emerald-100 bg-emerald-50/60 px-4 py-3 text-sm">
-                  <p class="font-semibold text-emerald-900">Positive clip {{ clip.clip_asset.clip_index }}</p>
-                  <p class="mt-1 text-xs text-emerald-700">
-                    <span v-if="clip.clip_asset.duration_seconds">{{ formatClipDuration(clip.clip_asset.duration_seconds) }}</span>
-                    <span v-if="clip.clip_asset.duration_seconds && clip.clip_asset.uploaded_at"> · </span>
-                    <span v-if="clip.clip_asset.uploaded_at">Uploaded {{ formatDate(clip.clip_asset.uploaded_at) }}</span>
-                  </p>
-                </div>
-                <div class="mt-4 flex w-full max-w-xl flex-col gap-2 sm:flex-row">
-                  <button
-                    type="button"
-                    class="btn-primary w-full sm:flex-1"
-                    :disabled="!lecture.recording_available || watchLoading === index"
-                    :title="lecture.recording_available ? 'Open full lecture at this timestamp' : 'Recording link pending'"
-                    @click="watchMoment(index)"
-                  >
-                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="m9 7 8 5-8 5V7Z"/><circle cx="12" cy="12" r="9"/>
-                    </svg>
-                    {{ !lecture.recording_available ? 'Recording link pending' : watchLoading === index ? 'Opening…' : 'Watch in full lecture' }}
-                  </button>
-                  <a
-                    v-if="clip.clip_asset"
-                    class="btn-secondary w-full sm:flex-1"
-                    :href="clip.clip_asset.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title="Open the uploaded trimmed clip"
-                  >
-                    <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="m9 7 8 5-8 5V7Z"/><circle cx="12" cy="12" r="9"/>
-                    </svg>
-                    Watch clip
-                  </a>
-                </div>
-                <div class="mt-5 space-y-3" role="list" aria-label="Timestamped transcript">
-                  <div
-                    v-for="(line, lineIndex) in transcriptLines(clip)"
-                    :key="`${line.start}-${line.speaker}-${lineIndex}`"
-                    class="grid gap-2 rounded-xl bg-slate-50 px-4 py-3 sm:grid-cols-[6.5rem_1fr] sm:gap-4"
-                    role="listitem"
-                  >
-                    <time class="text-xs font-semibold tabular-nums text-brand-700">
-                      {{ displayTimestamp(line.start) }}
-                    </time>
-                    <div class="min-w-0">
-                      <p v-if="line.speaker" class="text-sm font-bold text-slate-800">{{ line.speaker }}</p>
-                      <p class="mt-0.5 text-base leading-7 text-ink">{{ line.text }}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="clip.reason || typeof clip.confidence === 'number' || clip.semantic_verification.verdict" class="mt-6 grid gap-3 sm:grid-cols-3">
-              <div v-if="typeof clip.confidence === 'number'" class="rounded-xl bg-slate-50 p-4">
-                <p class="text-xs font-semibold uppercase tracking-wide text-muted">Confidence</p>
-                <p class="mt-1 font-bold">{{ formatConfidence(clip.confidence) }}</p>
-              </div>
-              <div v-if="clip.semantic_verification.verdict" class="rounded-xl bg-slate-50 p-4">
-                <p class="text-xs font-semibold uppercase tracking-wide text-muted">Semantic check</p>
-                <div class="mt-1"><StatusBadge :value="clip.semantic_verification.verdict" /></div>
-              </div>
-              <div v-if="typeof clip.semantic_verification.confidence === 'number'" class="rounded-xl bg-slate-50 p-4">
-                <p class="text-xs font-semibold uppercase tracking-wide text-muted">Verification confidence</p>
-                <p class="mt-1 font-bold">{{ formatConfidence(clip.semantic_verification.confidence) }}</p>
-              </div>
-            </div>
-
-            <div v-if="clip.reason || clip.semantic_verification.reason" class="mt-5 space-y-3 text-sm leading-6 text-muted">
-              <p v-if="clip.reason"><span class="font-semibold text-slate-700">Classification:</span> {{ clip.reason }}</p>
-              <p v-if="clip.semantic_verification.reason"><span class="font-semibold text-slate-700">Verification:</span> {{ clip.semantic_verification.reason }}</p>
-            </div>
+          <div class="mt-3 flex flex-wrap gap-2">
+            <StatusBadge :label="bucketLabel(lecture.bucket)" :tone="bucketTone(lecture.bucket)" :title="lecture.bucket" />
+            <StatusBadge
+              :label="actionLabel(lecture.next_executable_action)"
+              :tone="actionTone(lecture.next_executable_action)"
+              :title="lecture.next_executable_action"
+            />
+            <StatusBadge
+              v-if="lecture.blocking_stage"
+              :label="`At: ${stageLabel(lecture.blocking_stage)}`"
+              tone="neutral"
+            />
           </div>
-        </article>
-      </div>
+        </template>
+        <template #actions>
+          <button
+            v-if="lecture.retry_eligibility.retry_eligible"
+            type="button"
+            class="btn-secondary"
+            @click="openAction('Retry')"
+          >
+            <AppIcon name="refresh" :size="16" /> Retry
+          </button>
+          <button
+            v-if="recoverAvailable"
+            type="button"
+            class="btn-primary"
+            @click="openAction('Recover attendance')"
+          >
+            <AppIcon name="users" :size="16" /> Recover attendance
+          </button>
+        </template>
+      </PageHeader>
 
-      <div v-else class="surface mt-5 px-6 py-14 text-center">
-        <span class="mx-auto grid h-12 w-12 place-items-center rounded-full bg-brand-50 text-brand-700">
-          <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M7 8h10M7 12h6m-7 8 3.5-3H18a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H6a3 3 0 0 0-3 3v8a3 3 0 0 0 3 3v3Z"/>
-          </svg>
+      <p v-if="notice" class="notice" role="status">
+        <AppIcon name="info" :size="16" class="mt-0.5" />{{ notice }}
+      </p>
+
+      <div
+        v-if="lecture.is_suppressed_duplicate"
+        class="notice-warn"
+        role="note"
+      >
+        <AppIcon name="layers" :size="16" class="mt-0.5" />
+        <span>
+          <strong class="font-semibold">Duplicate calendar event suppressed.</strong>
+          The teaching calendar carried a second event for this lecture. It is kept for audit and never
+          enters processing.
+          <RouterLink
+            v-if="lecture.duplicate_resolution?.winner_lecture_id"
+            class="font-semibold underline"
+            :to="{ name: 'lecture', params: { lectureId: lecture.duplicate_resolution.winner_lecture_id } }"
+          >Open the lecture that was kept.</RouterLink>
         </span>
-        <h3 class="mt-4 font-bold">No positive moments found</h3>
-        <p class="mt-1 text-sm text-muted">This lecture was analyzed successfully but did not contain a qualifying positive mention.</p>
       </div>
+
+      <TabNav :tabs="tabs" :active="tab" @select="selectTab" />
+
+      <!-- ================= Overview ================= -->
+      <template v-if="tab === 'overview'">
+        <section class="grid gap-3 lg:grid-cols-3">
+          <SectionPanel title="What happens next">
+            <p class="text-sm leading-6 text-body">{{ actionLabel(lecture.next_action) }}</p>
+            <p v-if="lecture.blocking_stage" class="mt-1.5 text-xs text-muted">
+              Current step: {{ stageLabel(lecture.blocking_stage) }}
+            </p>
+            <div class="mt-3 divider" />
+            <p class="mt-3 text-xs font-semibold uppercase tracking-kicker text-muted">Retry</p>
+            <p class="mt-1 text-sm" :class="lecture.retry_eligibility.retry_eligible ? 'text-emerald-700' : 'text-muted'">
+              {{ lecture.retry_eligibility.retry_eligible ? 'Available' : 'Not available' }}
+            </p>
+            <p v-if="lecture.retry_eligibility.retry_reason" class="mt-0.5 text-xs leading-5 text-muted">
+              {{ retryReason(lecture.retry_eligibility.retry_reason) }}
+            </p>
+          </SectionPanel>
+
+          <SectionPanel title="Attendance">
+            <!--
+              A suppressed duplicate is not waiting for anything - nothing will
+              ever be read for it - so it must not borrow the waiting language.
+            -->
+            <template v-if="lecture.is_suppressed_duplicate">
+              <StatusBadge label="Not applicable" tone="quiet" />
+              <p class="mt-3 text-xs leading-5 text-muted">
+                Attendance is never resolved for a suppressed duplicate calendar event.
+              </p>
+            </template>
+            <template v-else>
+              <AttendanceCell
+                v-if="attendanceStage"
+                :authoritative="lecture.attendance_source_authoritative"
+                :coverage-status="lecture.attendance_coverage_status"
+                :attended-count="(attendanceStage.attended_count as number | undefined) ?? null"
+              />
+              <p class="mt-3 text-xs leading-5 text-muted">
+                Attendance is read from an external source. Until that source answers, the platform reports
+                waiting rather than a confirmed zero.
+              </p>
+            </template>
+          </SectionPanel>
+
+          <SectionPanel title="Perfect lecture">
+            <StatusBadge
+              :label="perfectReason(perfect?.reason as string | null).label"
+              :tone="perfectReason(perfect?.reason as string | null).tone"
+              :title="(perfect?.reason as string | null) ?? undefined"
+            />
+            <dl class="mt-3 space-y-1.5 text-sm">
+              <div class="flex items-center justify-between">
+                <dt class="text-muted">Eligibility</dt>
+                <dd><StageChip :state="stages!.PERFECT_ELIGIBILITY.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between">
+                <dt class="text-muted">Synced to legacy</dt>
+                <dd><StageChip :state="stages!.PERFECT_SYNC.state" /></dd>
+              </div>
+            </dl>
+          </SectionPanel>
+        </section>
+
+        <section class="grid gap-3 lg:grid-cols-2">
+          <SectionPanel title="Meeting and transcript">
+            <dl class="space-y-2 text-sm">
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Teams meeting match</dt><dd><StageChip :state="stages!.MEETING.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Transcript retrieved</dt><dd><StageChip :state="stages!.TRANSCRIPT.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Canonical transcript</dt><dd><StageChip :state="stages!.CANONICAL_CUES.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Speakers attributed</dt><dd><StageChip :state="stages!.SPEAKERS.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Engagement measured</dt><dd><StageChip :state="stages!.ENGAGEMENT.state" /></dd>
+              </div>
+            </dl>
+          </SectionPanel>
+
+          <SectionPanel title="Recording and reporting">
+            <dl class="space-y-2 text-sm">
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Recording link</dt><dd><StageChip :state="stages!.RECORDING_LINK.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Excel sync</dt><dd><StageChip :state="stages!.EXCEL_SYNC.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">QA sync to legacy</dt><dd><StageChip :state="stages!.LEGACY_QA_SYNC.state" /></dd>
+              </div>
+            </dl>
+            <p class="mt-3 text-xs leading-5 text-muted">
+              The recording link and the Excel stamp are produced by the live legacy workflows, not by this
+              platform. Waiting on them does not hold the lecture open.
+            </p>
+            <a
+              v-if="entry?.recording_url"
+              class="btn-secondary btn-sm mt-3"
+              :href="entry.recording_url"
+              target="_blank"
+              rel="noopener noreferrer"
+            ><AppIcon name="play" :size="14" /> Watch the recording</a>
+          </SectionPanel>
+        </section>
+
+        <TechnicalDetails :entries="versionEntries" />
+      </template>
+
+      <!-- ================= Pipeline ================= -->
+      <template v-else-if="tab === 'pipeline'">
+        <StageMatrix
+          :stage-order="lecture.stage_order"
+          :stages="lecture.stages"
+          :blocking-stage="lecture.blocking_stage"
+        />
+
+        <SectionPanel title="Run history" flush>
+          <EmptyState
+            v-if="!lecture.run_history.length"
+            compact
+            tone="neutral"
+            icon="clock"
+            title="This lecture has not appeared in a recorded run"
+          />
+          <table v-else class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Action</th>
+                <th scope="col">Result</th>
+                <th scope="col">From → to</th>
+                <th scope="col" class="text-right">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(item, index) in lecture.run_history" :key="index">
+                <td class="font-semibold text-ink">{{ actionLabel(String(item.action ?? '')) }}</td>
+                <td>{{ humanise(String(item.status ?? '')) }}</td>
+                <td class="text-muted">
+                  {{ humanise(String(item.initial_state ?? '')) }} → {{ humanise(String(item.final_state ?? '')) }}
+                </td>
+                <td class="whitespace-nowrap text-right text-muted">
+                  {{ cairoDateTime(item.started_at as string | null) }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </SectionPanel>
+      </template>
+
+      <!-- ================= Quality ================= -->
+      <template v-else-if="tab === 'qa'">
+        <section class="grid gap-3 lg:grid-cols-3">
+          <SectionPanel title="Checklist outcome">
+            <div v-if="qa && qa.met_count !== undefined" class="space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="text-sm text-muted">Met</span>
+                <span class="text-lg font-bold tabular-nums text-emerald-700">{{ qa.met_count }}</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-sm text-muted">Partial</span>
+                <span class="text-lg font-bold tabular-nums text-amber-700">{{ qa.partial_count }}</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="text-sm text-muted">Not met</span>
+                <span class="text-lg font-bold tabular-nums text-rose-700">{{ qa.not_met_count }}</span>
+              </div>
+            </div>
+            <p v-else class="text-sm text-muted">The checklist has not been evaluated for this lecture yet.</p>
+          </SectionPanel>
+
+          <SectionPanel title="Quality pipeline">
+            <dl class="space-y-2 text-sm">
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Evaluation</dt><dd><StageChip :state="stages!.QA_EVALUATION.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Report rendered</dt><dd><StageChip :state="stages!.QA_RENDER.state" /></dd>
+              </div>
+              <div class="flex items-center justify-between gap-4">
+                <dt class="text-muted">Written to legacy record</dt><dd><StageChip :state="stages!.LEGACY_QA_SYNC.state" /></dd>
+              </div>
+            </dl>
+            <p v-if="qa?.qa_status" class="mt-3 text-xs text-muted">
+              Platform status: {{ humanise(String(qa.qa_status)) }}
+            </p>
+          </SectionPanel>
+
+          <SectionPanel title="Perfect policy">
+            <StatusBadge
+              :label="perfectReason(perfect?.reason as string | null).label"
+              :tone="perfectReason(perfect?.reason as string | null).tone"
+            />
+            <p class="mt-3 text-xs leading-5 text-muted">
+              Pending attendance is not a failure — the policy simply cannot be applied until the attendance
+              source has answered.
+            </p>
+            <p class="mt-2 text-2xs text-faint">
+              Policy {{ lecture.versions.perfect_eligibility_version }}
+            </p>
+          </SectionPanel>
+        </section>
+
+        <p class="text-xs text-muted">
+          Model prompts and raw model responses are deliberately not exposed in this console.
+        </p>
+      </template>
+
+      <!-- ================= Positive Moments ================= -->
+      <template v-else>
+        <SectionPanel title="Positive moments">
+          <EmptyState
+            v-if="!analysed"
+            compact
+            tone="neutral"
+            icon="moments"
+            title="No positive-moment analysis for this lecture yet"
+            message="Positive-moment analysis runs separately from the processing pipeline. When it completes for this lecture, its moments will be linked here."
+          />
+          <template v-else>
+            <p class="text-sm text-body">
+              The analysis found
+              <strong class="font-semibold text-ink">{{ momentCount }}</strong>
+              positive moment{{ momentCount === 1 ? '' : 's' }} in this lecture on
+              {{ businessDate(lecture.session_date) }}.
+            </p>
+            <RouterLink
+              v-if="momentKey"
+              class="btn-primary mt-4"
+              :to="{ name: 'positive-moment-detail', params: { sessionKey: momentKey } }"
+            >
+              <AppIcon name="moments" :size="16" /> Open the moments
+            </RouterLink>
+          </template>
+        </SectionPanel>
+      </template>
+
+      <ActionPlanDialog
+        :open="Boolean(actionKind)"
+        :title="actionKind"
+        :plan="actionPlan"
+        :busy="actionBusy"
+        @close="actionKind = ''"
+        @confirm="confirmAction"
+      />
     </template>
   </div>
 </template>

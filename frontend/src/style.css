@@ -2,36 +2,116 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Official Kent Business College typefaces, served locally.
+ * Copied from the public site's own stylesheet - see
+ * public/assets/brand/README.md for the source URLs. Nothing at runtime is
+ * fetched from kentbusinesscollege.com.
+ */
+@font-face { font-family: 'DM Sans'; src: url('/assets/fonts/kbc-font-0.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'DM Sans'; src: url('/assets/fonts/kbc-font-1.ttf') format('truetype'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'DM Sans'; src: url('/assets/fonts/kbc-font-2.ttf') format('truetype'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'DM Sans'; src: url('/assets/fonts/kbc-font-3.ttf') format('truetype'); font-weight: 700; font-display: swap; }
+@font-face { font-family: 'DM Serif Display'; src: url('/assets/fonts/kbc-font-5.ttf') format('truetype'); font-weight: 400; font-display: swap; }
+
 @layer base {
-  * {
-    @apply border-slate-200;
+  * { @apply border-line; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { @apply m-0 min-w-[20rem] bg-canvas font-sans text-[0.9375rem] text-body antialiased; }
+  h1, h2, h3, h4 { @apply text-ink; }
+  :where(button, input, select, textarea, a, summary, [tabindex]):focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white;
   }
-  body {
-    @apply m-0 min-w-80 bg-cream font-sans text-ink antialiased;
-  }
-  button, input, select {
-    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2;
+  /* The dark shell needs its own focus ring or it disappears into the plum. */
+  .on-plum :where(button, input, select, a, [tabindex]):focus-visible {
+    @apply ring-white/70 ring-offset-brand-900;
   }
 }
 
 @layer components {
-  .surface {
-    @apply rounded-2xl border border-slate-200/80 bg-white shadow-card;
-  }
-  .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-brand-700 disabled:cursor-not-allowed disabled:bg-slate-300;
-  }
-  .btn-secondary {
-    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-400;
-  }
-  .field {
-    @apply h-11 w-full rounded-xl border border-slate-300 bg-white px-3 text-sm text-ink placeholder:text-slate-400;
-  }
-  .label {
-    @apply mb-1.5 block text-xs font-semibold uppercase tracking-wide text-slate-500;
-  }
-  .badge {
-    @apply inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold;
-  }
-}
 
+  /* --- layout ----------------------------------------------------------- */
+  .page { @apply mx-auto w-full max-w-[1520px] px-4 pb-16 pt-6 sm:px-6 lg:px-8; }
+  .page-wrap { @apply page; }
+  .stack { @apply space-y-6; }
+
+  /* --- page header ------------------------------------------------------ */
+  .kicker { @apply text-2xs font-bold uppercase tracking-kicker text-brand-600; }
+  .page-kicker { @apply kicker; }
+  .page-title { @apply font-display text-[1.75rem] leading-tight text-ink sm:text-[2rem]; }
+  .page-lede { @apply mt-1.5 max-w-3xl text-sm leading-6 text-muted; }
+  .section-title { @apply text-[0.95rem] font-bold tracking-tight text-ink; }
+  .eyebrow { @apply text-2xs font-semibold uppercase tracking-kicker text-faint; }
+
+  /* --- surfaces --------------------------------------------------------- */
+  .surface { @apply rounded-xl border border-line bg-white shadow-card; }
+  .panel { @apply surface overflow-hidden; }
+  .panel-head { @apply flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3 sm:px-5; }
+  .panel-body { @apply px-4 py-4 sm:px-5; }
+
+  /* --- metrics ---------------------------------------------------------- */
+  /* Hierarchy lives in the tile variant, not in the grid. The lead tile is
+     the day's headline; the rest are deliberately quieter and shorter. */
+  .tile-lead { @apply rounded-xl bg-brand-900 px-5 py-4 text-white shadow-raised; }
+  .tile { @apply rounded-xl border border-line bg-white px-4 py-3 shadow-card; }
+  .tile-label { @apply text-2xs font-semibold uppercase tracking-kicker text-muted; }
+  .tile-value { @apply mt-1 text-2xl font-bold tabular-nums leading-none text-ink; }
+  .tile-note { @apply mt-1.5 text-xs leading-snug text-muted; }
+
+  /* --- buttons ---------------------------------------------------------- */
+  .btn { @apply inline-flex select-none items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-55; }
+  .btn-md { @apply h-10 px-4; }
+  .btn-sm { @apply h-8 px-3 text-[0.8125rem]; }
+  .btn-primary { @apply btn btn-md bg-brand-700 text-white hover:bg-brand-800 active:bg-brand-900; }
+  .btn-secondary { @apply btn btn-md border border-line bg-white text-ink hover:border-brand-300 hover:bg-brand-50; }
+  .btn-ghost { @apply btn btn-md px-3 text-brand-700 hover:bg-brand-50; }
+  .btn-danger { @apply btn btn-md bg-rose-700 text-white hover:bg-rose-800; }
+  .btn-quiet { @apply inline-flex items-center gap-1.5 text-sm font-semibold text-brand-700 transition hover:text-brand-800 hover:underline; }
+  .icon-btn { @apply grid h-9 w-9 place-items-center rounded-lg border border-line bg-white text-muted transition hover:border-brand-300 hover:text-brand-700 disabled:opacity-40; }
+
+  /* --- forms ------------------------------------------------------------ */
+  .field { @apply h-9 w-full rounded-lg border border-line bg-white px-3 text-sm text-ink transition placeholder:text-faint hover:border-brand-300 focus:border-brand-500; }
+  .field-sm { @apply field h-8 text-[0.8125rem]; }
+  select.field { @apply cursor-pointer pr-8; }
+  .label { @apply mb-1 block text-2xs font-semibold uppercase tracking-kicker text-muted; }
+
+  /* --- filters ---------------------------------------------------------- */
+  /* One compact row by default. Secondary filters live behind a disclosure so
+     the table - the actual product - stays above the fold. */
+  .filter-bar { @apply surface flex flex-wrap items-center gap-2 px-3 py-2.5; }
+  .filter-field { @apply flex min-w-0 items-center gap-2; }
+  .filter-label { @apply shrink-0 text-2xs font-semibold uppercase tracking-kicker text-faint; }
+
+  /* --- badges ----------------------------------------------------------- */
+  .badge { @apply inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-0.5 text-xs font-semibold ring-1 ring-inset; }
+  .badge-ok { @apply badge bg-emerald-50 text-emerald-700 ring-emerald-600/20; }
+  .badge-waiting { @apply badge bg-amber-50 text-amber-800 ring-amber-600/20; }
+  .badge-review { @apply badge bg-orange-50 text-orange-700 ring-orange-600/20; }
+  .badge-error { @apply badge bg-rose-50 text-rose-700 ring-rose-600/20; }
+  .badge-info { @apply badge bg-sky-50 text-sky-700 ring-sky-600/20; }
+  .badge-brand { @apply badge bg-brand-50 text-brand-700 ring-brand-600/15; }
+  .badge-neutral { @apply badge bg-slate-100 text-slate-700 ring-slate-500/15; }
+  .badge-quiet { @apply badge bg-slate-50 text-faint ring-slate-400/15; }
+  .chip { @apply inline-flex items-center rounded-full bg-brand-50 px-2.5 py-0.5 text-xs font-medium text-brand-700; }
+
+  /* --- tables ----------------------------------------------------------- */
+  .table-wrap { @apply surface overflow-x-auto; }
+  .data-table { @apply w-full border-collapse text-left text-sm; }
+  .data-table thead th {
+    @apply sticky top-0 z-10 whitespace-nowrap border-b border-line bg-[#fbfafc] px-4 py-2.5
+           text-2xs font-bold uppercase tracking-kicker text-muted;
+  }
+  .data-table tbody tr { @apply border-b border-line/70 transition last:border-0 hover:bg-brand-50/45; }
+  .data-table td { @apply px-4 py-2.5 align-middle; }
+  .row-link { @apply font-semibold text-ink transition hover:text-brand-700 hover:underline; }
+
+  /* --- misc ------------------------------------------------------------- */
+  .divider { @apply h-px w-full bg-line; }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .mono { @apply font-mono text-2xs text-faint; }
+  .skeleton { @apply animate-pulse rounded bg-line/70; }
+  .notice { @apply flex items-start gap-2.5 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-800; }
+  .notice-warn { @apply flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900; }
+  .notice-error { @apply flex items-start gap-2.5 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800; }
+}
