@@ -1,0 +1,2 @@
+"""Lecture discovery domain."""
+
