@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -6,6 +7,15 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
+
+# The coded lecture platform (`app/`) lives one level above the Django
+# project. The Operations API reads every pipeline answer from it, so it has to
+# be importable however Django was started - from `backend/`, from the repo
+# root, by manage.py or by a WSGI server. Setting it here rather than relying
+# on PYTHONPATH means "it works on my machine" cannot be the difference.
+REPO_ROOT = BASE_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -49,6 +59,9 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework.authtoken",
     "positive_mentions",
+    # Phase 5A: the Operations Console API. It owns no models - the lecture
+    # platform owns its schema through psycopg - so it has no migrations.
+    "operations",
 ]
 
 MIDDLEWARE = [

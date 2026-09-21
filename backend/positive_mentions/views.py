@@ -99,6 +99,12 @@ class SummaryView(APIView):
             processed=Count("session_id"),
             with_clips=Count("session_id", filter=Q(positive_clips_length__gt=0)),
             total_clips=Coalesce(Sum("positive_clips_length"), 0),
+            # Clip PRODUCTION, which is a different question from clip
+            # DETECTION: a lecture can hold five positive moments and no cut
+            # media at all. The Positive Moments page must be able to say so
+            # rather than implying the clips exist.
+            with_ready_clips=Count("session_id", filter=Q(has_ready_clips=True)),
+            ready_clips=Coalesce(Sum("ready_clips_count"), 0),
         )
         processed = totals["processed"]
         with_clips = totals["with_clips"]
@@ -109,6 +115,8 @@ class SummaryView(APIView):
             "total_positive_clips": totals["total_clips"],
             "recordings_available": available,
             "recordings_missing": processed - available,
+            "lectures_with_ready_clips": totals["with_ready_clips"],
+            "ready_clips": totals["ready_clips"],
         })
 
 

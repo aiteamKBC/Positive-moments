@@ -239,7 +239,42 @@ class PositiveMentionsApiTests(TransactionTestCase):
             "total_positive_clips": 2,
             "recordings_available": 1,
             "recordings_missing": 1,
+            # Clip PRODUCTION is counted separately from clip DETECTION. Two
+            # detected moments and no cut media is the normal state, and the
+            # Positive Moments page has to be able to say so.
+            "lectures_with_ready_clips": 0,
+            "ready_clips": 0,
         })
+
+    def test_the_list_reports_the_categories_recorded_in_the_analysis(self):
+        """
+        Most common first, at most three, counted from the stored JSON.
+
+        It reports what the analysis wrote. It must not reclassify anything,
+        and a lecture with no categories must come back with an empty list
+        rather than an invented one.
+        """
+        self.make_lecture(
+            "categorised",
+            positive_clips=[
+                {"start": "00:00:01", "category": "learning_experience"},
+                {"start": "00:00:02", "category": "learning_experience"},
+                {"start": "00:00:03", "category": "trainer"},
+            ],
+        )
+        self.make_lecture("uncategorised", positive_clips=[{"start": "00:00:01"}])
+
+        rows = {row["session_id"]: row
+                for row in self.client.get(
+                    "/api/positive-mentions/lectures/").data["results"]}
+
+        self.assertEqual(rows["categorised"]["top_categories"], [
+            {"category": "learning_experience", "count": 2},
+            {"category": "trainer", "count": 1},
+        ])
+        self.assertEqual(rows["categorised"]["moment_count"], 3)
+        self.assertEqual(rows["uncategorised"]["top_categories"], [])
+        self.assertEqual(rows["uncategorised"]["moment_count"], 1)
 
     def test_summary_uses_the_same_filters_as_the_unpaginated_list_scope(self):
         self.make_lecture(
