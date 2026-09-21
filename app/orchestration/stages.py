@@ -197,9 +197,14 @@ RUN_TYPE_MANUAL = "MANUAL"
 RUN_TYPE_SCHEDULED = "SCHEDULED"
 RUN_TYPE_RECONCILE = "RECONCILE"
 RUN_TYPE_DRY_RUN = "DRY_RUN"
+# QA Core RC2. A day inside an operator-requested historical recovery. It is a
+# normal cycle in every respect - same resolver, same runner, same writer
+# protections - and exists as its own type only so the audit can distinguish
+# "September was recovered" from "somebody retried one lecture".
+RUN_TYPE_BACKFILL = "BACKFILL"
 
 RUN_TYPES = (RUN_TYPE_MANUAL, RUN_TYPE_SCHEDULED, RUN_TYPE_RECONCILE,
-             RUN_TYPE_DRY_RUN)
+             RUN_TYPE_DRY_RUN, RUN_TYPE_BACKFILL)
 
 
 # --- retry vs force reprocess ----------------------------------------------

@@ -1,10 +1,15 @@
-# KBC QA Core — Release Readiness (rc1)
+# KBC QA Core — Release Readiness (rc2)
 
 **Written for:** the Backend / Infrastructure team who will deploy this.
 
-This release freezes the nightly coded QA pipeline and the operations console.
-Phase 6 media processing is **deliberately excluded** and continues in
-development; nothing in this release depends on it.
+This release freezes the nightly coded QA pipeline, the operations console and
+**historical backfill**. Phase 6 media processing is **deliberately excluded**
+and continues in development; nothing in this release depends on it.
+
+> **rc1 → rc2** adds one feature: Operations Backfill, for recovering the
+> September 2026 lectures the stopped legacy n8n QA flow never processed. The
+> nightly schedule, the writer protections and the media exclusion are
+> unchanged.
 
 ---
 
@@ -14,6 +19,7 @@ development; nothing in this release depends on it.
 |---|---|---|---|
 | `scheduler` | `kbc-lecture-scheduler:1.0.0` | The nightly cycle. **The only service that writes.** | none |
 | `api` | `kbc-qa-api:1.0.0` | Operations API (Django + DRF) | `127.0.0.1:8000` |
+| `backfill-runner` | `kbc-lecture-scheduler:1.0.0` | Historical recovery. Also writes. | none |
 | `console` | `kbc-qa-console:1.0.0` | Vue/Vite bundle behind nginx | `127.0.0.1:8080` |
 
 The pipeline these cover, end to end:
@@ -77,6 +83,7 @@ terminal. Once deployed, the laptop being off has no effect.
 | 014 | writer guardrails |
 | 015 | Perfect lecture tables |
 | 016 | pipeline orchestration (stage runs, scheduler state) |
+| **020** | **backfill runs and per-day summaries (new in rc2)** |
 
 ### Migrations already applied that QA Core does not need
 
@@ -152,6 +159,98 @@ It reports what is actually true:
 
 An incomplete asset displays its real state. No media control in this release
 triggers production processing.
+
+---
+
+## Historical backfill (new in RC2)
+
+September 2026 contains lectures the coded platform never processed, because
+the legacy n8n QA flow was stopped deliberately. Backfill recovers them.
+
+### What it is
+
+A loop and a checkpoint. **There is no second pipeline.** Recovering a past day
+is the question the platform already answers every night, so a backfill day is
+one call to `PipelineOrchestrator.run_window` with `lookback_days=0` and
+`discover=True` — the same entry point the nightly scheduler uses. It therefore
+inherits, rather than re-implements:
+
+- the read-only n8n ownership preflight, which fails the run closed
+- the cycle advisory lock, which is how it coexists with the nightly scheduler
+- active Aptem groups from `public.aptem_auto_extracting`
+- Microsoft calendar discovery and the production subject matcher
+- canonical `lecture_id` identity and registry reconciliation
+- the StageResolver, the StageRunner and every writer protection
+- a normal `lecture_pipeline_runs` audit row per day, `run_type = BACKFILL`
+
+### Preview is a run too
+
+A preview costs the same Graph reads as an execution — **measured: ~7 s of
+Graph plus ~2.6 s of stage resolution per day, so 1–21 September is roughly
+three minutes.** That does not fit in an HTTP request, and a preview that times
+out halfway is worse than none.
+
+So preview is the same durable run with `mode = PREVIEW`. It calls the
+production `discover_day` with `persist=False`: production discovery,
+production matcher, production canonical identity, **writing nothing** — no
+registry row, no discovery run row, no QA row, no Perfect row. The runner gives
+preview work a PostgreSQL read-only connection, so that is enforced rather than
+promised.
+
+Verified on real data: a three-day September preview changed **nothing** in
+`lecture_sessions`, `lecture_pipeline_runs`, `lecture_discovery_runs`,
+`lecture_qa_evaluations`, `lecture_perfect_lecture_results` or
+`qa_doctors_sessions`.
+
+### Services
+
+`backfill-runner` is a **second container from the scheduler's image**, running
+`python -m app.cli.main backfill-runner`. It is separate from the scheduler
+daemon on purpose: that daemon's design is "sleep until the next cron instant",
+and a backfill must start within seconds of an operator pressing Start.
+Rewriting its sleep into a poll loop would put the nightly 21:00/23:00 timing
+at risk to save one container.
+
+`restart: unless-stopped`, **no port**, 300 s stop grace.
+
+### Resume, cancel and idempotency
+
+| | |
+|---|---|
+| Checkpoint | `backfill_runs.current_business_date` — the next day still to do |
+| Ordering | the day summary is written, **then** the checkpoint advances, in one transaction |
+| Crash | the interrupted day re-runs; existing stage resolution makes it `NOTHING_TO_DO` |
+| Cancel | cooperative — the day in flight finishes, no new day starts, status `CANCELLED` |
+| Re-running a range | no duplicate lecture, QA, Perfect or pipeline identity; the second pass is almost entirely `NOTHING_TO_DO` |
+
+There is **no force-reprocess**, and no parameter that could add one.
+
+### Scheduler coexistence
+
+Both take the same cycle advisory lock. If the scheduler holds it, the backfill
+day is recorded `DEFERRED_CYCLE_BUSY` and re-attempted — deferring, not
+fighting, because the scheduler is reconciling the same registry with the same
+rules. **The scheduler is not disabled by the existence of a backfill run.**
+
+### Routes
+
+| Method | Path | |
+|---|---|---|
+| POST | `/api/operations/backfills/preview/` | queue a read-only inspection (202) |
+| POST | `/api/operations/backfills/start/` | queue a real recovery (202) |
+| GET | `/api/operations/backfills/` | history plus the active run |
+| GET | `/api/operations/backfills/{id}/` | one run with its per-day results |
+| POST | `/api/operations/backfills/{id}/cancel/` | request a safe stop |
+
+All authenticated. Console route: **`/operations/backfill`**.
+
+### Migration
+
+**020** — `backfill_runs`, `backfill_run_days`, and a widened `run_type` CHECK
+to admit `BACKFILL`. Additive and re-runnable; widening a CHECK cannot
+invalidate an existing row. The tables hold intent and progress only — every
+lecture outcome stays in `lecture_pipeline_runs`, so there is no second history
+to drift.
 
 ---
 

@@ -10,6 +10,9 @@
  */
 import { api } from './api'
 import type {
+  BackfillCreatedResponse,
+  BackfillDetailResponse,
+  BackfillListResponse,
   CalendarResponse,
   DayReport,
   DirectoryResponse,
@@ -129,4 +132,34 @@ export async function reconcileDay(date: string) {
  */
 export async function getPrecheck() {
   return (await api.get<Record<string, unknown>>(`${BASE}/precheck/`)).data
+}
+
+/* --- QA Core RC2: Operations Backfill -------------------------------------
+ *
+ * Both creators return immediately with a queued run; the `backfill-runner`
+ * service does the work. Nothing here waits on a month of Graph calls.
+ */
+
+export async function previewBackfill(from: string, to: string) {
+  return (await api.post<BackfillCreatedResponse>(
+    `${BASE}/backfills/preview/`, { from, to })).data
+}
+
+export async function startBackfill(from: string, to: string) {
+  return (await api.post<BackfillCreatedResponse>(
+    `${BASE}/backfills/start/`, { from, to })).data
+}
+
+export async function getBackfills(limit = 25) {
+  return (await api.get<BackfillListResponse>(
+    `${BASE}/backfills/`, { params: { limit } })).data
+}
+
+export async function getBackfill(runId: string) {
+  return (await api.get<BackfillDetailResponse>(`${BASE}/backfills/${runId}/`)).data
+}
+
+export async function cancelBackfill(runId: string) {
+  return (await api.post<BackfillCreatedResponse>(
+    `${BASE}/backfills/${runId}/cancel/`, {})).data
 }

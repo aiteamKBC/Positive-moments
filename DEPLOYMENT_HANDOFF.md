@@ -14,18 +14,27 @@ section is what to actually run, and it adds the API and console alongside it.
 
 ## Package location
 
-```
-release/qa-core-rc1/
+The platform is now in GitHub, so the normal path is a checkout:
+
+```bash
+git clone https://github.com/aiteamKBC/Positive-moments.git
+cd Positive-moments && git checkout qa-core-rc2
 ```
 
-Built by `deploy/build_qa_core_bundle.py` from the validated working tree —
-**not** by `git clone`, which would produce an empty release because `app/`,
-`backend/operations/`, `automation/`, `tests/` and `docs/` are all untracked
-(see section 17 of the release report and section 3 below).
+> **The `qa-core-rc2` tag does not exist yet.** It is created once this release
+> is approved. `qa-core-rc1` is tagged, immutable, and does **not** contain
+> historical backfill.
 
-321 files, 3.8 MiB. Contains no `.env`, no credentials, no `node_modules`, no
-virtualenv, no media files, no build output and no media worker. The build
-script re-verifies all of that on every run and prints a bundle `sha256`.
+An offline bundle is also produced, for a host that cannot reach GitHub:
+
+```bash
+python deploy/build_qa_core_bundle.py     # -> release/qa-core-rc2/
+```
+
+It contains no `.env`, no credentials, no `node_modules`, no virtualenv, no
+media files, no build output and no media worker. The script re-verifies all of
+that on every run and prints a `sha256`; the build is deterministic, so two
+runs of the same tree produce the same digest.
 
 ## Services
 
@@ -33,6 +42,7 @@ script re-verifies all of that on every run and prints a bundle `sha256`.
 |---|---|---|
 | `scheduler` | nightly QA cycle — **the only writer** | none |
 | `api` | Operations API | `127.0.0.1:8000` |
+| `backfill-runner` | historical recovery — also writes | none |
 | `console` | Vue console behind nginx | `127.0.0.1:8080` |
 
 **Not included:** media worker, FFmpeg, Positive Clip producer, Lecture Part
@@ -58,7 +68,7 @@ docker compose -f deploy/docker-compose.qa-core.yml --profile qa-core build
 ## 3. Migrations
 
 The schema is applied by running the numbered files in order against
-`DATABASE_URL`. **QA Core requires `001` … `016`.**
+`DATABASE_URL`. **QA Core rc2 requires `001` … `016` and `020`.**
 
 ```bash
 for f in app/db/migrations/0{0,1}*.sql; do
@@ -67,6 +77,9 @@ done
 ```
 
 Each file is idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running is safe.
+
+Migration `020` adds the two backfill tables and widens the `run_type` CHECK to
+admit `BACKFILL`. Additive and re-runnable.
 
 Migrations `017`–`019` are **media** migrations. They are additive and already
 applied on the current database. **Leave them.** Do not roll back migrations to
@@ -79,8 +92,8 @@ docker compose -f deploy/docker-compose.qa-core.yml --profile qa-core up -d
 docker compose -f deploy/docker-compose.qa-core.yml ps
 ```
 
-`restart: unless-stopped` brings all three back after a VPS reboot with nobody
-logged in. The scheduler exposes **no port**.
+`restart: unless-stopped` brings all four back after a VPS reboot with nobody
+logged in. Neither the scheduler nor the backfill runner exposes a port.
 
 ## 5. Verify the n8n preflight before enabling writes
 
@@ -137,6 +150,41 @@ application rollback.**
 To stop writes immediately without a rebuild: set `SCHEDULER_ENABLED=false` and
 restart the scheduler, or `docker compose ... stop scheduler` (300 s grace lets
 a running cycle finish).
+
+## 10. Recover September (the first real use of this release)
+
+This is the reason rc2 exists. The legacy n8n QA flow was stopped deliberately,
+so September 2026 holds lectures the coded platform has never processed.
+
+**Do this with `SCHEDULER_ENABLED=false` still set.** Reviewing one controlled
+recovery before the nightly cycle also starts writing is an operational choice,
+not an architectural requirement — the two coexist safely either way.
+
+1. Open **Operations → Historical backfill** (`/operations/backfill`).
+2. Set **From** `2026-09-01` and **To** the deployment date.
+3. Press **Preview backfill**. This queues a read-only run; it writes nothing.
+   Expect roughly **10 seconds per day** — about three minutes for September.
+4. Read the result: calendar events, matched lectures, already complete, needs
+   processing, waiting, needs review, suppressed duplicates.
+5. If the numbers look right, press **Start backfill**. Start is disabled until
+   a preview has completed, so nothing is written before somebody has looked.
+6. Watch it progress day by day. Closing the tab does not stop it.
+7. When it finishes, review processed / waiting / review-required / failed, and
+   resolve any genuine review blockers.
+8. Only then set `SCHEDULER_ENABLED=true` and restart the scheduler.
+
+If a gap is found later, Operations can run another range from the same page.
+
+**What to expect:** lectures already complete report `NOTHING_TO_DO` — running a
+range twice is safe and creates no duplicate lecture, QA or Perfect row. A
+lecture whose attendance source has not arrived stays `WAITING`; that is
+correct and it is retried by the nightly cycle later. Nothing here can
+force-reprocess a completed stage, so a second run cannot re-buy model
+generations.
+
+**If it stops with `BLOCKED_LEGACY_QA_ACTIVE`**, the legacy n8n QA branch has
+been re-enabled. Do not work around it — coded QA and legacy QA must never both
+write. Disable the legacy branch and start a new backfill.
 
 ## Still to be decided by whoever deploys
 

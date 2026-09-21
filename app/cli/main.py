@@ -348,6 +348,35 @@ def build_parser() -> argparse.ArgumentParser:
                         help="stop after N cycles; omit to run until stopped")
     daemon.add_argument("--json", action="store_true")
 
+    # QA Core RC2: Operations Backfill. The runner is a SECOND long-running
+    # service rather than a branch inside the scheduler daemon: that daemon's
+    # whole design is "sleep until the next cron instant", and a backfill run
+    # must start within seconds of an operator pressing Start. Rewriting its
+    # sleep into a poll loop would put the nightly 21:00/23:00 timing at risk
+    # to save one container.
+    backfill_runner = commands.add_parser(
+        "backfill-runner",
+        help="claim and process durable Operations Backfill runs until stopped")
+    backfill_runner.add_argument(
+        "--max-runs", type=int, default=None,
+        help="stop after N backfill runs; omit to run until stopped")
+    backfill_runner.add_argument(
+        "--poll-seconds", type=int, default=20,
+        help="how often to look for a newly requested backfill run")
+    backfill_runner.add_argument("--json", action="store_true")
+
+    backfill_preview = commands.add_parser(
+        "backfill-preview",
+        help="read-only: what a backfill of this date range would find")
+    backfill_preview.add_argument("--from", dest="from_date", type=parse_date,
+                                  required=True)
+    backfill_preview.add_argument("--to", dest="to_date", type=parse_date,
+                                  required=True)
+    backfill_preview.add_argument(
+        "--no-discover", action="store_true",
+        help="skip the calendar read and report registry state only")
+    backfill_preview.add_argument("--json", action="store_true")
+
     scheduler_status = commands.add_parser(
         "scheduler-status", help="print the scheduler configuration and safety precheck")
     scheduler_status.add_argument("--json", action="store_true")
@@ -837,6 +866,59 @@ def main(argv: list[str] | None = None) -> int:
             service.install_signal_handlers()
             summary = {"scheduler": scheduler.config.describe(),
                        **service.run_forever(max_cycles=args.max_cycles)}
+        elif args.command == "backfill-runner":
+            # The durable historical-recovery loop. It owns no pipeline logic:
+            # every day goes through the same PipelineOrchestrator.run_window
+            # the nightly scheduler calls.
+            settings.require_database()
+            settings.require_discovery()
+            from app.orchestration.factory import build_backfill_runner
+
+            def _open():
+                return database_connection(settings.database_url)
+
+            def _aptem():
+                return readonly_database_connection(settings.aptem_database_url)
+
+            def _read_only():
+                return readonly_database_connection(settings.database_url)
+
+            runner = build_backfill_runner(
+                settings, connection_factory=_open,
+                readonly_connection_factory=_read_only,
+                aptem_connection_factory=_aptem)
+            import signal as _signal
+            for _name in ("SIGTERM", "SIGINT"):
+                _handler = getattr(_signal, _name, None)
+                if _handler is not None:
+                    # Finish the day in flight, then exit. The run stays
+                    # claimable and resumes from its persisted checkpoint.
+                    _signal.signal(_handler, runner.request_stop)
+            summary = {"service": "backfill_runner",
+                       "runner_version": runner.runner_version,
+                       **runner.run_forever(poll_seconds=args.poll_seconds,
+                                            max_runs=args.max_runs)}
+        elif args.command == "backfill-preview":
+            settings.require_database()
+            from app.orchestration.backfill import validate_range
+            from app.orchestration.factory import build_backfill_preview
+
+            validate_range(args.from_date, args.to_date)
+            discover = not args.no_discover
+            if discover:
+                settings.require_discovery()
+            service = build_backfill_preview(settings, discover=discover)
+
+            def _aptem():
+                return readonly_database_connection(settings.aptem_database_url)
+
+            # A read-only transaction: the preview cannot write even if some
+            # future change to a shared component tried to.
+            with readonly_database_connection(settings.database_url) as connection:
+                summary = service.preview(
+                    connection, args.from_date, args.to_date,
+                    aptem_connection_factory=_aptem if discover else None,
+                    discover=discover).as_dict()
         elif args.command == "scheduler-status":
             scheduler = build_scheduler(settings, dry_run=True)
             from datetime import datetime as _dt

@@ -66,6 +66,36 @@ services:
     # inbound exposure of any kind.
     logging: *logging
 
+  # -- historical recovery ---------------------------------------------------
+  # A SECOND long-running service rather than a branch inside the scheduler.
+  # The scheduler's design is "sleep until the next cron instant"; a backfill
+  # must start within seconds of an operator pressing Start, and rewriting that
+  # sleep into a poll loop would put the nightly 21:00/23:00 timing at risk to
+  # save one container.
+  #
+  # It shares the scheduler's image and entrypoint module, so there is no
+  # second build and no second copy of the platform.
+  backfill-runner:
+    profiles: ["qa-core"]
+    build:
+      context: ..
+      dockerfile: automation/scheduler/Dockerfile
+    image: kbc-lecture-scheduler:1.0.0
+    container_name: kbc-qa-backfill-runner
+    restart: unless-stopped
+    # A backfill day ends in a database write. SIGTERM lets the day in flight
+    # finish; the run then stays claimable and resumes from its checkpoint.
+    stop_grace_period: 300s
+    command: ["python", "-m", "app.cli.main", "backfill-runner"]
+    env_file: [../backend/.env]
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      TZ: Africa/Cairo
+    # NO ports. Like the scheduler, it is a daemon and must have no inbound
+    # exposure of any kind.
+    logging: *logging
+
   # -- the API --------------------------------------------------------------
   api:
     profiles: ["qa-core"]

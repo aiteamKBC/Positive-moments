@@ -5,6 +5,7 @@ import LecturesView from './views/LecturesView.vue'
 import LoginView from './views/LoginView.vue'
 import OperationsDashboardView from './views/OperationsDashboardView.vue'
 import OperationsQueueView from './views/OperationsQueueView.vue'
+import OperationsBackfillView from './views/OperationsBackfillView.vue'
 import OperationsRunsView from './views/OperationsRunsView.vue'
 import PositiveMomentDetailView from './views/PositiveMomentDetailView.vue'
 import PositiveMomentsView from './views/PositiveMomentsView.vue'
@@ -45,6 +46,11 @@ const router = createRouter({
       component: OperationsQueueView, meta: { title: 'Errors', queue: 'errors' },
     },
     { path: '/operations/runs', name: 'operations-runs', component: OperationsRunsView, meta: { title: 'Pipeline runs' } },
+    {
+      // QA Core RC2. Historical recovery: pick a range, preview it, run it.
+      path: '/operations/backfill', name: 'operations-backfill',
+      component: OperationsBackfillView, meta: { title: 'Historical backfill' },
+    },
 
     // --- Lectures --------------------------------------------------------
     { path: '/lectures', name: 'lectures', component: LecturesView, meta: { title: 'Lectures' } },

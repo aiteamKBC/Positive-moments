@@ -237,3 +237,38 @@ export function retryReason(value?: string | null) {
 export function recordingLabel(available: boolean) {
   return available ? 'Recording available' : 'Recording link pending'
 }
+
+/* ---------------------------------------------------------------------------
+ * QA Core RC2: Operations Backfill vocabulary.
+ * ------------------------------------------------------------------------- */
+
+export const BACKFILL_STATUS: Record<string, { label: string; tone: Tone }> = {
+  PENDING: { label: 'Queued', tone: 'waiting' },
+  RUNNING: { label: 'Running', tone: 'info' },
+  COMPLETED: { label: 'Completed', tone: 'ok' },
+  CANCEL_REQUESTED: { label: 'Stopping', tone: 'waiting' },
+  CANCELLED: { label: 'Cancelled', tone: 'neutral' },
+  FAILED: { label: 'Failed', tone: 'error' },
+  BLOCKED_LEGACY_QA_ACTIVE: { label: 'Blocked — legacy QA active', tone: 'error' },
+}
+
+export function backfillStatus(value?: string | null) {
+  return BACKFILL_STATUS[value || ''] || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export const BACKFILL_DAY_STATUS: Record<string, { label: string; tone: Tone }> = {
+  PENDING: { label: 'Not started', tone: 'quiet' },
+  COMPLETED: { label: 'Done', tone: 'ok' },
+  FAILED: { label: 'Failed', tone: 'error' },
+  SKIPPED_CANCELLED: { label: 'Skipped', tone: 'neutral' },
+  DEFERRED_CYCLE_BUSY: { label: 'Deferred', tone: 'waiting' },
+}
+
+export function backfillDayStatus(value?: string | null) {
+  return BACKFILL_DAY_STATUS[value || ''] || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export const BACKFILL_MODE: Record<string, string> = {
+  PREVIEW: 'Preview',
+  EXECUTE: 'Backfill',
+}

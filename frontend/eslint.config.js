@@ -14,6 +14,9 @@ export default tseslint.config(
         localStorage: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
+        // Polling, used only while a backfill run is in flight.
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
         // DOM types used by the Operations Console's form handlers. Declared
         // one by one, like the rest of this list, rather than switching the
         // whole config to `globals.browser` - the short list is a useful

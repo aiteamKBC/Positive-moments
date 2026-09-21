@@ -125,6 +125,9 @@ function timeOf(row: LectureRow) {
       lede="Pipeline health, exceptions and guarded actions for one Kent Business College teaching day."
     >
       <template #actions>
+        <RouterLink class="btn-secondary" :to="{ name: 'operations-backfill' }">
+          <AppIcon name="calendar" :size="16" /> Historical backfill
+        </RouterLink>
         <RouterLink class="btn-secondary" :to="{ name: 'operations-runs' }">
           <AppIcon name="clock" :size="16" /> Run history
         </RouterLink>

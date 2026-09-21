@@ -7,7 +7,7 @@ there is no route here that will perform an action named by the caller.
 """
 from django.urls import path
 
-from . import actions, views
+from . import actions, backfill_views, views
 
 urlpatterns = [
     path("day/", views.day_view, name="operations-day"),
@@ -41,4 +41,18 @@ urlpatterns = [
     path("lectures/<uuid:lecture_id>/recover-attendance/",
          actions.recover_attendance_view, name="operations-recover-attendance"),
     path("reconcile/", actions.reconcile_view, name="operations-reconcile"),
+
+    # --- QA Core RC2: Operations Backfill ---------------------------------
+    # Both POSTs queue a durable run and return immediately; the
+    # `backfill-runner` service does the work. See backfill_views.py.
+    path("backfills/", backfill_views.backfill_list_view,
+         name="operations-backfills"),
+    path("backfills/preview/", backfill_views.backfill_preview_view,
+         name="operations-backfill-preview"),
+    path("backfills/start/", backfill_views.backfill_start_view,
+         name="operations-backfill-start"),
+    path("backfills/<uuid:run_id>/", backfill_views.backfill_detail_view,
+         name="operations-backfill-detail"),
+    path("backfills/<uuid:run_id>/cancel/", backfill_views.backfill_cancel_view,
+         name="operations-backfill-cancel"),
 ]

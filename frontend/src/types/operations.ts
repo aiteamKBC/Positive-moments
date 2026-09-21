@@ -326,3 +326,85 @@ export interface MediaJobsResponse {
   }
   jobs: MediaJob[]
 }
+
+/* ---------------------------------------------------------------------------
+ * QA Core RC2: Operations Backfill.
+ *
+ * A backfill is a durable RUN, not a request/response: one September day costs
+ * seconds of Microsoft Graph, so both Preview and Start queue work and the
+ * console polls. `mode` is what distinguishes a read-only inspection from a
+ * real recovery; everything else about the two is identical.
+ * ------------------------------------------------------------------------- */
+
+export type BackfillMode = 'PREVIEW' | 'EXECUTE'
+
+export type BackfillStatus =
+  | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'CANCEL_REQUESTED'
+  | 'CANCELLED' | 'FAILED' | 'BLOCKED_LEGACY_QA_ACTIVE'
+
+export interface BackfillRun {
+  backfill_run_id: string
+  requested_from: string
+  requested_to: string
+  status: BackfillStatus
+  mode: BackfillMode
+  created_by: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  current_business_date: string | null
+  current_lecture_id: string | null
+  current_lecture_label: string | null
+  total_days: number
+  completed_days: number
+  progress_percent: number
+  is_finished: boolean
+  discovered_count: number
+  matched_count: number
+  processed_count: number
+  already_complete_count: number
+  waiting_count: number
+  review_required_count: number
+  failed_count: number
+  suppressed_count: number
+  cancel_requested: boolean
+  error_summary: string | null
+  runner_version: string | null
+  heartbeat_at: string | null
+  updated_at: string
+}
+
+export interface BackfillDay {
+  business_date: string
+  status: 'PENDING' | 'COMPLETED' | 'FAILED' | 'SKIPPED_CANCELLED' | 'DEFERRED_CYCLE_BUSY'
+  pipeline_run_id: string | null
+  calendar_events_considered: number
+  matched_lectures: number
+  newly_discovered: number
+  already_complete: number
+  processed: number
+  waiting: number
+  review_required: number
+  failed: number
+  suppressed: number
+  graph_calls: number
+  provider_calls: number
+  error_code: string | null
+  error_message: string | null
+  duration_ms: number | null
+}
+
+export interface BackfillListResponse {
+  backfill_runs: BackfillRun[]
+  active: BackfillRun | null
+}
+
+export interface BackfillDetailResponse {
+  backfill_run: BackfillRun
+  days: BackfillDay[]
+}
+
+export interface BackfillCreatedResponse {
+  backfill_run: BackfillRun
+  detail: string
+}

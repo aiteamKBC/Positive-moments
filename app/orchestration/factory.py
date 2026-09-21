@@ -149,3 +149,57 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
         operations=build_operations(
             perfect_eligibility_version=perfect_eligibility_version),
         orchestrator_factory=orchestrator_factory)
+
+
+# ---------------------------------------------------------------------------
+# QA Core RC2: Operations Backfill
+# ---------------------------------------------------------------------------
+
+def build_backfill_preview(settings, *, discover: bool = True,
+                           perfect_eligibility_version=None):
+    """
+    The read-only preview service.
+
+    `probe=True` on the resolver is the same setting a dry run uses: it lets
+    attendance report what it WOULD find without claiming a source it has not
+    established. The preflight is `required=False` because a preview writes
+    nothing, so an active legacy path is information to display, not a refusal.
+
+    Discovery here is the production `LectureDiscoveryService`, called later
+    with `persist=False`.
+    """
+    from app.orchestration.backfill import BackfillPreviewService
+
+    return BackfillPreviewService(
+        resolver=build_resolver(
+            probe=True, perfect_eligibility_version=perfect_eligibility_version),
+        discovery_service=build_discovery_service(settings) if discover else None,
+        preflight=LegacyQaPreflight(
+            gateway=N8nReadOnlyGateway.from_environment(), required=False))
+
+
+def build_backfill_runner(settings, *, connection_factory,
+                          aptem_connection_factory=None,
+                          readonly_connection_factory=None,
+                          perfect_eligibility_version=None):
+    """
+    The write-capable runner.
+
+    It is handed a FULL production orchestrator - real run repository, real
+    per-lecture locks, real cycle lock, required n8n preflight, discovery on.
+    Backfill gets no privileged variant of the pipeline, and there is no
+    parameter here that could grant it one.
+    """
+    from app.orchestration.backfill import BackfillRunner
+
+    orchestrator = build_orchestrator(
+        settings, dry_run=False, discover=True,
+        perfect_eligibility_version=perfect_eligibility_version)
+    return BackfillRunner(
+        orchestrator=orchestrator,
+        connection_factory=connection_factory,
+        readonly_connection_factory=readonly_connection_factory,
+        aptem_connection_factory=aptem_connection_factory,
+        # The same runner handles PREVIEW runs, on a read-only connection.
+        preview_service=build_backfill_preview(
+            settings, perfect_eligibility_version=perfect_eligibility_version))

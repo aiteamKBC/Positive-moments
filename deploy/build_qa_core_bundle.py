@@ -25,7 +25,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BUNDLE = ROOT / "release" / "qa-core-rc1"
+# Bumped per release candidate. rc2 adds Operations Backfill.
+RELEASE = "qa-core-rc2"
+BUNDLE = ROOT / "release" / RELEASE
 
 # Directory trees the release needs, copied whole minus the excluded names.
 TREES = [
