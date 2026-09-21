@@ -1,0 +1,5 @@
+{
+  "_comment": "SharePoint destination for positive clips. These are Graph drive/folder identifiers, not secrets and not credentials. They match the destination validated by media job 1.",
+  "destination_drive_id": "b!LFZfPWY8zUqJT5VJBpJaixK3HVeVOmRBl-phFea2D7PGUfqI9A7GRLLkl72Tl18k",
+  "destination_folder_item_id": "01AB3I7CD6K7VTCEXEMJAZ5GEQKCF6HDGG"
+}

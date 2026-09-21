@@ -1,0 +1,11 @@
+# Local worker secret - never commit.
+.env
+
+# Runtime state, heartbeat and temporary media output.
+data/
+*.mp4
+*.mkv
+*.tmp
+*.log
+
+node_modules/

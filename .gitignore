@@ -1,12 +1,104 @@
-.venv/
-backend/.env
-backend/db.sqlite3
-backend/.pytest_cache/
-backend/**/__pycache__/
-frontend/node_modules/
-frontend/dist/
-frontend/.env.local
-*.py[cod]
-*.log
-.DS_Store
+# ===========================================================================
+# KBC Lecture Intelligence Platform
+#
+# This is a PRIVATE repository, but "private" is not a secrets policy. Rules
+# here are global patterns rather than specific paths, because the previous
+# version ignored `backend/.env` yet would happily have committed a root
+# `.env`, a `frontend/.env`, a stray `.pem` or a dropped `id_rsa`.
+# ===========================================================================
 
+# --- secrets ---------------------------------------------------------------
+# Every .env at any depth, in any directory. `.env.example` and the deployment
+# template are re-included below because they carry NAMES ONLY.
+.env
+.env.*
+*.env
+!.env.example
+!*.env.example
+!*.env.template
+
+# Keys, certificates and credential files, wherever they land.
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.credentials.json
+service-account*.json
+secrets.json
+secrets.yaml
+secrets.yml
+
+# --- Python ----------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# --- Node / frontend -------------------------------------------------------
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+
+# --- local databases -------------------------------------------------------
+*.sqlite3
+*.sqlite
+*.db
+
+# --- media -----------------------------------------------------------------
+# Recordings, trims, diagnostic clips and FFmpeg scratch. Individual files here
+# reach hundreds of megabytes and none of them belongs in git.
+*.mp4
+*.mkv
+*.mov
+*.webm
+*.m4a
+*.wav
+*.avi
+*.ts.tmp
+output/
+services/kbc-media-worker/data/
+
+# --- build artefacts -------------------------------------------------------
+# `release/` is generated: `python deploy/build_qa_core_bundle.py` recreates it
+# from the tree on demand and the build is deterministic (two runs produce an
+# identical sha256). Committing it would put a SECOND copy of the whole
+# application in the repository, which goes stale the moment `app/` changes -
+# and a stale second copy is exactly how somebody deploys the wrong code.
+#
+# The validated release is identified by the git tag `qa-core-rc1`, not by a
+# directory. See DEPLOYMENT_HANDOFF.md.
+release/
+build/
+dist/
+
+# --- logs and local runtime ------------------------------------------------
+*.log
+logs/
+
+# --- editors and agent scratchpads -----------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+.codex/
+.cursor/
+*.swp
+*~

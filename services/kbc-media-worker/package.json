@@ -1,0 +1,15 @@
+{
+  "name": "kbc-media-worker",
+  "version": "1.1.0",
+  "private": true,
+  "description": "KBC FFmpeg media worker. Pulls media jobs from n8n, cuts clips with FFmpeg and uploads them to SharePoint via Microsoft Graph resumable upload.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/worker.js",
+    "config-check": "node src/config-check.js",
+    "healthcheck": "node src/healthcheck.js"
+  }
+}

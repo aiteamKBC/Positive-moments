@@ -1,0 +1,2012 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -5104,
+        5792
+      ],
+      "id": "98c1983a-2f3c-41d4-aa25-0bcffacc1d5e",
+      "name": "When Executed by QA Master"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and normalize the lecture supplied by QA Master.\nconst src = items[0]?.json || {};\n\nconst meetingId = String(src.meetingId || '').trim();\nconst module = String(src.module || '').trim();\nconst subject = String(src.subject || module).trim();\nconst scheduledStart = String(src.scheduledStart || '').trim();\nconst scheduledEnd = String(src.scheduledEnd || '').trim();\nconst targetDate = String(src.targetDate || scheduledStart.slice(0, 10)).trim();\n\nconst missing = [];\nif (!meetingId) missing.push('meetingId');\nif (!module) missing.push('module');\nif (!targetDate) missing.push('targetDate');\nif (!scheduledStart) missing.push('scheduledStart');\nif (!scheduledEnd) missing.push('scheduledEnd');\nif (missing.length) {\n  throw new Error('QA One Lecture missing required input(s): ' + missing.join(', '));\n}\n\nreturn [{\n  json: {\n    meetingId,\n    module,\n    subject,\n    targetDate,\n    scheduledStart,\n    scheduledEnd\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4880,
+        5792
+      ],
+      "id": "8cc7ec58-c48a-4e1a-b57e-0eaa62310044",
+      "name": "Lecture Input"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: { module: $items(\"Lecture Input\")[0].json.module } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2784,
+        5600
+      ],
+      "id": "edb3de91-8cf0-4055-8723-cfbc574e7fab",
+      "name": "Lecture Module"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH p AS (\n  SELECT\n    '{{ $json.module.replace(/'/g, \"''\") }}'::text AS module_raw,\n    lower(\n      trim(\n        regexp_replace(\n          replace(\n            '{{ $json.module.replace(/'/g, \"''\") }}',\n            '&amp;',\n            '&'\n          ),\n          '\\s+',\n          ' ',\n          'g'\n        )\n      )\n    ) AS module_norm\n),\nfiltered AS (\n  SELECT k.*\n  FROM public.kbc_users_data k\n  CROSS JOIN p\n  WHERE\n    lower(\n      trim(\n        regexp_replace(\n          replace(coalesce(k.\"Group\", ''), '&amp;', '&'),\n          '\\s+',\n          ' ',\n          'g'\n        )\n      )\n    ) = p.module_norm\n    AND lower(coalesce(k.\"Program-Status\", '')) = 'active'\n  ORDER BY k.\"FullName\"\n  LIMIT 500\n),\npairs AS (\n  SELECT DISTINCT\n    f.\"ID\"::int AS id,\n    f.\"FullName\" AS full_name\n  FROM filtered f\n  WHERE f.\"ID\" IS NOT NULL\n    AND f.\"FullName\" IS NOT NULL\n    AND btrim(f.\"FullName\") <> ''\n),\nagg AS (\n  SELECT\n    COALESCE(\n      jsonb_agg(\n        jsonb_build_object('ID', id, 'FullName', full_name)\n        ORDER BY full_name\n      ),\n      '[]'::jsonb\n    ) AS students_arr,\n    COUNT(*)::int AS students_count\n  FROM pairs\n)\nSELECT\n  (SELECT module_raw FROM p) AS lms_module,\n  jsonb_build_object('students', agg.students_arr) AS lms_students,\n  agg.students_count AS lms_students_count\nFROM agg;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2432,
+        5600
+      ],
+      "id": "907ddbcd-9f1a-44f7-84e4-2a6c5887cd2f",
+      "name": "Get LMS Students",
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2a15fa35-07fc-460b-a039-1e25f2f5f174",
+              "leftValue": "={{ $json.durationMinutes < 20 }}",
+              "rightValue": "=15",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -3152,
+        6176
+      ],
+      "id": "67cba0a2-bf0c-4b29-9cc3-2bdbfe62ad36",
+      "name": "Session Delivered?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine multiple Microsoft VTT transcript parts\n// while preserving their correct chronological offsets.\n//\n// Run Once for All Items.\n\nif (!items || items.length === 0) {\n  return [];\n}\n\nconst selectedMetadata =\n  $items(\"Select Transcript Parts\") || [];\n\nfunction getText(item) {\n  return String(\n    item?.json?.data ??\n    item?.json?.body ??\n    item?.json?.transcriptText ??\n    item?.json?.text ??\n    ''\n  );\n}\n\nfunction getPairedIndex(item, fallbackIndex) {\n  const paired = item?.pairedItem;\n\n  if (Array.isArray(paired)) {\n    const firstIndex = paired[0]?.item;\n\n    return Number.isInteger(firstIndex)\n      ? firstIndex\n      : fallbackIndex;\n  }\n\n  if (\n    paired &&\n    Number.isInteger(paired.item)\n  ) {\n    return paired.item;\n  }\n\n  return fallbackIndex;\n}\n\nfunction stripWebvttHeader(value) {\n  return String(value || '')\n    .replace(\n      /^\\uFEFF?\\s*WEBVTT[^\\r\\n]*(?:\\r?\\n)+/i,\n      ''\n    )\n    .trim();\n}\n\nfunction timestampToMs(\n  hours,\n  minutes,\n  seconds,\n  milliseconds\n) {\n  return (\n    (\n      (\n        Number(hours) * 60 +\n        Number(minutes)\n      ) * 60 +\n      Number(seconds)\n    ) * 1000 +\n    Number(milliseconds)\n  );\n}\n\nfunction formatTimestamp(totalMs) {\n  const safeMs =\n    Math.max(0, Math.round(totalMs));\n\n  const hours =\n    Math.floor(safeMs / 3600000);\n\n  const minutes =\n    Math.floor(\n      (safeMs % 3600000) / 60000\n    );\n\n  const seconds =\n    Math.floor(\n      (safeMs % 60000) / 1000\n    );\n\n  const milliseconds =\n    safeMs % 1000;\n\n  return (\n    String(hours).padStart(2, '0') +\n    ':' +\n    String(minutes).padStart(2, '0') +\n    ':' +\n    String(seconds).padStart(2, '0') +\n    '.' +\n    String(milliseconds).padStart(3, '0')\n  );\n}\n\nfunction shiftVttTimestamps(vtt, offsetMs) {\n  const body =\n    stripWebvttHeader(vtt);\n\n  const timingRegex =\n    /(\\d{2,}):(\\d{2}):(\\d{2})[.,](\\d{3})(\\s*-->\\s*)(\\d{2,}):(\\d{2}):(\\d{2})[.,](\\d{3})/g;\n\n  return body.replace(\n    timingRegex,\n    (\n      match,\n      startHour,\n      startMinute,\n      startSecond,\n      startMillisecond,\n      arrow,\n      endHour,\n      endMinute,\n      endSecond,\n      endMillisecond\n    ) => {\n      const originalStartMs =\n        timestampToMs(\n          startHour,\n          startMinute,\n          startSecond,\n          startMillisecond\n        );\n\n      const originalEndMs =\n        timestampToMs(\n          endHour,\n          endMinute,\n          endSecond,\n          endMillisecond\n        );\n\n      return (\n        formatTimestamp(\n          originalStartMs + offsetMs\n        ) +\n        arrow +\n        formatTimestamp(\n          originalEndMs + offsetMs\n        )\n      );\n    }\n  );\n}\n\nfunction scanVttRangeMs(vtt) {\n  const timingRegex =\n    /(\\d{2,}):(\\d{2}):(\\d{2})[.,](\\d{3})\\s*-->\\s*(\\d{2,}):(\\d{2}):(\\d{2})[.,](\\d{3})/g;\n\n  let minimumMs =\n    Number.POSITIVE_INFINITY;\n\n  let maximumMs = 0;\n  let match;\n\n  while ((match = timingRegex.exec(vtt))) {\n    const startMs =\n      timestampToMs(\n        match[1],\n        match[2],\n        match[3],\n        match[4]\n      );\n\n    const endMs =\n      timestampToMs(\n        match[5],\n        match[6],\n        match[7],\n        match[8]\n      );\n\n    minimumMs =\n      Math.min(minimumMs, startMs);\n\n    maximumMs =\n      Math.max(maximumMs, endMs);\n  }\n\n  if (\n    minimumMs === Number.POSITIVE_INFINITY\n  ) {\n    return {\n      min: null,\n      max: null\n    };\n  }\n\n  return {\n    min: minimumMs,\n    max: maximumMs\n  };\n}\n\n\n// ---------------------------------------------------------\n// Match downloaded VTT items to Select Transcript Parts\n// ---------------------------------------------------------\n\nconst parts = items.map((item, itemIndex) => {\n  const sourceIndex =\n    getPairedIndex(item, itemIndex);\n\n  const metadata =\n    selectedMetadata[sourceIndex]?.json ||\n    selectedMetadata[itemIndex]?.json ||\n    {};\n\n  const text =\n    getText(item);\n\n  const partCreatedDateTime =\n    metadata.partCreatedDateTime ||\n    metadata.createdDateTime ||\n    null;\n\n  const partCreatedMs =\n    Date.parse(partCreatedDateTime);\n\n  return {\n    text,\n    metadata,\n    partCreatedMs:\n      Number.isFinite(partCreatedMs)\n        ? partCreatedMs\n        : null\n  };\n});\n\nconst validParts = parts.filter(part => {\n  return (\n    part.text.trim().length > 0 &&\n    Number.isFinite(part.partCreatedMs)\n  );\n});\n\nif (!validParts.length) {\n  throw new Error(\n    'No valid transcript parts were downloaded'\n  );\n}\n\n\n// ---------------------------------------------------------\n// Sort by the real Microsoft transcript start time\n// ---------------------------------------------------------\n\nvalidParts.sort((a, b) => {\n  return a.partCreatedMs - b.partCreatedMs;\n});\n\nconst sessionStartMs = Math.min(\n  ...validParts.map(part => part.partCreatedMs)\n);\n\n\n// ---------------------------------------------------------\n// Shift each VTT part onto one continuous session timeline\n// ---------------------------------------------------------\n\nconst combinedSections =\n  validParts.map(part => {\n    const offsetMs =\n      part.partCreatedMs - sessionStartMs;\n\n    return shiftVttTimestamps(\n      part.text,\n      offsetMs\n    );\n  });\n\nconst combinedBody =\n  combinedSections\n    .filter(Boolean)\n    .join('\\n\\n');\n\nconst transcriptText =\n  `WEBVTT\\n\\n${combinedBody}`.trim();\n\nconst range =\n  scanVttRangeMs(transcriptText);\n\nconst durationMinutes =\n  range.min !== null &&\n  range.max !== null &&\n  range.max >= range.min\n    ? Math.round(\n        (range.max - range.min) / 60000\n      )\n    : null;\n\nif (\n  typeof durationMinutes !== 'number' ||\n  durationMinutes <= 0\n) {\n  throw new Error(\n    `Invalid combined transcript duration: ${durationMinutes}`\n  );\n}\n\nreturn [\n  {\n    json: {\n      durationMinutes,\n      transcriptText,\n\n      transcriptPartsSelected:\n        selectedMetadata.length,\n\n      transcriptPartsCombined:\n        validParts.length,\n\n      transcriptPartsFailed:\n        Math.max(\n          0,\n          selectedMetadata.length -\n          validParts.length\n        ),\n\n      transcriptCombined:\n        validParts.length > 1\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3616,
+        6256
+      ],
+      "id": "0efe1943-ec51-41b7-ae06-092d0692b2c9",
+      "name": "Combine Transcripts"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -3376,
+        6176
+      ],
+      "id": "7f795337-54a2-4993-8aaa-750a2752e7fa",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Select Transcript Parts V3\n// n8n Code node - Run Once for All Items\n//\n// IMPORTANT:\n// In THIS workflow, scheduledStart / scheduledEnd coming from QA Master\n// are already UTC timestamps even when they do NOT end with Z.\n//\n// Example:\n// 2026-08-07T08:00:00.0000000\n// means 08:00 UTC, NOT 08:00 Cairo.\n//\n// Microsoft Graph transcript timestamps already come as UTC with Z.\n\nconst TZ = 'Africa/Cairo';\n\nconst lecture = $items(\"Lecture Input\")[0]?.json || {};\n\nconst targetDate = String(lecture.targetDate || '').trim();\nconst scheduledStartRaw = String(lecture.scheduledStart || '').trim();\nconst scheduledEndRaw = String(lecture.scheduledEnd || '').trim();\nconst meetingId = String(lecture.meetingId || '').trim();\n\nconst transcripts = items[0]?.json?.value ?? [];\n\nif (!Array.isArray(transcripts) || transcripts.length === 0) {\n  return [];\n}\n\n\n// ---------------------------------------------------------\n// Parse scheduled timestamps as UTC\n// ---------------------------------------------------------\n\nfunction scheduledToUtcMs(value) {\n  if (!value) return null;\n\n  const s = String(value).trim();\n\n  // Already timezone-aware\n  if (\n    /Z$/i.test(s) ||\n    /[+-]\\d{2}:\\d{2}$/.test(s)\n  ) {\n    const ms = Date.parse(s);\n    return Number.isFinite(ms) ? ms : null;\n  }\n\n  // QA Master sends UTC without trailing Z.\n  //\n  // Also trim excessive fractional seconds because JS Date.parse\n  // is safest with milliseconds.\n  //\n  // Example:\n  // 2026-08-07T08:00:00.0000000\n  // ->\n  // 2026-08-07T08:00:00.000Z\n\n  let cleaned = s;\n\n  cleaned = cleaned.replace(\n    /\\.(\\d{3})\\d+/,\n    '.$1'\n  );\n\n  const ms = Date.parse(cleaned + 'Z');\n\n  return Number.isFinite(ms) ? ms : null;\n}\n\n\nconst scheduledStartMs =\n  scheduledToUtcMs(scheduledStartRaw);\n\nconst scheduledEndMs =\n  scheduledToUtcMs(scheduledEndRaw);\n\nif (\n  !Number.isFinite(scheduledStartMs) ||\n  !Number.isFinite(scheduledEndMs)\n) {\n  throw new Error(\n    `Invalid scheduled times. start=${scheduledStartRaw}, end=${scheduledEndRaw}`\n  );\n}\n\nif (scheduledEndMs <= scheduledStartMs) {\n  throw new Error(\n    `scheduledEnd must be after scheduledStart. start=${scheduledStartRaw}, end=${scheduledEndRaw}`\n  );\n}\n\nconst scheduledStartUtc =\n  new Date(scheduledStartMs).toISOString();\n\nconst scheduledEndUtc =\n  new Date(scheduledEndMs).toISOString();\n\n\n// ---------------------------------------------------------\n// Helper: get Cairo calendar date for Graph timestamp\n// ---------------------------------------------------------\n\nfunction getCairoDate(iso) {\n  const ms = Date.parse(iso);\n\n  if (!Number.isFinite(ms)) {\n    return null;\n  }\n\n  return new Intl.DateTimeFormat('en-CA', {\n    timeZone: TZ,\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit'\n  }).format(new Date(ms));\n}\n\n\n// ---------------------------------------------------------\n// Step 1: Same meeting + same target Cairo date\n// ---------------------------------------------------------\n\nconst sameDay = transcripts.filter(t => {\n  if (!t?.createdDateTime) {\n    return false;\n  }\n\n  // Safety check\n  if (\n    meetingId &&\n    t.meetingId &&\n    t.meetingId !== meetingId\n  ) {\n    return false;\n  }\n\n  const cairoDate =\n    getCairoDate(t.createdDateTime);\n\n  return cairoDate === targetDate;\n});\n\nif (!sameDay.length) {\n  return [];\n}\n\n\n// ---------------------------------------------------------\n// Step 2: Keep only transcripts near this occurrence\n//\n// Window:\n// 2 hours before scheduled start\n// 3 hours after scheduled end\n//\n// This avoids accidentally selecting another session.\n// ---------------------------------------------------------\n\nconst WINDOW_BEFORE_MS =\n  2 * 60 * 60 * 1000;\n\nconst WINDOW_AFTER_MS =\n  3 * 60 * 60 * 1000;\n\nconst candidates = sameDay.filter(t => {\n  const startMs =\n    Date.parse(t.createdDateTime);\n\n  const endMs =\n    Date.parse(\n      t.endDateTime ||\n      t.createdDateTime\n    );\n\n  if (\n    !Number.isFinite(startMs) ||\n    !Number.isFinite(endMs)\n  ) {\n    return false;\n  }\n\n  return (\n    endMs >=\n      scheduledStartMs - WINDOW_BEFORE_MS\n    &&\n    startMs <=\n      scheduledEndMs + WINDOW_AFTER_MS\n  );\n});\n\nif (!candidates.length) {\n  return [];\n}\n\n\n// ---------------------------------------------------------\n// Sort chronologically\n// ---------------------------------------------------------\n\ncandidates.sort((a, b) => {\n  return (\n    Date.parse(a.createdDateTime) -\n    Date.parse(b.createdDateTime)\n  );\n});\n\n\n// ---------------------------------------------------------\n// ---------------------------------------------------------\n// Step 3: Choose the main transcript intelligently\n//\n// Primary transcript:\n// - largest overlap with scheduled lecture\n// - then longest duration\n// - then closest start time\n// ---------------------------------------------------------\n\nconst preparedCandidates = candidates.map(t => {\n  const startMs = Date.parse(t.createdDateTime);\n\n  const parsedEndMs = Date.parse(\n    t.endDateTime || t.createdDateTime\n  );\n\n  const endMs =\n    Number.isFinite(parsedEndMs) && parsedEndMs >= startMs\n      ? parsedEndMs\n      : startMs;\n\n  const durationMs = Math.max(0, endMs - startMs);\n\n  const overlapMs = Math.max(\n    0,\n    Math.min(endMs, scheduledEndMs) -\n    Math.max(startMs, scheduledStartMs)\n  );\n\n  const startDistanceMs =\n    Math.abs(startMs - scheduledStartMs);\n\n  return {\n    transcript: t,\n    startMs,\n    endMs,\n    durationMs,\n    overlapMs,\n    startDistanceMs\n  };\n});\n\nconst rankedCandidates = [...preparedCandidates].sort((a, b) => {\n  // Prefer the transcript covering most of the scheduled lecture\n  if (b.overlapMs !== a.overlapMs) {\n    return b.overlapMs - a.overlapMs;\n  }\n\n  // Then prefer the longest transcript\n  if (b.durationMs !== a.durationMs) {\n    return b.durationMs - a.durationMs;\n  }\n\n  // Then prefer the one closest to scheduled start\n  return a.startDistanceMs - b.startDistanceMs;\n});\n\nconst primaryPart = rankedCandidates[0];\n\nif (!primaryPart) {\n  return [];\n}\n\n\n// ---------------------------------------------------------\n// Step 4: Attach nearby transcript parts\n//\n// Microsoft can generate a new callId when transcription\n// stops and starts again.\n//\n// Include a part when:\n// - it has the same callId as an already selected part, OR\n// - it is no more than 20 minutes from the selected timeline\n// ---------------------------------------------------------\n\nconst MAX_PART_GAP_MS =\n  20 * 60 * 1000;\n\nconst selectedParts = [primaryPart];\nconst selectedIds = new Set([\n  String(primaryPart.transcript.id || '')\n]);\n\nlet clusterStartMs = primaryPart.startMs;\nlet clusterEndMs = primaryPart.endMs;\n\nfunction distanceFromCluster(part) {\n  if (part.endMs < clusterStartMs) {\n    return clusterStartMs - part.endMs;\n  }\n\n  if (part.startMs > clusterEndMs) {\n    return part.startMs - clusterEndMs;\n  }\n\n  // Overlapping\n  return 0;\n}\n\nlet addedNewPart = true;\n\nwhile (addedNewPart) {\n  addedNewPart = false;\n\n  for (const part of preparedCandidates) {\n    const partId = String(part.transcript.id || '');\n\n    if (selectedIds.has(partId)) {\n      continue;\n    }\n\n    const partCallId =\n      part.transcript.callId || null;\n\n    const hasSameCallId =\n      Boolean(partCallId) &&\n      selectedParts.some(selectedPart =>\n        selectedPart.transcript.callId === partCallId\n      );\n\n    const gapMs =\n      distanceFromCluster(part);\n\n    const isTemporallyConnected =\n      gapMs <= MAX_PART_GAP_MS;\n\n    if (hasSameCallId || isTemporallyConnected) {\n      selectedParts.push(part);\n      selectedIds.add(partId);\n\n      clusterStartMs =\n        Math.min(clusterStartMs, part.startMs);\n\n      clusterEndMs =\n        Math.max(clusterEndMs, part.endMs);\n\n      addedNewPart = true;\n    }\n  }\n}\n\n\n// ---------------------------------------------------------\n// Sort selected parts chronologically\n// ---------------------------------------------------------\n\nselectedParts.sort((a, b) => {\n  return a.startMs - b.startMs;\n});\n\n\n// ---------------------------------------------------------\n// Session-level timing\n// ---------------------------------------------------------\n\nconst actualStartMs = Math.min(\n  ...selectedParts.map(part => part.startMs)\n);\n\nconst actualEndMs = Math.max(\n  ...selectedParts.map(part => part.endMs)\n);\n\nif (\n  !Number.isFinite(actualStartMs) ||\n  !Number.isFinite(actualEndMs)\n) {\n  throw new Error(\n    'Selected transcripts contain invalid timing metadata'\n  );\n}\n\nconst actualStartUtc =\n  new Date(actualStartMs).toISOString();\n\nconst actualEndUtc =\n  new Date(actualEndMs).toISOString();\n\n\n// ---------------------------------------------------------\n// Timing differences\n// ---------------------------------------------------------\n\nconst startDifferenceMinutes =\n  Math.round(\n    (actualStartMs - scheduledStartMs) /\n    60000\n  );\n\nconst endDifferenceMinutes =\n  Math.round(\n    (actualEndMs - scheduledEndMs) /\n    60000\n  );\n\nconst startStatus =\n  startDifferenceMinutes === 0\n    ? 'OnTime'\n    : startDifferenceMinutes < 0\n      ? 'Early'\n      : 'Late';\n\nconst endStatus =\n  endDifferenceMinutes === 0\n    ? 'OnTime'\n    : endDifferenceMinutes < 0\n      ? 'EarlyFinish'\n      : 'Overrun';\n\n\n// ---------------------------------------------------------\n// Primary identifiers\n//\n// transcriptId stays the primary transcript ID on every item.\n// transcriptPartId identifies the individual downloaded part.\n// ---------------------------------------------------------\n\nconst primaryTranscript =\n  primaryPart.transcript;\n\nconst primaryTranscriptId =\n  primaryTranscript.id || null;\n\nconst primaryCallId =\n  primaryTranscript.callId || null;\n\n\n// ---------------------------------------------------------\n// Output\n// ---------------------------------------------------------\n\nreturn selectedParts.map((part, index) => {\n  const t = part.transcript;\n\n  return {\n    json: {\n      meetingId,\n\n      // Stable session ID used downstream\n      transcriptId:\n        primaryTranscriptId,\n\n      primaryTranscriptId,\n\n      // ID and URL of this individual part\n      transcriptPartId:\n        t.id || null,\n\n      transcriptUrl:\n        t.transcriptContentUrl || null,\n\n      // Main session call\n      callId:\n        primaryCallId,\n\n      contentCorrelationId:\n        primaryTranscript.contentCorrelationId || null,\n\n      // Individual part metadata\n      partCallId:\n        t.callId || null,\n\n      partContentCorrelationId:\n        t.contentCorrelationId || null,\n\n      partCreatedDateTime:\n        t.createdDateTime,\n\n      partEndDateTime:\n        t.endDateTime || t.createdDateTime,\n\n      // Full combined session timing\n      createdDateTime:\n        actualStartUtc,\n\n      endDateTime:\n        actualEndUtc,\n\n      scheduledStartDateTime:\n        scheduledStartRaw,\n\n      scheduledEndDateTime:\n        scheduledEndRaw,\n\n      scheduledStartUtc,\n      scheduledEndUtc,\n\n      startDifferenceMinutes,\n\n      startDelayAbs:\n        Math.abs(startDifferenceMinutes),\n\n      startStatus,\n\n      endDifferenceMinutes,\n\n      endDifferenceAbs:\n        Math.abs(endDifferenceMinutes),\n\n      endStatus,\n\n      _isPrimary:\n        t.id === primaryTranscriptId,\n\n      _selectionMethod:\n        'primary_overlap_plus_nearby_parts',\n\n      _maximumPartGapMinutes:\n        MAX_PART_GAP_MS / 60000,\n\n      _partIndex:\n        index + 1,\n\n      _totalParts:\n        selectedParts.length\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4144,
+        6160
+      ],
+      "id": "3a4bde3c-d9d3-4ff8-8fd0-8a7e1ce15cc8",
+      "name": "Select Transcript Parts"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.transcriptUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "text/vtt"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3840,
+        6256
+      ],
+      "id": "5122ee5d-49a5-4e89-933b-6e563f5f8086",
+      "name": "Download Transcript Part",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.microsoft.com/v1.0/me/onlineMeetings/{{ $items(\"Lecture Input\")[0].json.meetingId }}/transcripts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4672,
+        6192
+      ],
+      "id": "2a29f16b-5398-45f9-b882-6faa3526d70e",
+      "name": "Get Transcripts",
+      "retryOnFail": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9d6b3ec6-94a7-43ce-8bdb-bcf720bca980",
+              "leftValue": "={{ Array.isArray($json.value) && $json.value.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -4464,
+        6192
+      ],
+      "id": "6eea5512-8b4a-45c8-8f2f-51c027a1047e",
+      "name": "V1 Transcript Found?",
+      "notesInFlow": true,
+      "notes": "Microsoft incident fallback: regular/private meetings normally continue from the true output. Empty v1 responses are retried against beta for channel meetings."
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.microsoft.com/beta/me/onlineMeetings/{{ $items(\"Lecture Input\")[0].json.meetingId }}/transcripts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3840,
+        6464
+      ],
+      "id": "3af26b23-2568-4cc3-85d0-646a00bfe325",
+      "name": "Get Channel Transcripts Beta Fallback",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "alwaysOutputData": true,
+      "notesInFlow": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Temporary fallback for the August 2026 Microsoft Graph channel-transcript regression. Keep v1 as the primary path."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Aggregate Attendees (v6 — DB-based)\n//\n// Source: \"Attendance (DB-based)\" subflow, which queries\n// public.kbc_attendance filtered by module + date + Attendance=1.\n//\n// The DB pipeline already deduped rows and excluded bots, so this\n// node mostly just shapes the output. We keep a bot filter and\n// dedup as safety nets in case dirty rows slip through.\n//\n// Output shape (unchanged so Sessions code keeps working):\n//   { meetingId, subject, date, attended_count, attendees[], _debug }\n// ============================================================\n\nconst targetMeetingId = items[0]?.json?.meetingId || null;\nconst targetDate      = items[0]?.json?.date      || null;\nconst subject         = items[0]?.json?.subject   || items[0]?.json?.module || null;\n\n// Bot / AI assistant filter (defense in depth)\nfunction isBot(name, email) {\n  const n = String(name  || '').toLowerCase();\n  const e = String(email || '').toLowerCase();\n  const patterns = [\n    'notetaker', 'otter.ai', 'otter ai', 'read.ai', 'read ai',\n    'fireflies', 'fathom', 'tldv', 'meeting bot', 'meeting notes',\n    'transcript bot', 'recording bot', 'zoom ai', 'copilot',\n    'teamsmaestro', 'teams maestro'\n  ];\n  return patterns.some(p => n.includes(p) || e.includes(p));\n}\n\nconst byPerson = new Map();\nlet droppedByEmpty  = 0;\nlet droppedByNoName = 0;\nlet droppedByBot    = 0;\n\nconst sampleDroppedEmpty = [];\n\nfor (const it of items) {\n  const j = it.json;\n\n  // Empty placeholder from subflow = DB returned no rows for this module/date\n  if (!j || j.empty) {\n    droppedByEmpty++;\n    if (sampleDroppedEmpty.length < 2) sampleDroppedEmpty.push(j);\n    continue;\n  }\n\n  if (!j.Name || !String(j.Name).trim()) {\n    droppedByNoName++;\n    continue;\n  }\n\n  if (isBot(j.Name, j.Email)) {\n    droppedByBot++;\n    continue;\n  }\n\n  // Dedup by name+email (belt-and-suspenders; DB is already deduped)\n  const key = `${String(j.Name).toLowerCase().trim()}|${String(j.Email || '').toLowerCase().trim()}`;\n  if (!byPerson.has(key)) {\n    byPerson.set(key, j);\n  }\n}\n\nconst attendees = [...byPerson.values()];\n\nreturn [{\n  json: {\n    meetingId: targetMeetingId,\n    subject,\n    date: targetDate,\n    attended_count: attendees.length,\n    attendees,\n    _debug: {\n      source: 'attendance_sub_via_db',\n      raw_rows_in: items.length,\n      target_meeting_id: targetMeetingId,\n      target_date: targetDate,\n      dropped_by_empty: droppedByEmpty,\n      dropped_by_no_name: droppedByNoName,\n      dropped_by_bot: droppedByBot,\n      final_count: attendees.length,\n      sample_dropped_empty: sampleDroppedEmpty\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4064,
+        5600
+      ],
+      "id": "02e40393-0106-4626-9328-d7a01ee7dcb0",
+      "name": "Aggregate Attendees"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "qe3vE6QflTZU7SMz",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/qe3vE6QflTZU7SMz",
+          "cachedResultName": "Attendance (DB-based)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "meetingId": "={{ $json.meetingId }}",
+            "module": "={{ $json.module }}",
+            "targetDate": "={{ $json.targetDate }}"
+          },
+          "matchingColumns": [
+            "meetingId"
+          ],
+          "schema": [
+            {
+              "id": "meetingId",
+              "displayName": "meetingId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "module",
+              "displayName": "module",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            },
+            {
+              "id": "targetDate",
+              "displayName": "targetDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -4288,
+        5600
+      ],
+      "id": "9b29ec90-e5c2-4af0-aefc-ebc60bd677c3",
+      "name": "Attendance Subflow"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "qa_doctors_checklist_items",
+          "mode": "list",
+          "cachedResultName": "qa_doctors_checklist_items"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "session_id_match": "={{ $json.session_id + \"_\" + $json.checklist_order }}",
+            "session_id": "={{ $json.session_id }}",
+            "checklist_item": "={{ $json.checklist_item }}",
+            "status": "={{ $json.status }}",
+            "checklist_order": "={{ $json.checklist_order }}",
+            "evidence": "={{\n  $json.evidence === \"No evidence found\"\n    ? ($json.reasoning || \"\")\n    : (\n        $json.evidence +\n        ($json.reasoning ? \"\\n\" + $json.reasoning : \"\")\n      )\n}}"
+          },
+          "matchingColumns": [
+            "session_id_match"
+          ],
+          "schema": [
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "session_id_match",
+              "displayName": "session_id_match",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "checklist_item",
+              "displayName": "checklist_item",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "checklist_order",
+              "displayName": "checklist_order",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "evidence",
+              "displayName": "evidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1984,
+        6096
+      ],
+      "id": "c96f6d33-37c9-4081-9350-fd9750849bc6",
+      "name": "Upsert QA Checklist Items",
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "qa_doctors_sessions",
+          "mode": "list",
+          "cachedResultName": "qa_doctors_sessions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "session_id": "={{ $json.session_id }}",
+            "not_met_count": "={{ $json.not_met_count }}",
+            "partial_count": "={{ $json.partial_count }}",
+            "met_count": "={{ $json.met_count }}",
+            "meeting_id": "={{ $json.meeting_id }}",
+            "trainer": "={{ $json.trainer }}",
+            "duration": "={{ $json.duration }}",
+            "Engagement": "={{ $json.Engagement }}",
+            "date": "={{ $json.date }}",
+            "subject": "={{ $json.subject }}",
+            "lms_students_count": "={{ $json.lms_students_count }}",
+            "lms_module": "={{ $json.lms_module }}",
+            "lms_students": "={{ $json.lms_students }}",
+            "duration_score": "={{ $json.duration_score }}",
+            "engagement_score": "={{ $json.engagement_score }}",
+            "ksb_coverage": "={{ $json.ksbs_covered }}",
+            "strengths": "={{ $json.ai_strengths }}",
+            "areas_for_development": "={{ $json.ai_areas_for_development }}",
+            "overall_judgement": "={{ $json.ai_overall_judgement }}",
+            "teaching_quality_rating": "={{ $json.teaching_quality_rating }}",
+            "teaching_quality_comments": "={{ $json.teaching_quality_comments }}",
+            "cancelled_session": "={{ $json.cancelled_session }}"
+          },
+          "matchingColumns": [
+            "session_id"
+          ],
+          "schema": [
+            {
+              "id": "session_id",
+              "displayName": "session_id",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "meeting_id",
+              "displayName": "meeting_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "trainer",
+              "displayName": "trainer",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "duration",
+              "displayName": "duration",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "met_count",
+              "displayName": "met_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "partial_count",
+              "displayName": "partial_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "not_met_count",
+              "displayName": "not_met_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "subject",
+              "displayName": "subject",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "Engagement",
+              "displayName": "Engagement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "lms_module",
+              "displayName": "lms_module",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "lms_students",
+              "displayName": "lms_students",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "lms_students_count",
+              "displayName": "lms_students_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "duration_score",
+              "displayName": "duration_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "engagement_score",
+              "displayName": "engagement_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "ksb_coverage",
+              "displayName": "ksb_coverage",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "strengths",
+              "displayName": "strengths",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "areas_for_development",
+              "displayName": "areas_for_development",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "overall_judgement",
+              "displayName": "overall_judgement",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "teaching_quality_rating",
+              "displayName": "teaching_quality_rating",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "teaching_quality_comments",
+              "displayName": "teaching_quality_comments",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            },
+            {
+              "id": "cancelled_session",
+              "displayName": "cancelled_session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1984,
+        5856
+      ],
+      "id": "0203f041-5bbc-4b43-a3d2-5a7bdb85fa6d",
+      "name": "Upsert QA Session",
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -2208,
+        5808
+      ],
+      "id": "bd840020-1e41-425d-b665-674af71948f4",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -2208,
+        6128
+      ],
+      "id": "b4a11808-474a-4202-8bda-de172dd28bd2",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=={{ \n`TRANSCRIPT:\n${$json.transcriptText || \"\"}\n\nMETADATA:\ntranscriptId: ${$json.transcriptId || \"\"}\nmeetingId: ${$json.meetingId || \"\"}\n\n\n\nsubject: ${$items(\"Lecture Input\")[0]?.json?.subject || \"\"}\n\nscheduledStartDateTime: ${$json.scheduledStartDateTime ?? \"\"}\ncreatedDateTime: ${$json.createdDateTime ?? \"\"}\nstartDifferenceMinutes : ${$json.startDifferenceMinutes ?? \"\"}\nstartStatus : ${$json.startStatus ?? \"\"}\n\nscheduledEndDateTime: ${$json.scheduledEndDateTime ?? \"\"}\nendDateTime: ${$json.endDateTime ?? \"\"}\nendDifferenceMinutes : ${$json.endDifferenceMinutes ?? \"\"}\nendStatus : ${$json.endStatus ?? \"\"}\n\ndurationMinutes: ${$json.durationMinutes ?? \"\"}\n\nKSB_Framework (optional):\n${$json.KSB_Framework || \"\"}`\n}}",
+        "hasOutputParser": true,
+        "options": {
+          "systemMessage": "=You are an educational QA evaluator focused on timestamped evidence selection.\n\nInput is a WebVTT transcript. You must only use timestamps that exist in transcript cues.\n\nCRITICAL OUTPUT REQUIREMENTS:\n- Return ONLY valid JSON.\n- Return exactly the following top level keys, no extra keys:\n  session_info, checklist_evaluation, overall_summary, ksbs_covered, teaching_quality\n- Never include any transcript text or quotes in the JSON, ONLY timestamps and optional speaker.\n- Always output ALL required keys even if values are empty arrays.\n- checklist_evaluation must contain exactly 11 items, in the exact order and exact item strings below.\n- evidence_clips arrays may be empty [], otherwise each clip must have start and end, speaker is optional.\n- Limit evidence_clips to maximum 3 clips per checklist item.\n- Limit strengths to maximum 6 items, areas_for_improvement to maximum 6 items.\n- Limit ksbs_covered to maximum 10 items.\n- teaching_quality evidence_clips maximum 3.\n- rating_1_5 must be a number between 1 and 5, if unsure use 3.\n\nTIMESTAMP FORMAT:\nHH:MM:SS.mmm exactly, example 00:05:12.345\n\nTASKS:\nA) Checklist evaluation (11 items):\nFor each item, decide status (Met, Partially Met, Not Met) using the leniency rules,\nand provide evidence_clips as time ranges only.\n\nB) Higher level QA insights (time ranges only):\n- overall_summary.strengths: each has title and evidence_clips\n- overall_summary.areas_for_improvement: each has title and evidence_clips\n- overall_summary.overall_judgement: short paragraph\n- ksbs_covered: each has type, title, evidence_clips\n- teaching_quality: rating_1_5, comments, evidence_clips\n\n\nEVIDENCE VALIDITY RULE (applies to all 11 items):\n- Do NOT choose a timestamp range unless the content inside that range clearly supports the checklist item.\n- Prefer ranges where the trainer is speaking about the criterion.\n- Learner speech is allowed as evidence ONLY if it directly demonstrates the trainer achieving the item, example:\n  learner answers after the trainer checks understanding, learner responds to a trainer prompt, learner asks a question that the trainer answers.\n- Never select a range that contains only learner speech for an item that is mainly about trainer performance.\n- Each evidence clip MUST have a duration of at least 2 seconds.\n- Never return identical start and end timestamps.\n\n\nITEM 1, SESSION DURATION (AUTHORITATIVE):\n- The value METADATA.durationMinutes is computed by code and is authoritative.\n- For checklist item 1, you MUST set the status using METADATA.durationMinutes ONLY.\n- Do NOT infer duration from transcript content.\n- If durationMinutes is not a valid number, set status = \"Not Met\" and evidence_clips = [].\n- Status thresholds:\n  - Met: durationMinutes >= 105\n  - Partially Met: 95 <= durationMinutes < 105\n  - Not Met: durationMinutes < 95\n  - If durationMinutes >= 105, the status MUST be Met.\nDo NOT use a 120-minute threshold.\n\n- For item 1 evidence_clips:\n  - If possible, include 1 clip that covers the whole session time range (first cue start to last cue end).\n  - Otherwise, return [].\n- reasoning MUST explicitly reference durationMinutes numerically.\n- evidence_clips must be [] because this item is metadata-authoritative.\nDo NOT repeat instruction text in the reasoning.\nOnly explain the numeric evaluation outcome.\n\nITEM 2, PUNCTUALITY (SESSION STARTS AND ENDS ON TIME): Judge this item using timing metadata only, not transcript text.\n\nInputs:\n- startDifferenceMinutes, where negative means the session started early and positive means it started late\n- endDifferenceMinutes, where negative means the session ended early and positive means it overran\n- durationMinutes\n\nDecision rule:\n- MET if:\n  - startDifferenceMinutes is 20 or less\n  - and endDifferenceMinutes is -20 or more\n\n- NOT MET if:\n  - startDifferenceMinutes is greater than 20\n  - or endDifferenceMinutes is less than -20\n  - or durationMinutes shows material truncation affecting session completeness\n\nImportant:\n- Starting early is always acceptable.\n- Ending late is always acceptable.\n- Only these two things count as punctuality failures:\n  - starting more than 20 minutes late\n  - ending more than 20 minutes early\n\nOutput requirements:\n- reasoning must explicitly mention the numeric values of startDifferenceMinutes and endDifferenceMinutes\n- evidence_clips must be []\n- reasoning must explain only the result for this session, not restate the full policy\n\n\nITEM 3, PROFESSIONAL DEMEANOUR (MAINTAINED THROUGHOUT THE SESSION):\n- Met unless the transcript explicitly shows unprofessional behaviour (disrespect, inappropriate language).\n- Partially Met only if there is a clear negative incident but professionalism is mostly maintained.\n- Not Met only if repeated or serious unprofessional conduct is evidenced.\n\n\nITEM 4, LEARNING OBJECTIVES (global definition):\n- \"Objectives\" means the trainer gives a clear purpose or learning direction, it does not have to be a formal objective statement.\n- Accept as Met if within the early part of the session the trainer does any of:\n  explains purpose, outlines what will be covered, frames the learning direction, links recap to what comes next, states what learners should understand or be able to do.\n- Do NOT mark Met purely because teaching content exists, there must be a signpost or learning direction statement.\n- Use Partially Met if the direction is only implied very late.\n- Use Not Met if there is no signposting anywhere.\n\n\nITEM 5, CONTENT ALIGNMENT (MATCHES THE CURRICULUM OR APPRENTICESHIP STANDARD):\n- Met if content is relevant to the subject area and consistent with typical curriculum expectations, even without naming a standard.\n- Partially Met if content is somewhat scattered but generally relevant.\n- Not Met only if content is clearly unrelated or off-topic.\n\n\nITEM 6, STRUCTURE AND PACING (WELL ORGANISED AND APPROPRIATELY TIMED):\n- Met if there is a logical flow or clear sequencing of topics, even with minor pacing issues.\n- Partially Met only if pacing or structure problems noticeably disrupt learning.\n- Not Met only if the session is clearly disorganised with no coherent structure.\n\n\nITEM 7, LEARNER ENGAGEMENT (EVIDENCE OF INTERACTION, QUESTIONS, AND ACTIVITIES):\n- Met if any interaction exists (questions, discussion, activities, prompts).\n- Partially Met if engagement is extremely limited (single brief exchange).\n- Not Met only if there is explicit evidence of no engagement at all.\n- NOTE: Code will override the final status and evidence for item 7 using attendance data (speakers / attended count). Your verdict here is a fallback used only when attendance data is unavailable.\n\n\nITEM 8, TEACHING METHODS AND RESOURCES (APPROPRIATE AND INCLUSIVE):\n- Met if appropriate methods or resources are used (slides, examples, discussions, activities, tools, LMS) even if inclusion or accessibility is not explicitly stated.\n- Partially Met only if methods or resources are minimal or unclear.\n- Not Met only if methods are inappropriate or none are evidenced.\n\n\nITEM 9, UNDERSTANDING CHECKS (CONDUCTED DURING THE SESSION):\n- Met if the trainer checks understanding in any form (questions, recap, \"does that make sense\", asking for confirmation).\n- Partially Met if checks are very minimal (for example only \"any questions\" once).\n- Not Met only if there is no evidence of any checking at all.\n\n\nITEM 10, REAL WORLD EXAMPLES (INCORPORATED INTO THE CONTENT):\n- Met if any real-world example, scenario, or workplace application is mentioned.\n- Partially Met if examples are extremely vague.\n- Not Met only if no examples are evidenced.\n\n\nITEM 11, NEXT STEPS (CLEAR FOLLOW UP ACTIVITIES COMMUNICATED):\n- Met if any follow-up is stated (homework, next topic, assessment prep, resources, workshops).\n- Partially Met if next steps are vague.\n- Not Met only if no next steps are evidenced.\n\n\n\n\nGLOBAL LENIENCY RULE:\nDefault to \"Met\" unless there is strong explicit evidence of failure.\nUse \"Partially Met\" only for meaningful shortcomings.\nUse \"Not Met\" rarely and only with clear evidence.\nDo NOT include reasoning for items 3–11\n\nCHECKLIST ITEMS (MUST MATCH EXACTLY):\n1) Session duration: Minimum of two hours  \n2) Punctuality: Session starts and ends on time \n3) Professional demeanor: Maintained throughout the session \n4) Learning objectives: Clearly explained at the beginning \n5) Content alignment: Matches the curriculum/ apprenticeship standard \n6) Structure and pacing: Session is well-organized and appropriately timed \n7) Learner engagement: Evidence of interaction, questions, and activities \n8) Teaching methods and resources: Appropriate and inclusive \n9) Understanding checks: Conducted during the session \n10) Real-world examples: Incorporated into the content  \n11) Next steps: Clear follow-up activities communicated\n\n\nJSON TEMPLATE (FOLLOW EXACTLY, KEEP SAME KEYS):\n{\n  \"session_info\": { \"trainer\": \"\", \"date\": \"\" },\n  \"checklist_evaluation\": [\n  { \"item\": \"1) Session duration: Minimum of two hours\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"2) Punctuality: Session starts and ends on time\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"3) Professional demeanor: Maintained throughout the session\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"4) Learning objectives: Clearly explained at the beginning\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"5) Content alignment: Matches the curriculum/ apprenticeship standard\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"6) Structure and pacing: Session is well-organized and appropriately timed\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"7) Learner engagement: Evidence of interaction, questions, and activities\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"8) Teaching methods and resources: Appropriate and inclusive\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"9) Understanding checks: Conducted during the session\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"10) Real-world examples: Incorporated into the content\", \"status\": \"Met\", \"evidence_clips\": [] },\n  { \"item\": \"11) Next steps: Clear follow-up activities communicated\", \"status\": \"Met\", \"evidence_clips\": [] }\n],\n  \"overall_summary\": {\n    \"strengths\": [],\n    \"areas_for_improvement\": [],\n    \"overall_judgement\": \"\"\n  },\n  \"ksbs_covered\": [],\n  \"teaching_quality\": { \"rating_1_5\": 3, \"comments\": \"\", \"evidence_clips\": [] }\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -2896,
+        6000
+      ],
+      "id": "23f5949b-1b70-4f8f-b068-a5f12961754e",
+      "name": "AI Teaching QA Combined",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4.1",
+          "mode": "list",
+          "cachedResultName": "gpt-4.1"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2720,
+        6432
+      ],
+      "id": "9cd582d5-a40f-4cc9-be63-b1d8aaa0c3d4",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "AFeN1Hg7YN1fHxK4",
+          "name": "QA Doctor's Transcript"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"required\": [\"session_info\", \"checklist_evaluation\", \"overall_summary\", \"ksbs_covered\", \"teaching_quality\"],\n  \"additionalProperties\": false,\n  \"properties\": {\n    \"session_info\": {\n      \"type\": \"object\",\n      \"required\": [\"trainer\", \"date\"],\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"trainer\": { \"type\": \"string\" },\n        \"date\": { \"type\": \"string\" }\n      }\n    },\n    \"checklist_evaluation\": {\n      \"type\": \"array\",\n      \"minItems\": 11,\n      \"maxItems\": 11,\n      \"items\": {\n        \"type\": \"object\",\n        \"required\": [\"item\", \"status\", \"evidence_clips\"],\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"item\": { \"type\": \"string\" },\n          \"status\": { \"type\": \"string\", \"enum\": [\"Met\", \"Partially Met\", \"Not Met\"] },\n          \"evidence_clips\": {\n            \"type\": \"array\",\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"object\",\n              \"required\": [\"start\", \"end\"],\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"start\": { \"type\": \"string\" },\n                \"end\": { \"type\": \"string\" },\n                \"speaker\": { \"type\": \"string\" }\n              }\n            }\n          },\n          \"reasoning\": { \"type\": \"string\" }\n        }\n      }\n    },\n    \"overall_summary\": {\n      \"type\": \"object\",\n      \"required\": [\"strengths\", \"areas_for_improvement\", \"overall_judgement\"],\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"strengths\": {\n          \"type\": \"array\",\n          \"maxItems\": 6,\n          \"items\": {\n            \"type\": \"object\",\n            \"required\": [\"title\", \"evidence_clips\"],\n            \"additionalProperties\": false,\n            \"properties\": {\n              \"title\": { \"type\": \"string\" },\n              \"evidence_clips\": {\n                \"type\": \"array\",\n                \"maxItems\": 3,\n                \"items\": {\n                  \"type\": \"object\",\n                  \"required\": [\"start\", \"end\"],\n                  \"additionalProperties\": false,\n                  \"properties\": {\n                    \"start\": { \"type\": \"string\" },\n                    \"end\": { \"type\": \"string\" },\n                    \"speaker\": { \"type\": \"string\" }\n                  }\n                }\n              }\n            }\n          }\n        },\n        \"areas_for_improvement\": {\n          \"type\": \"array\",\n          \"maxItems\": 6,\n          \"items\": {\n            \"type\": \"object\",\n            \"required\": [\"title\", \"evidence_clips\"],\n            \"additionalProperties\": false,\n            \"properties\": {\n              \"title\": { \"type\": \"string\" },\n              \"evidence_clips\": {\n                \"type\": \"array\",\n                \"maxItems\": 3,\n                \"items\": {\n                  \"type\": \"object\",\n                  \"required\": [\"start\", \"end\"],\n                  \"additionalProperties\": false,\n                  \"properties\": {\n                    \"start\": { \"type\": \"string\" },\n                    \"end\": { \"type\": \"string\" },\n                    \"speaker\": { \"type\": \"string\" }\n                  }\n                }\n              }\n            }\n          }\n        },\n        \"overall_judgement\": { \"type\": \"string\" }\n      }\n    },\n    \"ksbs_covered\": {\n      \"type\": \"array\",\n      \"maxItems\": 10,\n      \"items\": {\n        \"type\": \"object\",\n        \"required\": [\"type\", \"title\", \"evidence_clips\"],\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"type\": { \"type\": \"string\", \"enum\": [\"Knowledge\", \"Skill\", \"Behaviour\"] },\n          \"title\": { \"type\": \"string\" },\n          \"evidence_clips\": {\n            \"type\": \"array\",\n            \"maxItems\": 3,\n            \"items\": {\n              \"type\": \"object\",\n              \"required\": [\"start\", \"end\"],\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"start\": { \"type\": \"string\" },\n                \"end\": { \"type\": \"string\" },\n                \"speaker\": { \"type\": \"string\" }\n              }\n            }\n          }\n        }\n      }\n    },\n    \"teaching_quality\": {\n      \"type\": \"object\",\n      \"required\": [\"rating_1_5\", \"comments\", \"evidence_clips\"],\n      \"additionalProperties\": false,\n      \"properties\": {\n        \"rating_1_5\": { \"type\": \"number\", \"minimum\": 1, \"maximum\": 5 },\n        \"comments\": { \"type\": \"string\" },\n        \"evidence_clips\": {\n          \"type\": \"array\",\n          \"maxItems\": 3,\n          \"items\": {\n            \"type\": \"object\",\n            \"required\": [\"start\", \"end\"],\n            \"additionalProperties\": false,\n            \"properties\": {\n              \"start\": { \"type\": \"string\" },\n              \"end\": { \"type\": \"string\" },\n              \"speaker\": { \"type\": \"string\" }\n            }\n          }\n        }\n      }\n    }\n  }\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        -2800,
+        6224
+      ],
+      "id": "61d3bb27-a0be-4932-a46d-147256810224",
+      "name": "Combined Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5.2",
+          "mode": "list",
+          "cachedResultName": "gpt-5.2"
+        },
+        "builtInTools": {},
+        "options": {
+          "textFormat": {
+            "textOptions": {
+              "type": "text"
+            }
+          }
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -2960,
+        6336
+      ],
+      "id": "c201534a-5ba4-4e44-9bb0-0034cbc47279",
+      "name": "OpenAI Chat Model (Combined)",
+      "credentials": {
+        "openAiApi": {
+          "id": "AFeN1Hg7YN1fHxK4",
+          "name": "QA Doctor's Transcript"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const input = {\n  ...$json,\n  session_id: $json.transcriptId || \"\",\n  meeting_id: $json.meetingId || \"\",\n  subject: $items(\"Lecture Input\")[0]?.json?.subject || \"\",\n  trainer: \"Session not delivered\"\n};\n\nconst checklistItems = [\n  \"1) Session duration: Minimum of two hours\",\n  \"2) Punctuality: Session starts and ends on time\",\n  \"3) Professional demeanor: Maintained throughout the session\",\n  \"4) Learning objectives: Clearly explained at the beginning\",\n  \"5) Content alignment: Matches the curriculum/ apprenticeship standard\",\n  \"6) Structure and pacing: Session is well-organized and appropriately timed\",\n  \"7) Learner engagement: Evidence of interaction, questions, and activities\",\n  \"8) Teaching methods and resources: Appropriate and inclusive\",\n  \"9) Understanding checks: Conducted during the session\",\n  \"10) Real-world examples: Incorporated into the content\",\n  \"11) Next steps: Clear follow-up activities communicated\"\n];\n\nreturn checklistItems.map((item, i) => ({\n  json: {\n    session_id: input.session_id,\n    meeting_id: input.meeting_id,\n    subject: input.subject,\n    trainer: input.trainer,\n    date: input.createdDateTime || \"\",\n\n    cancelled_session: true,\n    met_count: 0, partial_count: 0, not_met_count: 11,\n    checklist_order: i + 1, checklist_item: item, status: \"Not Met\",\n    evidence: \"Session was cancelled or ended before delivery began.\",\n    overall_judgement: \"Session was cancelled or ended before delivery. No teaching, objectives, or engagement were provided.\",\n    teaching_quality_rating: 1,\n    teaching_quality_comments: \"Session cancelled or ended before teaching began.\",\n    Engagement: 0, duration: \"0 minutes\", duration_score: 0,\n    engaged_speakers_count: 0, engagement_score: 0,\n    ksb_coverage: {}, strengths: {}, areas_for_development: {},\n    ksbs_covered: {}, ai_strengths: {}, ai_overall_judgement: {}, ai_areas_for_development: {},\n    overall_judgement_ai: \"Cancelled session — QA metrics not applicable.\"\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2432,
+        6352
+      ],
+      "id": "d9cda1d6-07eb-4656-ab4b-4e86278f4bd1",
+      "name": "Cancelled Session Output"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Sessions code (v7 — enhanced name matching)\n//\n// CHANGE FROM v6:\n//   isSimilar() now has a second matching method that handles\n//   nicknames and shortened first names:\n//\n//     Method 1 (unchanged): full-string Levenshtein similarity ≥ 0.8\n//                           — catches typos, minor spelling differences\n//     Method 2 (NEW):        token-based subset match\n//                           — every token in the shorter name matches\n//                             some token in the longer name (exact,\n//                             or one is a prefix of the other with\n//                             both tokens ≥ 3 chars)\n//\n//   Handles: Chris ↔ Christopher, Nick ↔ Nicholas, Katie ↔ Katherine,\n//            Sam ↔ Samuel, Alex ↔ Alexander, Rob ↔ Robert, etc.\n//   Also handles: \"Ali\" (attendance) ↔ \"Ali Mohamedin\" (VTT),\n//                 \"Nathan\" ↔ \"Nathan Shields\", etc.\n//\n//   Does NOT match: John Doe ↔ John Smith (different last names).\n//\n// Everything else is identical to v6.\n// ============================================================\n\nlet raw = $json;\nif (raw?.data) raw = raw.data;\nif (raw?.output) raw = raw.output;\nif (typeof raw === \"string\") raw = JSON.parse(raw);\n\nconst data = raw;\nif (!data?.checklist_evaluation) throw new Error(\"AI checklist_evaluation missing\");\n\nconst baseSession = $items(\"Merge\")[0]?.json;\nif (!baseSession) throw new Error(\"Base session missing (Merge)\");\n\nconst transcriptText = baseSession.transcriptText;\nif (!transcriptText) throw new Error(\"transcriptText missing\");\n\nconst lectureRow = $items(\"Lecture Input\")[0]?.json || {};\nconst subject = lectureRow.subject ?? lectureRow.Subject ?? \"\";\n\nconst durationMinutes = $items(\"Combine Transcripts\")[0]?.json?.durationMinutes;\nif (typeof durationMinutes !== \"number\" || durationMinutes <= 0) {\n  throw new Error(\"Invalid durationMinutes\");\n}\n\nconst hours = Math.floor(durationMinutes / 60);\nconst minutes = durationMinutes % 60;\nconst realDurationText = minutes === 0 ? `${hours} hours` : `${hours} hours ${minutes} minutes`;\n\nlet duration_score = 1;\nif (durationMinutes > 120) duration_score = 5;\nelse if (durationMinutes >= 115) duration_score = 4;\nelse if (durationMinutes >= 110) duration_score = 3;\nelse if (durationMinutes >= 105) duration_score = 2;\n\n// =====================\n// WebVTT parsing\n// =====================\nfunction parseTimeToMs(t) {\n  const s = String(t || \"\").trim();\n  let m = s.match(/^(\\d{2}):(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?$/);\n  if (m) {\n    const hh = +m[1], mm = +m[2], ss = +m[3];\n    const ms = m[4] ? +String(m[4]).padEnd(3, \"0\") : 0;\n    return (((hh * 60 + mm) * 60 + ss) * 1000) + ms;\n  }\n  m = s.match(/^(\\d{2}):(\\d{2})(?:\\.(\\d{1,3}))?$/);\n  if (m) {\n    const mm = +m[1], ss = +m[2];\n    const ms = m[3] ? +String(m[3]).padEnd(3, \"0\") : 0;\n    return (((0 * 60 + mm) * 60 + ss) * 1000) + ms;\n  }\n  return null;\n}\n\nfunction stripVttTags(s) {\n  return String(s || \"\")\n    .replace(/<\\/?v[^>]*>/gi, \" \")\n    .replace(/<[^>]+>/g, \" \")\n    .replace(/\\s+/g, \" \")\n    .trim();\n}\n\nfunction parseVttCues(vtt) {\n  const text = String(vtt || \"\");\n  const lines = text.split(/\\r?\\n/);\n  const cues = [];\n  const tsRe = /^(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?)\\s*-->\\s*(\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,3})?)/;\n\n  for (let i = 0; i < lines.length; i++) {\n    const m = lines[i].match(tsRe);\n    if (!m) continue;\n    const startStr = m[1], endStr = m[2];\n    const startMs = parseTimeToMs(startStr);\n    const endMs = parseTimeToMs(endStr);\n    if (startMs === null || endMs === null || endMs <= startMs) continue;\n\n    const block = [];\n    let j = i + 1;\n    while (j < lines.length && lines[j].trim() !== \"\") { block.push(lines[j]); j++; }\n\n    const rawBlock = block.join(\" \");\n    const speakerMatch = rawBlock.match(/<v[^>]*?\\s([^>]+?)>/i);\n    let speaker = speakerMatch ? speakerMatch[1].trim() : \"\";\n    const cleanText = stripVttTags(rawBlock);\n\n    if (!speaker) {\n      const m2 = cleanText.match(/^([A-Za-z][A-Za-z\\s.'-]{1,60}):\\s/);\n      if (m2) speaker = m2[1].trim();\n    }\n\n    cues.push({ startStr, endStr, startMs, endMs, speaker, text: cleanText });\n    i = j;\n  }\n\n  return cues;\n}\n\nconst cues = parseVttCues(transcriptText);\n\n// =====================\n// Speaker block helpers\n// =====================\nfunction normSpeaker(s) { return String(s || \"\").trim().toLowerCase(); }\nfunction clipText(text, maxChars) {\n  const t = String(text || \"\").replace(/\\s+/g, \" \").trim();\n  if (!t) return \"\";\n  return t.length > maxChars ? t.slice(0, maxChars).trim() + \"...\" : t;\n}\n\nfunction blocksFromRange(startStr, endStr) {\n  const sMs = parseTimeToMs(startStr);\n  const eMs = parseTimeToMs(endStr);\n  if (sMs === null || eMs === null || eMs <= sMs) return [];\n\n  const overlaps = cues\n    .filter(c => c.startMs < eMs && c.endMs > sMs)\n    .filter(c => (c.text || \"\").trim().length > 0)\n    .sort((a, b) => a.startMs - b.startMs);\n\n  if (!overlaps.length) return [];\n\n  const blocks = [];\n  let cur = null;\n  for (const c of overlaps) {\n    const sp = c.speaker || \"\";\n    if (!cur) {\n      cur = { startStr: c.startStr, endStr: c.endStr, speaker: sp, texts: [c.text], lastEndMs: c.endMs };\n      continue;\n    }\n    const sameSpeaker = normSpeaker(cur.speaker) === normSpeaker(sp);\n    const smallGap = (c.startMs - cur.lastEndMs) <= 1500;\n    if (sameSpeaker && smallGap) {\n      cur.endStr = c.endStr;\n      cur.texts.push(c.text);\n      cur.lastEndMs = c.endMs;\n    } else {\n      blocks.push(cur);\n      cur = { startStr: c.startStr, endStr: c.endStr, speaker: sp, texts: [c.text], lastEndMs: c.endMs };\n    }\n  }\n  if (cur) blocks.push(cur);\n  return blocks;\n}\n\n// =====================\n// Fuzzy matcher — v7 (Levenshtein + token-subset)\n// =====================\nfunction normalize(n) {\n  return String(n || \"\").toLowerCase().replace(/[^a-z]/g, \"\");\n}\n\nfunction toTokens(s) {\n  return String(s || \"\").toLowerCase()\n    .split(/\\s+/)\n    .filter(Boolean)\n    .map(t => t.replace(/[^a-z]/g, \"\"))\n    .filter(t => t.length >= 2);   // ignore lone initials\n}\n\nfunction levenshtein(a, b) {\n  const matrix = [];\n  for (let i = 0; i <= b.length; i++) matrix[i] = [i];\n  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;\n  for (let i = 1; i <= b.length; i++) {\n    for (let j = 1; j <= a.length; j++) {\n      if (b[i - 1] === a[j - 1]) {\n        matrix[i][j] = matrix[i - 1][j - 1];\n      } else {\n        matrix[i][j] = Math.min(\n          matrix[i - 1][j - 1] + 1,\n          matrix[i][j - 1] + 1,\n          matrix[i - 1][j] + 1\n        );\n      }\n    }\n  }\n  return matrix[b.length][a.length];\n}\n\nfunction isSimilar(a, b) {\n  const na = normalize(a);\n  const nb = normalize(b);\n  if (!na || !nb) return false;\n\n  // METHOD 1: full-string Levenshtein similarity ≥ 0.8\n  // Catches typos and minor spelling variations\n  //   e.g. \"Zoe Dodd\" ↔ \"Zoë Dodd\", \"Katie Hewitt-Brake\" ↔ \"Katie Hewitt Brake\"\n  const dist = levenshtein(na, nb);\n  const maxLen = Math.max(na.length, nb.length);\n  if (1 - dist / maxLen >= 0.8) return true;\n\n  // METHOD 2: token-based subset match\n  // Every token in the shorter name must match some token in the longer name.\n  // Match = exact OR one is a prefix of the other (both tokens ≥ 3 chars).\n  // Catches:\n  //   - Nicknames:      \"Chris Earle\" ↔ \"Christopher Earle\"\n  //                     \"Katie Smith\" ↔ \"Katherine Smith\"\n  //                     \"Sam Jones\"   ↔ \"Samuel Jones\"\n  //   - Partial names:  \"Ali\"         ↔ \"Ali Mohamedin\"\n  //                     \"Nathan\"      ↔ \"Nathan Shields\"\n  // Does NOT match different people with same first name:\n  //   \"John Doe\" vs \"John Smith\" — \"doe\" won't match \"smith\"\n  const tokensA = toTokens(a);\n  const tokensB = toTokens(b);\n  if (tokensA.length === 0 || tokensB.length === 0) return false;\n\n  const [shorter, longer] = tokensA.length <= tokensB.length\n    ? [tokensA, tokensB]\n    : [tokensB, tokensA];\n\n  return shorter.every(t =>\n    longer.some(l => {\n      if (l === t) return true;\n      if (t.length >= 3 && l.length >= 3 && (l.startsWith(t) || t.startsWith(l))) {\n        return true;\n      }\n      return false;\n    })\n  );\n}\n\n// =====================\n// Identify trainer + student speakers (no min threshold)\n// =====================\nconst secsBySpeaker = new Map();\nfor (const c of cues) {\n  const sp = (c.speaker || \"\").trim();\n  if (!sp) continue;\n  const durSec = (c.endMs - c.startMs) / 1000;\n  if (durSec > 0) secsBySpeaker.set(sp, (secsBySpeaker.get(sp) || 0) + durSec);\n}\n\nconst entries = [...secsBySpeaker.entries()].sort((a, b) => b[1] - a[1]);\nconst lecturerFromVtt = entries.length ? entries[0][0] : \"\";\n\nconst rawStudentSpeakers = entries\n  .filter(([name]) => name !== lecturerFromVtt)\n  .map(([name]) => name);\n\n// =====================\n// Attended students from Aggregate Attendees\n// =====================\nlet attendanceRows = [];\ntry {\n  attendanceRows = ($items(\"Aggregate Attendees\")[0]?.json?.attendees) || [];\n} catch (e) {\n  attendanceRows = [];\n}\n\nconst attendedStudents = attendanceRows\n  .map(r => (r.Name || r.name || \"\").trim())\n  .filter(Boolean)\n  .filter(name => !lecturerFromVtt || !isSimilar(name, lecturerFromVtt));\nconst attendedCount = attendedStudents.length;\n\n// Filter student speakers to those who actually attended (fuzzy)\nconst studentSpeakers = rawStudentSpeakers.filter(name =>\n  attendedStudents.some(att => isSimilar(name, att))\n);\nconst spokeCount = studentSpeakers.length;\n\n// =====================\n// Engagement calculation\n// =====================\nlet engagementPercent = 0;\nlet engagement_score = 1;\nlet item7OverrideStatus = null;\nlet item7OverrideEvidence = null;\nlet item7OverrideReasoning = null;\n\nif (attendedCount > 0) {\n  engagementPercent = Number(((spokeCount / attendedCount) * 100).toFixed(2));\n\n  if (engagementPercent >= 80) engagement_score = 5;\n  else if (engagementPercent >= 60) engagement_score = 4;\n  else if (engagementPercent >= 40) engagement_score = 3;\n  else if (engagementPercent >= 20) engagement_score = 2;\n\n  if (engagementPercent > 75) item7OverrideStatus = \"Met\";\n  else if (engagementPercent >= 50) item7OverrideStatus = \"Partially Met\";\n  else item7OverrideStatus = \"Not Met\";\n\n  const silentStudents = attendedStudents.filter(att =>\n    !rawStudentSpeakers.some(sp => isSimilar(att, sp))\n  );\n\n  item7OverrideEvidence =\n    `Engagement score = ${spokeCount} / ${attendedCount} = ${engagementPercent}%.\\n` +\n    `Students who spoke (${studentSpeakers.length}): ${studentSpeakers.join(\", \") || \"(none)\"}.\\n` +\n    `Students who attended but did not speak (${silentStudents.length}): ${silentStudents.join(\", \") || \"(none)\"}.`;\n\n  item7OverrideReasoning =\n    `Engagement = matched speakers / attended. ${spokeCount} of ${attendedCount} attended students spoke. ` +\n    `Threshold: Met > 75%, Partially Met 50–75%, Not Met < 50%. Result: ${engagementPercent}% → ${item7OverrideStatus}.`;\n} else {\n  engagementPercent = 0;\n  engagement_score = 1;\n}\n\n// =====================\n// Evidence formatter\n// =====================\nfunction formatClips(clips) {\n  if (!Array.isArray(clips) || clips.length === 0) return \"No evidence found\";\n  const out = [];\n  clips.forEach((c, clipIdx) => {\n    const start = c?.start || \"\";\n    const end = c?.end || \"\";\n    if (!start || !end) return;\n    const blocks = blocksFromRange(start, end);\n    if (!blocks.length) {\n      out.push(`[${clipIdx + 1}] ${start} --> ${end}: No extractable quote for this range`);\n      return;\n    }\n    const MAX_BLOCKS_PER_CLIP = 8, MAX_CHARS_PER_BLOCK = 260;\n    blocks.slice(0, MAX_BLOCKS_PER_CLIP).forEach((b, i) => {\n      const sp = (b.speaker || \"\").trim();\n      const spTxt = sp ? ` (${sp})` : \"\";\n      const quote = clipText(b.texts.join(\" \"), MAX_CHARS_PER_BLOCK);\n      out.push(`[${clipIdx + 1}.${i + 1}] ${b.startStr} --> ${b.endStr}${spTxt}: ${quote || \"No extractable quote\"}`);\n    });\n  });\n  return out.length ? out.join(\"\\n\") : \"No evidence found\";\n}\n\nfunction titledItemsToObject(arr, prefix) {\n  const obj = {};\n  if (!Array.isArray(arr)) return obj;\n  arr.forEach((x, i) => {\n    obj[`${prefix}_${i + 1}`] = {\n      title: x?.title || \"\",\n      evidence: formatClips(x?.evidence_clips || []),\n      evidence_clips: x?.evidence_clips || []\n    };\n  });\n  return obj;\n}\n\nfunction ksbsToObject(arr) {\n  const obj = {};\n  if (!Array.isArray(arr)) return obj;\n  arr.forEach((k, i) => {\n    obj[`ksb_${i + 1}`] = {\n      type: k?.type || \"\",\n      title: k?.title || \"\",\n      evidence: formatClips(k?.evidence_clips || []),\n      evidence_clips: k?.evidence_clips || []\n    };\n  });\n  return obj;\n}\n\n// =====================\n// AI fields\n// =====================\nconst checklistRaw = data.checklist_evaluation;\n\nconst aiTrainer = data.session_info?.trainer || \"\";\nconst trainer = aiTrainer || lecturerFromVtt || (lectureRow.trainer ?? lectureRow.Trainer ?? \"\");\n\nconst date = baseSession.createdDateTime ? String(baseSession.createdDateTime).slice(0, 10) : \"\";\n\nconst strengthsObj = titledItemsToObject(data.overall_summary?.strengths || [], \"strength\");\nconst areasObj = titledItemsToObject(data.overall_summary?.areas_for_improvement || [], \"area\");\nconst aiOverallJudgement = data.overall_summary?.overall_judgement || \"\";\nconst ksbsObj = ksbsToObject(data.ksbs_covered || []);\n\nconst teachingQuality = data.teaching_quality || { rating_1_5: 3, comments: \"\", evidence_clips: [] };\n\n// =====================\n// Apply Item 7 override + fallback reasoning for items 1 & 2\n// =====================\nconst startDiff = baseSession.startDifferenceMinutes;\nconst endDiff = baseSession.endDifferenceMinutes;\n\nconst checklist = checklistRaw.map((item, idx) => {\n  if (idx === 6 && item7OverrideStatus !== null) {\n    return { ...item, status: item7OverrideStatus, _item7_overridden: true };\n  }\n\n  if (idx === 0 && !String(item.reasoning || \"\").trim()) {\n    const cmp = durationMinutes >= 105 ? \">=105\" : \"<105\";\n    return { ...item, reasoning: `METADATA.durationMinutes = ${durationMinutes} (${cmp}).` };\n  }\n\n  if (idx === 1 && !String(item.reasoning || \"\").trim()) {\n    const sd = (startDiff === null || startDiff === undefined) ? \"n/a\" : startDiff;\n    const ed = (endDiff === null || endDiff === undefined) ? \"n/a\" : endDiff;\n    return { ...item, reasoning: `startDifferenceMinutes = ${sd}, endDifferenceMinutes = ${ed}. Status: ${item.status}.` };\n  }\n\n  return item;\n});\n\nconst met_count = checklist.filter(i => i.status === \"Met\").length;\nconst partial_count = checklist.filter(i => i.status === \"Partially Met\").length;\nconst not_met_count = checklist.filter(i => i.status === \"Not Met\").length;\n\nconst engagedSpeakersObject = studentSpeakers.reduce((o, n, i) => {\n  o[`speaker_${i + 1}`] = n;\n  return o;\n}, {});\n\n// =====================\n// FINAL OUTPUT\n// =====================\nreturn checklist.map((item, index) => {\n  const checklist_order = index + 1;\n  const session_id = baseSession.transcriptId;\n\n  let severity = \"pass\";\n  if (item.status === \"Partially Met\") severity = \"warning\";\n  if (item.status === \"Not Met\") severity = \"fail\";\n\n  let evidenceText, reasoningText;\n  if (index === 6 && item._item7_overridden) {\n    evidenceText = item7OverrideEvidence;\n    reasoningText = item7OverrideReasoning;\n  } else {\n    evidenceText = formatClips(item.evidence_clips);\n    reasoningText = item.reasoning || \"\";\n  }\n\n  return {\n    json: {\n      session_id,\n      meeting_id: baseSession.meetingId,\n      subject, trainer, date,\n      checklist_order,\n      session_id_match: `${session_id}_${checklist_order}`,\n      checklist_item: item.item,\n      status: item.status,\n      reasoning: reasoningText,\n      evidence: evidenceText,\n      severity,\n      duration: realDurationText,\n      duration_minutes: durationMinutes,\n      duration_score,\n      Engagement: engagementPercent,\n      engagement_percentage: engagementPercent,\n      engagement_score,\n      lecturer_name: lecturerFromVtt,\n      attended_count: attendedCount,\n      spoke_count: spokeCount,\n      engaged_speakers_count: spokeCount,\n      engaged_speakers: engagedSpeakersObject,\n      ai_strengths: strengthsObj,\n      ai_areas_for_development: areasObj,\n      ai_overall_judgement: aiOverallJudgement,\n      ksbs_covered: ksbsObj,\n      teaching_quality_rating: teachingQuality.rating_1_5,\n      teaching_quality_comments: teachingQuality.comments,\n      teaching_quality_evidence: formatClips(teachingQuality.evidence_clips || []),\n      met_count, partial_count, not_met_count,\n      cancelled_session: false\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2432,
+        6000
+      ],
+      "id": "91e03636-9312-4b84-b555-71ccba685b59",
+      "name": "Build Session and Checklist Rows"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collapse the 11 checklist rows into one lecture item for recording lookup.\n// Every delivered lecture continues. is_perfect controls only qa_perfect_lectures.\nconst rows = items.map(item => item.json || {});\nif (!rows.length) return [];\n\nconst first = rows[0];\nconst lecture = $items(\"Lecture Input\")[0]?.json || {};\nconst uniqueOrders = new Set(\n  rows.map(row => Number(row.checklist_order)).filter(Number.isFinite)\n);\nconst allMet = rows.every(row => String(row.status || '').trim() === 'Met');\nconst metCount = Number(first.met_count ?? 0);\nconst meetingId = String(first.meeting_id || lecture.meetingId || '').trim();\nconst sessionId = String(first.session_id || '').trim();\n\nif (!meetingId || !sessionId) {\n  throw new Error('Cannot save recording metadata without meeting_id and session_id.');\n}\n\nconst sessionDate = String(first.date || lecture.targetDate || '').slice(0, 10);\nconst subject = String(first.subject || lecture.subject || lecture.module || '').trim();\nconst isPerfect =\n  metCount === 11 &&\n  uniqueOrders.size === 11 &&\n  allMet &&\n  first.cancelled_session !== true;\n\nreturn [{\n  json: {\n    lecture_key: `${sessionDate}|${subject}`,\n    session_date: sessionDate,\n    date: sessionDate,\n    subject,\n    module: lecture.module || null,\n    trainer: first.trainer || null,\n    engagement: first.Engagement ?? first.engagement ?? null,\n    Engagement: first.Engagement ?? first.engagement ?? null,\n    attended_count: first.attended_count ?? null,\n    met_count: metCount,\n    meeting_id: meetingId,\n    session_id: sessionId,\n    scheduled_start: lecture.scheduledStart || null,\n    scheduled_end: lecture.scheduledEnd || null,\n    is_perfect: isPerfect\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1648,
+        6000
+      ],
+      "id": "96929b29-9b21-415f-bbc3-2ca84b5b03bf",
+      "name": "Prepare Lecture Recording"
+    },
+    {
+      "parameters": {
+        "jsCode": "function decodeSessionId(value) {\n  const raw = String(value || '').trim();\n  const base64 = raw.replace(/-/g, '+').replace(/_/g, '/');\n  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);\n  try {\n    return Buffer.from(padded, 'base64').toString('utf8');\n  } catch {\n    return '';\n  }\n}\n\nconst guid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';\n\nreturn items.map((item, index) => {\n  const lecture = item.json || {};\n  const decoded = decodeSessionId(lecture.session_id);\n  const transcript = decoded.match(\n    new RegExp('(' + guid + ')-\\\\d+-TranscriptV2', 'i')\n  );\n  const allGuids = decoded.match(new RegExp(guid, 'ig')) || [];\n  const callId = String(\n    transcript?.[1] || allGuids.at(-1) || ''\n  ).toLowerCase();\n\n  return {\n    json: {\n      ...lecture,\n      expected_call_id: callId || null,\n      max_timestamp_difference_seconds: 15\n    },\n    pairedItem: { item: index }\n  };\n});"
+      },
+      "id": "8c7b6895-4b53-467c-9332-c1c0aa6a5985",
+      "name": "Extract Recording Call ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1424,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/me/onlineMeetings/' + encodeURIComponent($json.meeting_id) + '/recordings?$top=100' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "552837c6-1c4d-44f6-9923-4cd1e3efdf33",
+      "name": "Get Exact Graph Recording",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1200,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lecture = $items('Extract Recording Call ID')[0]?.json || {};\nconst response = items[0]?.json || {};\nconst recordings = Array.isArray(response.value) ? response.value : [];\nconst expectedCallId = String(lecture.expected_call_id || '').toLowerCase();\nconst graphMatches = recordings.filter(recording =>\n  String(recording?.callId || '').toLowerCase() === expectedCallId\n);\nconst graphRecording = graphMatches.length === 1 ? graphMatches[0] : null;\n\nlet graphStatus = 'exact_graph_recording_found';\nif (!expectedCallId) graphStatus = 'session_call_id_missing';\nelse if (graphMatches.length === 0) {\n  graphStatus = 'graph_recording_not_found_for_call_id';\n} else if (graphMatches.length > 1) {\n  graphStatus = 'ambiguous_graph_recordings_for_call_id';\n}\n\nconst compactDate = String(\n  lecture.session_date || lecture.date || ''\n).slice(0, 10).replace(/-/g, '');\nconst queryString = compactDate\n  ? compactDate + ' \"Meeting Recording\" filetype:mp4'\n  : '\"Meeting Recording\" filetype:mp4';\n\nreturn [{\n  json: {\n    ...lecture,\n    graph_recording_id: graphRecording?.id || null,\n    graph_created_at: graphRecording?.createdDateTime || null,\n    graph_content_correlation_id:\n      graphRecording?.contentCorrelationId || null,\n    graph_status: graphStatus,\n    recording_search_date: compactDate,\n    recording_search_query: queryString,\n    recording_search_body: {\n      requests: [{\n        entityTypes: ['driveItem'],\n        query: { queryString },\n        from: 0,\n        size: 500,\n        fields: [\n          'id',\n          'name',\n          'webUrl',\n          'createdDateTime',\n          'lastModifiedDateTime',\n          'parentReference',\n          'file'\n        ]\n      }]\n    }\n  }\n}];"
+      },
+      "id": "efb2a0f7-3e67-4faa-a2ae-ea21064b982b",
+      "name": "Build Recording Search",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -976,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.microsoft.com/v1.0/search/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.recording_search_body) }}",
+        "options": {}
+      },
+      "id": "69db693d-e418-4f4e-b3af-38575002693e",
+      "name": "Search SharePoint Recording",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -752,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/joinedTeams",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "a70b7770-e405-4ed8-9d0a-44f89897e195",
+      "name": "Get All Joined Teams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -528,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = Array.isArray($json.value) ? $json.value : [];\nif (!teams.length) {\n  throw new Error(\n    'No Teams returned. Credential needs Team.ReadBasic.All.'\n  );\n}\n\nreturn teams.map((team, index) => ({\n  json: {\n    team_id: team.id,\n    team_name: team.displayName || null\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "f1adc573-43f9-4c02-a7cc-ac4d16fdd1e1",
+      "name": "Expand Teams",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -304,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels?$select=id,displayName,membershipType' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "1324ee2d-a745-41bc-8dca-a0f4f8061d34",
+      "name": "Get Every Team Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -80,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = $items('Expand Teams');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const team = teams[index]?.json || {};\n  const channels = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const channel of channels) {\n    if (!channel?.id) continue;\n    output.push({\n      json: {\n        ...team,\n        channel_id: channel.id,\n        channel_name: channel.displayName || null,\n        channel_type: channel.membershipType || null\n      }\n    });\n  }\n});\n\nif (!output.length) {\n  throw new Error(\n    'No Teams channels returned. Credential needs Channel.ReadBasic.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "7f81760e-a29d-4c01-9fdc-8004babdbed9",
+      "name": "Expand All Channels",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels/' + encodeURIComponent($json.channel_id) + '/filesFolder' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "854b2684-7a85-4f42-a6dc-dc3eced451bc",
+      "name": "Get Every Channel Files Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        368,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const channels = $items('Expand All Channels');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const folder = item.json || {};\n  const channel = channels[index]?.json || {};\n  const driveId =\n    folder?.parentReference?.driveId ||\n    folder?.remoteItem?.parentReference?.driveId ||\n    null;\n  const folderId = folder?.id || folder?.remoteItem?.id || null;\n  if (!driveId || !folderId) return;\n\n  output.push({\n    json: {\n      ...channel,\n      drive_id: driveId,\n      channel_folder_id: folderId\n    }\n  });\n});\n\nif (!output.length) {\n  throw new Error(\n    'No channel file folders accessible. Credential needs Files.ReadWrite.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "24368e97-9d4f-4eb1-a553-f60e119b5dc3",
+      "name": "Prepare Channel Recording Folders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.drive_id) + '/items/' + encodeURIComponent($json.channel_folder_id) + ':/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "8946f915-0d6b-4b4f-b83c-5c0396af749b",
+      "name": "List Every Channel Recordings Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const folders = $items('Prepare Channel Recording Folders');\nconst files = [];\n\nitems.forEach((item, index) => {\n  const folder = folders[index]?.json || {};\n  const children = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const file of children) {\n    if (\n      !file?.id ||\n      !file?.file ||\n      !/\\.mp4$/i.test(String(file.name || ''))\n    ) continue;\n\n    files.push({\n      id: file.id,\n      driveId: file?.parentReference?.driveId || folder.drive_id || null,\n      name: file.name,\n      webUrl: file.webUrl || null,\n      createdDateTime: file.createdDateTime || null,\n      lastModifiedDateTime: file.lastModifiedDateTime || null,\n      source: 'teams_channel_recordings_folder',\n      team_name: folder.team_name || null,\n      channel_name: folder.channel_name || null\n    });\n  }\n});\n\nreturn [{ json: { channel_recording_files: files } }];"
+      },
+      "id": "4647dfe5-16ac-4a19-a075-05d857dcd543",
+      "name": "Collect All Channel Recording Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/drive/root:/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "6d4352f7-3870-44df-a323-66cf37c8eaea",
+      "name": "List Current User OneDrive Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1264,
+        6000
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lecture = $items('Build Recording Search')[0]?.json || {};\nconst searchResponse =\n  $items('Search SharePoint Recording')[0]?.json || {};\nconst channelFiles =\n  $items('Collect All Channel Recording Files')[0]?.json\n    ?.channel_recording_files || [];\nconst oneDriveResponse = items[0]?.json || {};\n\nconst searchHits = (searchResponse.value || [])\n  .flatMap(value => value?.hitsContainers || [])\n  .flatMap(container => container?.hits || [])\n  .map(hit => hit?.resource)\n  .filter(resource => resource?.id && resource?.name)\n  .map(resource => ({\n    id: resource.id,\n    driveId: resource?.parentReference?.driveId || null,\n    name: resource.name,\n    webUrl: resource.webUrl || null,\n    createdDateTime: resource.createdDateTime || null,\n    lastModifiedDateTime: resource.lastModifiedDateTime || null,\n    source: 'tenant_graph_search'\n  }));\n\nconst oneDriveFiles = (Array.isArray(oneDriveResponse.value)\n  ? oneDriveResponse.value\n  : []\n).filter(file =>\n  file?.id &&\n  file?.file &&\n  /\\.mp4$/i.test(String(file.name || ''))\n).map(file => ({\n  id: file.id,\n  driveId: file?.parentReference?.driveId || null,\n  name: file.name,\n  webUrl: file.webUrl || null,\n  createdDateTime: file.createdDateTime || null,\n  lastModifiedDateTime: file.lastModifiedDateTime || null,\n  source: 'current_user_onedrive_recordings'\n}));\n\nconst deduped = new Map();\nfor (const file of [...searchHits, ...channelFiles, ...oneDriveFiles]) {\n  if (!file?.id || !file?.driveId) continue;\n  const key = String(file.driveId) + ':' + String(file.id);\n  const previous = deduped.get(key) || {};\n  deduped.set(key, { ...previous, ...file });\n}\nconst files = [...deduped.values()];\n\nconst normalizeSubject = value => String(value || '')\n  .toLowerCase()\n  .replace(/&amp;/g, '&')\n  .replace(/[^a-z0-9]+/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .replace(/^(dr|doctor|prof|professor|mr|mrs|ms)\\s+/, '')\n  .replace(/[^a-z0-9]+/g, '');\n\nfunction parseTeamsFilename(name) {\n  const match = String(name || '').match(\n    /^(.*)-(\\d{8})_(\\d{6})(?:UTC)?-Meeting Recording\\.mp4$/i\n  );\n  if (!match) return null;\n  const date = match[2];\n  const time = match[3];\n  const iso =\n    date.slice(0, 4) + '-' + date.slice(4, 6) + '-' +\n    date.slice(6, 8) + 'T' + time.slice(0, 2) + ':' +\n    time.slice(2, 4) + ':' + time.slice(4, 6) + 'Z';\n  const timestamp = Date.parse(iso);\n  if (!Number.isFinite(timestamp)) return null;\n  return { subject: match[1], compactDate: date, timestamp, iso };\n}\n\nconst graphTimestamp = Date.parse(lecture.graph_created_at || '');\nconst expectedSubject = normalizeSubject(lecture.subject);\nconst maxDiff = Number(\n  lecture.max_timestamp_difference_seconds || 15\n);\n\nconst exactCandidates = files\n  .map(file => ({ file, parsed: parseTeamsFilename(file.name) }))\n  .filter(candidate => candidate.parsed)\n  .map(candidate => ({\n    ...candidate,\n    subjectExact:\n      normalizeSubject(candidate.parsed.subject) === expectedSubject,\n    differenceSeconds: Number.isFinite(graphTimestamp)\n      ? Math.abs(candidate.parsed.timestamp - graphTimestamp) / 1000\n      : null\n  }))\n  .filter(candidate =>\n    candidate.subjectExact &&\n    candidate.differenceSeconds !== null &&\n    candidate.differenceSeconds <= maxDiff\n  )\n  .sort((a, b) => a.differenceSeconds - b.differenceSeconds);\n\nlet status = 'recording_file_not_found_in_accessible_locations';\nif (lecture.graph_status !== 'exact_graph_recording_found') {\n  status = lecture.graph_status;\n} else if (exactCandidates.length > 1) {\n  status = 'ambiguous_exact_recording_files_no_update';\n} else if (exactCandidates.length === 1) {\n  status = 'exact_recording_file_matched';\n}\n\nconst best = exactCandidates.length === 1 ? exactCandidates[0] : null;\nconst file = best?.file || null;\nconst directWebUrl = String(file?.webUrl || '').trim() || null;\n\nreturn [{\n  json: {\n    ...lecture,\n    recording_link: directWebUrl,\n    recording_url: directWebUrl,\n    recording_filename: file?.name || null,\n    recording_item_id: file?.id || null,\n    recording_drive_id: file?.driveId || null,\n    recording_source: file?.source || null,\n    recording_team_name: file?.team_name || null,\n    recording_channel_name: file?.channel_name || null,\n    timestamp_difference_seconds: best?.differenceSeconds ?? null,\n    recording_hits_found: searchHits.length,\n    recording_exact_candidates: exactCandidates.length,\n    recording_match_method: best\n      ? 'exact_call_id_subject_and_timestamp'\n      : null,\n    direct_link_status: status,\n    ambiguous_candidate_filenames: exactCandidates.length > 1\n      ? exactCandidates.map(candidate => candidate.file?.name || null)\n      : [],\n    recording_search_error:\n      searchResponse.error?.message || null\n  }\n}];"
+      },
+      "id": "ba6176cb-abc2-46ca-8614-173a7e5f7231",
+      "name": "Match Exact Recording File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "45cae640-d4a5-4322-8037-49c51d55815f",
+              "leftValue": "={{ $json.direct_link_status }}",
+              "rightValue": "exact_recording_file_matched",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "f3538a41-1612-4c9e-8463-b5e81b58ab16",
+              "leftValue": "={{ $json.recording_item_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "700ce53e-11d6-41be-b650-69508be17063",
+              "leftValue": "={{ $json.recording_drive_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "548bc8b7-76b1-44fe-8cf8-1a2cbcee4818",
+              "leftValue": "={{ $json.recording_exact_candidates }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "5fd13f9b-e93d-441d-931f-0ba64b3fa3ef",
+      "name": "Has Exact Recording File",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1712,
+        6000
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.recording_drive_id) + '/items/' + encodeURIComponent($json.recording_item_id) + '/createLink' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'view', scope: 'organization' }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1936,
+        5920
+      ],
+      "id": "91c035ee-2150-4c73-8f91-531ce1367314",
+      "name": "Create Organization View Link",
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prefer the organization view link; retain the exact DriveItem URL as fallback.\nconst lecture =\n  $items('Has Exact Recording File', 0, 0)[0]?.json || {};\nconst response = items[0]?.json || {};\nconst created = String(response.link?.webUrl || '').trim();\nconst createdValid =\n  created && !/\\/Forms\\/DispForm\\.aspx/i.test(created)\n    ? created\n    : null;\nconst fallback = String(\n  lecture.recording_link || lecture.recording_url || ''\n).trim();\nconst finalLink =\n  createdValid ||\n  (fallback && !/\\/Forms\\/DispForm\\.aspx/i.test(fallback)\n    ? fallback\n    : null);\n\nreturn [{\n  json: {\n    ...lecture,\n    recording_link: finalLink,\n    recording_url: finalLink,\n    direct_link_status: createdValid\n      ? 'organization_view_link_created_exact_match'\n      : (finalLink\n          ? 'drive_item_web_url_used_exact_match'\n          : 'create_link_failed_no_update'),\n    create_link_error: response.error?.message || null\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        5920
+      ],
+      "id": "4afcadea-486d-4842-aee7-134769638cb4",
+      "name": "Finalize Recording Link"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n  SELECT\n    NULLIF($1, '')::text AS recording_url,\n    NULLIF($2, '')::text AS recording_item_id,\n    NULLIF($3, '')::text AS recording_drive_id,\n    NULLIF($4, '')::text AS recording_filename,\n    NULLIF($5, '')::text AS session_id,\n    $6::boolean AS is_perfect,\n    $7::text AS lecture_key,\n    NULLIF($8, '')::date AS session_date,\n    $9::text AS subject,\n    NULLIF($10, '')::text AS module,\n    NULLIF($11, '')::text AS trainer,\n    NULLIF($12, '')::numeric AS engagement,\n    NULLIF($13, '')::int AS attended_count,\n    NULLIF($14, '')::int AS met_count,\n    NULLIF($15, '')::text AS meeting_id,\n    $16::text AS direct_link_status,\n    NULLIF($17, '')::int AS recording_hits_found,\n    NULLIF($18, '')::text AS recording_search_error,\n    NULLIF($19, '')::text AS create_link_error\n),\nupdated AS (\n  UPDATE public.qa_doctors_sessions AS session\n  SET\n    recording_url = COALESCE(input.recording_url, session.recording_url),\n    recording_item_id = COALESCE(input.recording_item_id, session.recording_item_id),\n    recording_drive_id = COALESCE(input.recording_drive_id, session.recording_drive_id),\n    recording_filename = COALESCE(input.recording_filename, session.recording_filename),\n    recording_link_status = input.direct_link_status,\n    recording_link_updated_at = NOW()\n  FROM input\n  WHERE session.session_id = input.session_id\n  RETURNING\n    session.session_id,\n    session.recording_url,\n    session.recording_item_id,\n    session.recording_drive_id,\n    session.recording_filename\n)\nSELECT\n  input.is_perfect,\n  input.lecture_key,\n  input.session_date,\n  input.subject,\n  input.module,\n  input.trainer,\n  input.engagement,\n  input.attended_count,\n  input.met_count,\n  input.meeting_id,\n  input.session_id,\n  input.direct_link_status,\n  input.recording_hits_found,\n  input.recording_search_error,\n  input.create_link_error,\n  (updated.session_id IS NOT NULL) AS recording_row_updated,\n  updated.recording_url,\n  updated.recording_item_id,\n  updated.recording_drive_id,\n  updated.recording_filename\nFROM input\nLEFT JOIN updated ON TRUE;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.recording_link || $json.recording_url || '',\n  $json.recording_item_id || '',\n  $json.recording_drive_id || '',\n  $json.recording_filename || '',\n  $json.session_id || '',\n  String($json.is_perfect === true),\n  $json.lecture_key || '',\n  $json.session_date || $json.date || '',\n  $json.subject || '',\n  $json.module || '',\n  $json.trainer || '',\n  String($json.Engagement ?? $json.engagement ?? ''),\n  String($json.attended_count ?? ''),\n  String($json.met_count ?? ''),\n  $json.meeting_id || '',\n  $json.direct_link_status || '',\n  String($json.recording_hits_found ?? ''),\n  $json.recording_search_error || '',\n  $json.create_link_error || ''\n] }}"
+        }
+      },
+      "id": "80b13930-12e3-4690-a025-62a069a46477",
+      "name": "Update QA Session Recording",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2384,
+        6016
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c460a51c-359d-4e99-908f-bbc08c5a69bd",
+              "leftValue": "={{ $json.is_perfect }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2ab41776-cc5d-4c13-8da2-199dc6746616",
+      "name": "Is Perfect Lecture?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2608,
+        6016
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO public.qa_perfect_lectures (\n  lecture_key,\n  session_date,\n  subject,\n  module,\n  trainer,\n  engagement,\n  attended_count,\n  met_count,\n  recording_url,\n  meeting_id,\n  session_id\n)\nVALUES (\n  $1,\n  $2::date,\n  $3,\n  $4,\n  $5,\n  NULLIF($6, '')::numeric,\n  NULLIF($7, '')::int,\n  NULLIF($8, '')::int,\n  $9,\n  NULLIF($10, ''),\n  NULLIF($11, '')\n)\nON CONFLICT (lecture_key) DO UPDATE SET\n  recording_url  = COALESCE(EXCLUDED.recording_url, public.qa_perfect_lectures.recording_url),\n  meeting_id     = COALESCE(EXCLUDED.meeting_id, public.qa_perfect_lectures.meeting_id),\n  session_id     = COALESCE(EXCLUDED.session_id, public.qa_perfect_lectures.session_id),\n  engagement     = EXCLUDED.engagement,\n  attended_count = EXCLUDED.attended_count,\n  met_count      = EXCLUDED.met_count,\n  module         = COALESCE(EXCLUDED.module, public.qa_perfect_lectures.module),\n  trainer        = COALESCE(EXCLUDED.trainer, public.qa_perfect_lectures.trainer);",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.lecture_key,\n  $json.session_date,\n  $json.subject,\n  $json.module || null,\n  $json.trainer || null,\n  String($json.Engagement ?? $json.engagement ?? ''),\n  String($json.attended_count ?? ''),\n  String($json.met_count ?? ''),\n  $json.recording_url || null,\n  $json.meeting_id || null,\n  $json.session_id || null\n] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        2832,
+        5952
+      ],
+      "id": "4798f106-c47b-43fe-b301-f39e26331b88",
+      "name": "Upsert Perfect Lecture",
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS (\n  SELECT 1\n    FROM public.lecture_qa_legacy_writes\n   WHERE legacy_session_id = $1\n     AND write_status = 'WRITTEN'\n) AS coded_owned;",
+        "options": {
+          "queryReplacement": "={{ $json.session_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2208,
+        5856
+      ],
+      "id": "3c2f0001-0000-4c00-9000-000000000001",
+      "name": "Check Coded Ownership",
+      "executeOnce": true,
+      "onError": "stopWorkflow",
+      "alwaysOutputData": false,
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3c2f0002-0000-4c00-9000-000000000002",
+              "leftValue": "={{ $json.coded_owned }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2096,
+        5856
+      ],
+      "id": "3c2f0002-0000-4c00-9000-000000000002",
+      "name": "Coded Owned?",
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Phase 3C2.2 ownership guard - the coded platform owns this session.\n//\n// The coded writer created this legacy QA row and recorded it in\n// public.lecture_qa_legacy_writes, so legacy n8n QA must not overwrite it.\n// Identifiers and flags only: no learner names, no transcript text, no\n// ownership metadata beyond the fact itself.\nfunction sessionIdFromMerges() {\n  for (const nodeName of ['Merge1', 'Merge2']) {\n    try {\n      const first = $(nodeName).first();\n      if (first && first.json && first.json.session_id) return first.json.session_id;\n    } catch (e) {\n      // That merge did not run on this path.\n    }\n  }\n  return null;\n}\n\nreturn [{\n  json: {\n    qa_write_skipped: true,\n    qa_write_skip_reason: 'coded_platform_owned',\n    session_id: sessionIdFromMerges()\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        5744
+      ],
+      "id": "3c2f0003-0000-4c00-9000-000000000003",
+      "name": "Protected - Coded Platform Owns Session"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Phase 3C2.2 ownership guard - restore the QA rows and fail closed.\n//\n// `Check Coded Ownership` is a Postgres node, so its output REPLACED the\n// session/checklist payload with { coded_owned }. Re-emit the exact rows the\n// merge produced, so the upserts below see byte-identical input to before.\nconst owned = $('Check Coded Ownership').first()?.json?.coded_owned;\nif (owned !== false) {\n  // Fail closed: true, null, undefined or any non-boolean must never write.\n  throw new Error(\n    'ownership guard: refusing legacy QA write (coded_owned=' + JSON.stringify(owned) + ')'\n  );\n}\n\nfunction rowsFrom(nodeName) {\n  try {\n    return $(nodeName).all();\n  } catch (e) {\n    return [];\n  }\n}\n\n// Exactly one of the two merges runs: Merge1 delivered, Merge2 cancelled.\nconst rows = [...rowsFrom('Merge1'), ...rowsFrom('Merge2')];\nif (!rows.length) {\n  throw new Error('ownership guard: no QA rows available to write');\n}\nreturn rows;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2096,
+        5968
+      ],
+      "id": "3c2f0004-0000-4c00-9000-000000000004",
+      "name": "Resume QA Write Rows",
+      "onError": "stopWorkflow"
+    }
+  ],
+  "connections": {
+    "When Executed by QA Master": {
+      "main": [
+        [
+          {
+            "node": "Lecture Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lecture Input": {
+      "main": [
+        [
+          {
+            "node": "Attendance Subflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lecture Module": {
+      "main": [
+        [
+          {
+            "node": "Get LMS Students",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get LMS Students": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Session Delivered?": {
+      "main": [
+        [
+          {
+            "node": "AI Teaching QA Combined",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cancelled Session Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Transcripts": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Session Delivered?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Transcript Parts": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Download Transcript Part",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Transcript Part": {
+      "main": [
+        [
+          {
+            "node": "Combine Transcripts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Transcripts": {
+      "main": [
+        [
+          {
+            "node": "V1 Transcript Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "V1 Transcript Found?": {
+      "main": [
+        [
+          {
+            "node": "Select Transcript Parts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Channel Transcripts Beta Fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Channel Transcripts Beta Fallback": {
+      "main": [
+        [
+          {
+            "node": "Select Transcript Parts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Attendees": {
+      "main": [
+        [
+          {
+            "node": "Lecture Module",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attendance Subflow": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Attendees",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Check Coded Ownership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "Check Coded Ownership",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Teaching QA Combined": {
+      "main": [
+        [
+          {
+            "node": "Build Session and Checklist Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Combined Structured Output Parser",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combined Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "AI Teaching QA Combined",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model (Combined)": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Teaching QA Combined",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cancelled Session Output": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build Session and Checklist Rows": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          },
+          {
+            "node": "Prepare Lecture Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Lecture Recording": {
+      "main": [
+        [
+          {
+            "node": "Extract Recording Call ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Recording Call ID": {
+      "main": [
+        [
+          {
+            "node": "Get Exact Graph Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Exact Graph Recording": {
+      "main": [
+        [
+          {
+            "node": "Build Recording Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Recording Search": {
+      "main": [
+        [
+          {
+            "node": "Search SharePoint Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search SharePoint Recording": {
+      "main": [
+        [
+          {
+            "node": "Get All Joined Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Joined Teams": {
+      "main": [
+        [
+          {
+            "node": "Expand Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Teams": {
+      "main": [
+        [
+          {
+            "node": "Get Every Team Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Team Channel": {
+      "main": [
+        [
+          {
+            "node": "Expand All Channels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand All Channels": {
+      "main": [
+        [
+          {
+            "node": "Get Every Channel Files Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Channel Files Folder": {
+      "main": [
+        [
+          {
+            "node": "Prepare Channel Recording Folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Channel Recording Folders": {
+      "main": [
+        [
+          {
+            "node": "List Every Channel Recordings Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Every Channel Recordings Folder": {
+      "main": [
+        [
+          {
+            "node": "Collect All Channel Recording Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect All Channel Recording Files": {
+      "main": [
+        [
+          {
+            "node": "List Current User OneDrive Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Current User OneDrive Recordings": {
+      "main": [
+        [
+          {
+            "node": "Match Exact Recording File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Exact Recording File": {
+      "main": [
+        [
+          {
+            "node": "Has Exact Recording File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Exact Recording File": {
+      "main": [
+        [
+          {
+            "node": "Create Organization View Link",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update QA Session Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Organization View Link": {
+      "main": [
+        [
+          {
+            "node": "Finalize Recording Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Recording Link": {
+      "main": [
+        [
+          {
+            "node": "Update QA Session Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update QA Session Recording": {
+      "main": [
+        [
+          {
+            "node": "Is Perfect Lecture?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Perfect Lecture?": {
+      "main": [
+        [
+          {
+            "node": "Upsert Perfect Lecture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Coded Ownership": {
+      "main": [
+        [
+          {
+            "node": "Coded Owned?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coded Owned?": {
+      "main": [
+        [
+          {
+            "node": "Protected - Coded Platform Owns Session",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Resume QA Write Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resume QA Write Rows": {
+      "main": [
+        [
+          {
+            "node": "Upsert QA Session",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Upsert QA Checklist Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "1df6b8eb7cad6964c4019ffc034ca93b67e15d54f1ef0b486646f0918cb85bc3"
+  }
+}

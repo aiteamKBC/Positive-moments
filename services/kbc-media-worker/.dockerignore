@@ -1,0 +1,9 @@
+.env
+data/
+node_modules/
+sql/
+*.log
+*.md
+docker-compose.yml
+install-windows-task.ps1
+run-media-worker.bat

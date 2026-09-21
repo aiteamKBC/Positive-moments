@@ -1,0 +1,102 @@
+# ===========================================================================
+# KBC QA CORE - the release the Backend/Infrastructure team deploys now.
+#
+# WHAT THIS STACK IS
+# ------------------
+# The nightly coded QA pipeline and the console that inspects it:
+#
+#   scheduler  the only service that WRITES. Runs 21:00 and 23:00 Africa/Cairo.
+#   api        read-mostly Operations API. Restarting it cannot interrupt a
+#              cycle, because the cycle does not run in this process.
+#   console    the static Vue bundle behind nginx.
+#
+# WHAT THIS STACK DELIBERATELY IS NOT
+# -----------------------------------
+# No media worker, no FFmpeg, no Positive Clip producer, no Lecture Part
+# producer. Those are Phase 6 and still under development. They are not
+# absent by omission - they are excluded, and QA does not depend on any of
+# them. `services/kbc-media-worker/docker-compose.yml` remains the separate
+# stack for that work and is untouched by this file.
+#
+# PROFILES
+# --------
+# Every service here carries the `qa-core` profile, so:
+#
+#   docker compose -f deploy/docker-compose.qa-core.yml --profile qa-core up -d
+#
+# starts exactly these three and could not start a media service even if one
+# were added to this file later without that profile.
+#
+# The project name keeps this stack's network and containers its own, so a
+# `down` here can never reach the media worker's project.
+# ===========================================================================
+name: kbc-qa-core
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+
+  # -- the only writer ------------------------------------------------------
+  scheduler:
+    profiles: ["qa-core"]
+    build:
+      context: ..
+      dockerfile: automation/scheduler/Dockerfile
+    image: kbc-lecture-scheduler:1.0.0
+    container_name: kbc-qa-scheduler
+    # Survives a VPS reboot without anyone logging in. This is what replaces
+    # the Windows Scheduled Task; the two must never both run.
+    restart: unless-stopped
+    # A cycle can be mid-write when the host asks the container to stop.
+    # SIGTERM lets the daemon finish the current cycle; the default 10s grace
+    # would SIGKILL it long before a real cycle completes. A killed cycle is
+    # SAFE - the transaction rolls back and PostgreSQL drops the session
+    # advisory lock - but a clean finish is better than a safe abort.
+    stop_grace_period: 300s
+    env_file: [../backend/.env]
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      TZ: Africa/Cairo
+    # NO ports. The scheduler is a daemon, not a server, and must have no
+    # inbound exposure of any kind.
+    logging: *logging
+
+  # -- the API --------------------------------------------------------------
+  api:
+    profiles: ["qa-core"]
+    build:
+      context: ..
+      dockerfile: deploy/backend/Dockerfile
+    image: kbc-qa-api:1.0.0
+    container_name: kbc-qa-api
+    restart: unless-stopped
+    env_file: [../backend/.env]
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      TZ: Africa/Cairo
+    # Bound to loopback on purpose: the edge proxy the infrastructure team
+    # configures is what should be reachable, not this container directly.
+    ports: ["127.0.0.1:8000:8000"]
+    logging: *logging
+
+  # -- the console ----------------------------------------------------------
+  console:
+    profiles: ["qa-core"]
+    build:
+      context: ..
+      dockerfile: deploy/frontend/Dockerfile
+      args:
+        # Same-origin: the browser calls /api and the edge proxy routes it.
+        VITE_API_BASE_URL: /api
+    image: kbc-qa-console:1.0.0
+    container_name: kbc-qa-console
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ["127.0.0.1:8080:80"]
+    logging: *logging

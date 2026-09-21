@@ -1,0 +1,1168 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 21,23 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -96,
+        96
+      ],
+      "id": "27cfb62e-69a7-4f41-8212-7200c6ee8d87",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        832
+      ],
+      "id": "d62e242e-ddf0-4377-a17a-8ecfaf08af13",
+      "name": "When clicking Execute workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Day window for Africa/Cairo with correct offset in the output.\n// Same shape as Create Date Range2 in the per-lecture workflows.\nconst TZ = 'Africa/Cairo';\n\nfunction partsInTz(d, tz=TZ){\n  const fmt = new Intl.DateTimeFormat('en-GB',{\n    timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',\n    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false\n  });\n  const obj = Object.fromEntries(fmt.formatToParts(d).map(p=>[p.type,p.value]));\n  return { yyyy: obj.year, mm: obj.month, dd: obj.day };\n}\n\nfunction tzOffsetHHMM(date, tz=TZ){\n  const utc = new Date(Date.UTC(\n    date.getFullYear(), date.getMonth(), date.getDate(),\n    date.getHours(), date.getMinutes(), date.getSeconds(), date.getMilliseconds()\n  ));\n  const inTz = new Date(utc.toLocaleString('en-US',{ timeZone: tz }));\n  const offMin = Math.round((inTz - utc)/60000);\n  const sign = offMin >= 0 ? '+' : '-';\n  const a = Math.abs(offMin);\n  const H = String(Math.floor(a/60)).padStart(2,'0');\n  const M = String(a%60).padStart(2,'0');\n  return `${sign}${H}:${M}`;\n}\n\nconst now = new Date();\nconst { yyyy, mm, dd } = partsInTz(now, TZ);\n\n\nconst startLocal = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);\nconst off = tzOffsetHHMM(startLocal, TZ);\n\nreturn [{\n  json: {\n    targetDate:   `${yyyy}-${mm}-${dd}`,\n    today:        `${yyyy}-${mm}-${dd}T00:00:00${off}`,\n    todayPlusOne: `${yyyy}-${mm}-${dd}T23:59:59${off}`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        128
+      ],
+      "id": "7082d6f7-19fc-497e-b9c1-7346d6e6fbd6",
+      "name": "Create Date Range"
+    },
+    {
+      "parameters": {
+        "url": "={{ `https://graph.microsoft.com/v1.0/me/calendarView?$top=100&startDateTime=${encodeURIComponent($items('Create Date Range')[0].json.today)}&endDateTime=${encodeURIComponent($items('Create Date Range')[0].json.todayPlusOne)}` }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "outlook.timezone=\"Africa/Cairo\""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        576,
+        128
+      ],
+      "id": "2085ed77-c388-4f75-a2d6-873ba2d5c9ca",
+      "name": "Get Today's Calendar Events",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "executeOnce": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "if (!items[0].json.value || !Array.isArray(items[0].json.value)) {\n  return [];\n}\n\nreturn items[0].json.value.map(e => ({\n  json: {\n    attendees: e.attendees || null,\n    subject: e.subject || null,\n    meetingStart: e.start?.dateTime || null,\n    meetingEnd: e.end?.dateTime || null,\n    joinUrl: e.onlineMeeting?.joinUrl || null,\n    bodyPreview: e.bodyPreview || null,\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        128
+      ],
+      "id": "bbe94992-196a-4a5b-8afe-03bc2da4b825",
+      "name": "Extract Calendar Fields"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.microsoft.com/v1.0/me/onlineMeetings?$filter=JoinWebUrl eq '{{ $json.joinUrl }}'",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1024,
+        128
+      ],
+      "id": "9c2fbcd3-8917-459b-8fcb-bf7bc071fc4e",
+      "name": "Find Online Meeting by JoinWebUrl",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const SRC_NODE = \"Extract Calendar Fields\";\n\nreturn items.map((it, idx) => {\n  const meeting = (it.json.value || [])[0] || {};\n\n  const pIndex = it.pairedItem?.item ?? idx;\n  const src = $items(SRC_NODE)[pIndex]?.json || {};\n\n  return {\n    json: {\n      subject: src.subject || meeting.subject || null,\n      meetingStart: src.meetingStart || null,\n      meetingEnd: src.meetingEnd || null,\n      joinUrl: src.joinUrl || null,\n      meetingId: meeting.id || \"\"\n    },\n    pairedItem: { item: pIndex }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        128
+      ],
+      "id": "f843f76e-e303-4c48-888f-28104cca3105",
+      "name": "Pick Meeting Id"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT \"Group\" AS group_name\nFROM public.aptem_auto_extracting\nWHERE \"Group\" IS NOT NULL\n  AND btrim(\"Group\") <> ''\n  AND lower(coalesce(\"Program-Status\", '')) = 'active'\nORDER BY \"Group\";",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        352,
+        128
+      ],
+      "id": "5f772066-627d-42e7-9b8c-54b6a6be5adb",
+      "name": "Get Active Groups",
+      "credentials": {
+        "postgres": {
+          "id": "uGzHdDkRpcgWXOlK",
+          "name": "Aptem auto extracting ( ل عيون ال خلود )"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Match each Teams calendar event to one active Aptem group.\nfunction normalizeGroup(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/&amp;/g, '&')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst groupItems = $items(\"Get Active Groups\") || [];\nconst groupLookup = new Map();\nfor (const item of groupItems) {\n  const original = item?.json?.group_name;\n  const normalized = normalizeGroup(original);\n  if (original && normalized) groupLookup.set(normalized, original);\n}\n\nconst evaluated = items.map(item => {\n  const event = item.json || {};\n  const normalizedSubject = normalizeGroup(event.subject);\n  const module = groupLookup.get(normalizedSubject) || null;\n  const matched = Boolean(module && event.meetingId);\n  return {\n    ...event,\n    matched,\n    module,\n    targetDate: String(event.meetingStart || '').slice(0, 10),\n    scheduledStart: event.meetingStart || '',\n    scheduledEnd: event.meetingEnd || '',\n    matchReason: matched\n      ? 'normalized subject equals active Aptem group'\n      : !event.meetingId ? 'missing meetingId' : 'no active group match'\n  };\n});\n\nconst matchedCount = evaluated.filter(row => row.matched).length;\nconst summary = {\n  total_calendar_events: evaluated.length,\n  total_active_groups: groupLookup.size,\n  matched_count: matchedCount,\n  unmatched_count: evaluated.length - matchedCount\n};\n\nreturn evaluated.map(row => ({ json: { ...row, _summary: summary } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        128
+      ],
+      "id": "3164dd5c-9ec0-4a84-a1d3-2d49e0e39cb5",
+      "name": "Match Calendar to Groups"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "09fad83d-e9df-435b-ad9e-7c45dcb6a457",
+              "leftValue": "={{ $json.matched }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1696,
+        128
+      ],
+      "id": "47374031-1362-425d-afe8-c9608f1d3973",
+      "name": "Matched Lecture?"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "LW0lYn7XXJ9JTaYB",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/LW0lYn7XXJ9JTaYB",
+          "cachedResultName": "QA One Lecture - Safe Exact Recording v8"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1936,
+        112
+      ],
+      "id": "1befbaff-fdf2-46c2-8bdb-612015b024c8",
+      "name": "Execute QA One Lecture"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    dry_run: false,\n    max_timestamp_difference_seconds: 15,\n    max_lectures: 100\n  }\n}];"
+      },
+      "id": "fa8a893e-b132-408b-a40d-9475ee123ee3",
+      "name": "Run Settings - EDIT HERE",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        144,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (s.session_id)\n    p.lecture_key,\n\n    s.date::date AS date,\n    s.date::date AS session_date,\n    s.subject,\n    s.trainer,\n\n    p.module,\n    p.engagement,\n    p.attended_count,\n    p.met_count,\n\n    s.meeting_id,\n    s.session_id,\n    s.recording_url,\n    s.recording_link_status\n\nFROM public.qa_doctors_sessions s\n\nLEFT JOIN public.qa_perfect_lectures p\n    ON p.session_id = s.session_id\n\nWHERE NULLIF(BTRIM(s.recording_url), '') IS NULL\n\n  AND NULLIF(BTRIM(s.meeting_id), '') IS NOT NULL\n  AND NULLIF(BTRIM(s.session_id), '') IS NOT NULL\n\n  AND s.date::date >= CURRENT_DATE - INTERVAL '90 days'\n\nORDER BY\n    s.session_id,\n    s.date DESC\n\nLIMIT $1::integer;",
+        "options": {
+          "queryReplacement": "={{ [Math.max(1, Number($items('Run Settings - EDIT HERE')[0].json.max_lectures || 5))] }}"
+        }
+      },
+      "id": "093f05d9-61e5-4237-adb5-f05bc681408c",
+      "name": "Get Target Lectures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        368,
+        784
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "function decodeSessionId(value) {\n  const raw = String(value || '').trim();\n  const base64 = raw.replace(/-/g, '+').replace(/_/g, '/');\n  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);\n  try {\n    return Buffer.from(padded, 'base64').toString('utf8');\n  } catch {\n    return '';\n  }\n}\n\nconst guid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';\nconst settings = $items('Run Settings - EDIT HERE')[0].json;\n\nreturn items.map((item, index) => {\n  const lecture = item.json || {};\n  const decoded = decodeSessionId(lecture.session_id);\n  const transcript = decoded.match(new RegExp('(' + guid + ')-\\\\d+-TranscriptV2', 'i'));\n  const allGuids = decoded.match(new RegExp(guid, 'ig')) || [];\n  const callId = String(transcript?.[1] || allGuids.at(-1) || '').toLowerCase();\n\n  return {\n    json: {\n      ...lecture,\n      expected_call_id: callId || null,\n      dry_run: Boolean(settings.dry_run),\n      allow_overwrite_existing: false,\n      max_timestamp_difference_seconds: Number(settings.max_timestamp_difference_seconds || 15)\n    },\n    pairedItem: { item: index }\n  };\n});"
+      },
+      "id": "f59bbdf5-1a55-4cd5-8a90-d2fcabe55b54",
+      "name": "Extract Exact Call IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/me/onlineMeetings/' + encodeURIComponent($json.meeting_id) + '/recordings?$top=100' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "4faa3e60-0372-4c16-a794-51498c18f3d4",
+      "name": "Get Meeting Recordings by Meeting ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lectures = $items('Extract Exact Call IDs');\n\nconst result = items.map((item, index) => {\n  const lecture = lectures[index]?.json || {};\n  const response = item.json || {};\n  const recordings = Array.isArray(response.value) ? response.value : [];\n  const expected = String(lecture.expected_call_id || '').toLowerCase();\n  const matches = recordings.filter(recording =>\n    String(recording?.callId || '').toLowerCase() === expected\n  );\n  const exact = matches.length === 1 ? matches[0] : null;\n\n  let graph_status = 'exact_graph_recording_found';\n  if (!expected) graph_status = 'session_call_id_missing';\n  else if (matches.length === 0) graph_status = 'graph_recording_not_found_for_call_id';\n  else if (matches.length > 1) graph_status = 'ambiguous_graph_recordings_for_call_id';\n\n  return {\n    ...lecture,\n    graph_recording_id: exact?.id || null,\n    graph_created_at: exact?.createdDateTime || null,\n    graph_content_correlation_id: exact?.contentCorrelationId || null,\n    graph_status\n  };\n});\n\nreturn [{ json: { lectures: result, lecture_count: result.length } }];"
+      },
+      "id": "08e3c50f-98ff-45f5-adac-e8887a1c5d69",
+      "name": "Collect Lectures and Exact Graph Times",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lectures = Array.isArray($json.lectures) ? $json.lectures : [];\nconst dates = [...new Set(\n  lectures\n    .map(lecture => String(lecture.date || '').slice(0, 10))\n    .filter(Boolean)\n)].sort();\n\nreturn dates.map((date, index) => {\n  const compactDate = date.replace(/-/g, '');\n  return {\n    json: {\n      date,\n      compact_date: compactDate,\n      search_body: {\n        requests: [{\n          entityTypes: ['driveItem'],\n          query: {\n            queryString: compactDate + ' \"Meeting Recording\" filetype:mp4'\n          },\n          from: 0,\n          size: 500,\n          fields: [\n            'id',\n            'name',\n            'webUrl',\n            'createdDateTime',\n            'lastModifiedDateTime',\n            'parentReference',\n            'file'\n          ]\n        }]\n      }\n    },\n    pairedItem: { item: index }\n  };\n});"
+      },
+      "id": "50801902-35af-4c62-a757-2b8b283b4e4b",
+      "name": "Build One Search per Lecture Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.microsoft.com/v1.0/search/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.search_body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 3,
+              "batchInterval": 300
+            }
+          }
+        }
+      },
+      "id": "a1c14dee-4d11-4674-9b57-87d7e98f1482",
+      "name": "Search All Accessible SharePoint and OneDrive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1488,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const searchDates = $items('Build One Search per Lecture Date');\nconst files = [];\n\nitems.forEach((item, index) => {\n  const response = item.json || {};\n  const searchDate = searchDates[index]?.json?.date || null;\n  const hits = (response.value || [])\n    .flatMap(value => value?.hitsContainers || [])\n    .flatMap(container => container?.hits || []);\n\n  for (const hit of hits) {\n    const resource = hit?.resource;\n    if (!resource?.id || !resource?.name) continue;\n    const driveId = resource?.parentReference?.driveId || null;\n    if (!driveId) continue;\n    files.push({\n      id: resource.id,\n      driveId,\n      name: resource.name,\n      webUrl: resource.webUrl || null,\n      createdDateTime: resource.createdDateTime || null,\n      lastModifiedDateTime: resource.lastModifiedDateTime || null,\n      source: 'tenant_graph_search',\n      search_date: searchDate\n    });\n  }\n});\n\nreturn [{ json: { tenant_search_files: files } }];"
+      },
+      "id": "9ffead36-8d8d-4e64-953d-8263ebdd3d31",
+      "name": "Collect Tenant Search Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/joinedTeams",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "3ce63d50-738c-432f-a66e-4e763b640251",
+      "name": "Get All Joined Teams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1936,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = Array.isArray($json.value) ? $json.value : [];\nif (!teams.length) {\n  throw new Error(\n    'No Teams returned. Reconnect the Microsoft credential with Team.ReadBasic.All.'\n  );\n}\n\nreturn teams.map((team, index) => ({\n  json: {\n    team_id: team.id,\n    team_name: team.displayName || null\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "135d1668-0bc9-49bc-bc51-a073a8854411",
+      "name": "Expand Teams",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels?$select=id,displayName,membershipType' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "c0c7c74a-145f-47c3-b657-07da816a8b70",
+      "name": "Get Every Team Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2384,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = $items('Expand Teams');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const team = teams[index]?.json || {};\n  const channels = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const channel of channels) {\n    if (!channel?.id) continue;\n    output.push({\n      json: {\n        ...team,\n        channel_id: channel.id,\n        channel_name: channel.displayName || null,\n        channel_type: channel.membershipType || null\n      }\n    });\n  }\n});\n\nif (!output.length) {\n  throw new Error(\n    'No Teams channels returned. Reconnect the credential with Channel.ReadBasic.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "92c4d920-41fd-443b-ae39-3ffbb6eff59d",
+      "name": "Expand All Channels",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2608,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels/' + encodeURIComponent($json.channel_id) + '/filesFolder' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "c1e199c7-747a-4590-8def-615e76adecb1",
+      "name": "Get Every Channel Files Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2832,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const channels = $items('Expand All Channels');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const folder = item.json || {};\n  const channel = channels[index]?.json || {};\n  const driveId =\n    folder?.parentReference?.driveId ||\n    folder?.remoteItem?.parentReference?.driveId ||\n    null;\n  const folderId = folder?.id || folder?.remoteItem?.id || null;\n  if (!driveId || !folderId) return;\n\n  output.push({\n    json: {\n      ...channel,\n      drive_id: driveId,\n      channel_folder_id: folderId\n    }\n  });\n});\n\nif (!output.length) {\n  throw new Error(\n    'No channel file folders are accessible. The credential needs Files.Read.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "6fb1148b-be14-437e-ab0f-010ec695e6ff",
+      "name": "Prepare Channel Recording Folders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3056,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.drive_id) + '/items/' + encodeURIComponent($json.channel_folder_id) + ':/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "22a3d6df-f048-4a74-bb38-908b8bd4472a",
+      "name": "List Every Channel Recordings Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3280,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const folders = $items('Prepare Channel Recording Folders');\nconst files = [];\n\nitems.forEach((item, index) => {\n  const folder = folders[index]?.json || {};\n  const children = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const file of children) {\n    if (!file?.id || !file?.file || !/\\.mp4$/i.test(String(file.name || ''))) {\n      continue;\n    }\n    files.push({\n      id: file.id,\n      driveId: file?.parentReference?.driveId || folder.drive_id || null,\n      name: file.name,\n      webUrl: file.webUrl || null,\n      createdDateTime: file.createdDateTime || null,\n      lastModifiedDateTime: file.lastModifiedDateTime || null,\n      source: 'teams_channel_recordings_folder',\n      team_id: folder.team_id || null,\n      team_name: folder.team_name || null,\n      channel_id: folder.channel_id || null,\n      channel_name: folder.channel_name || null\n    });\n  }\n});\n\nreturn [{ json: { channel_recording_files: files } }];"
+      },
+      "id": "930eb521-61ee-4a31-9ed2-2dfa300c1d78",
+      "name": "Collect All Channel Recording Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3504,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/drive/root:/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "6f2682cc-dbcb-42e5-9090-266ea48866ef",
+      "name": "List Current User OneDrive Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3728,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lectures =\n  $items('Collect Lectures and Exact Graph Times')[0]?.json?.lectures || [];\nconst tenantFiles =\n  $items('Collect Tenant Search Candidates')[0]?.json?.tenant_search_files || [];\nconst channelFiles =\n  $items('Collect All Channel Recording Files')[0]?.json?.channel_recording_files || [];\nconst oneDriveResponse = items[0]?.json || {};\nconst oneDriveFiles = (Array.isArray(oneDriveResponse.value) ? oneDriveResponse.value : [])\n  .filter(file => file?.id && file?.file && /\\.mp4$/i.test(String(file.name || '')))\n  .map(file => ({\n    id: file.id,\n    driveId: file?.parentReference?.driveId || null,\n    name: file.name,\n    webUrl: file.webUrl || null,\n    createdDateTime: file.createdDateTime || null,\n    lastModifiedDateTime: file.lastModifiedDateTime || null,\n    source: 'current_user_onedrive_recordings'\n  }));\n\nconst deduped = new Map();\nfor (const file of [...tenantFiles, ...channelFiles, ...oneDriveFiles]) {\n  if (!file?.id || !file?.driveId) continue;\n  const key = String(file.driveId) + ':' + String(file.id);\n  const previous = deduped.get(key) || {};\n  deduped.set(key, { ...previous, ...file });\n}\nconst files = [...deduped.values()];\n\n// This is the same subject normalization used by QA One Lecture v8.\n// It intentionally treats \"Dr.Femi ...\" and \"Femi ...\" as the same subject.\nconst normalizeSubject = value => String(value || '')\n  .toLowerCase()\n  .replace(/&amp;/g, '&')\n  .replace(/[^a-z0-9]+/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .replace(/^(dr|doctor|prof|professor|mr|mrs|ms)\\s+/, '')\n  .replace(/[^a-z0-9]+/g, '');\n\nfunction parseTeamsFilename(name) {\n  const match = String(name || '').match(\n    /^(.*)-(\\d{8})_(\\d{6})(?:UTC)?-Meeting Recording\\.mp4$/i\n  );\n  if (!match) return null;\n  const date = match[2];\n  const time = match[3];\n  const iso = date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6, 8) +\n    'T' + time.slice(0, 2) + ':' + time.slice(2, 4) + ':' + time.slice(4, 6) + 'Z';\n  const timestamp = Date.parse(iso);\n  if (!Number.isFinite(timestamp)) return null;\n  return { subject: match[1], timestamp, iso };\n}\n\nreturn lectures.map((lecture, index) => {\n  const graphTimestamp = Date.parse(lecture.graph_created_at || '');\n  const normalizedSubject = normalizeSubject(lecture.subject);\n  const maxDiff = Number(lecture.max_timestamp_difference_seconds || 15);\n\n  const exactCandidates = files\n    .map(file => ({ file, parsed: parseTeamsFilename(file.name) }))\n    .filter(candidate => candidate.parsed)\n    .map(candidate => ({\n      ...candidate,\n      subject_exact: normalizeSubject(candidate.parsed.subject) === normalizedSubject,\n      difference_seconds: Number.isFinite(graphTimestamp)\n        ? Math.abs(candidate.parsed.timestamp - graphTimestamp) / 1000\n        : null\n    }))\n    .filter(candidate => candidate.subject_exact &&\n      candidate.difference_seconds !== null && candidate.difference_seconds <= maxDiff)\n    .sort((a, b) => a.difference_seconds - b.difference_seconds);\n\n  let status = 'recording_file_not_found_in_accessible_locations';\n  if (lecture.graph_status !== 'exact_graph_recording_found') status = lecture.graph_status;\n  else if (exactCandidates.length > 1) status = 'ambiguous_exact_recording_files_no_update';\n  else if (exactCandidates.length === 1) status = 'exact_recording_file_matched';\n\n  const best = exactCandidates.length === 1 ? exactCandidates[0] : null;\n  const file = best?.file || null;\n  return {\n    json: {\n      ...lecture,\n      recording_item_id: file?.id || null,\n      recording_drive_id: file?.driveId || null,\n      recording_filename: file?.name || null,\n      recording_web_url: file?.webUrl || null,\n      recording_source: file?.source || null,\n      recording_team_name: file?.team_name || null,\n      recording_channel_name: file?.channel_name || null,\n      timestamp_difference_seconds: best?.difference_seconds ?? null,\n      exact_file_matches: exactCandidates.length,\n      candidate_files_seen: files.length,\n      recording_match_method: best ? 'exact_call_id_subject_and_timestamp_v8' : null,\n      ambiguous_candidate_filenames: exactCandidates.length > 1\n        ? exactCandidates.map(candidate => candidate.file?.name || null) : [],\n      recording_link_status: status\n    },\n    pairedItem: { item: index }\n  };\n});"
+      },
+      "id": "ddac09ab-ac0c-4dc3-bb9b-3849a023e424",
+      "name": "Match Every Lecture Safely",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3952,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "0807949a-54a1-4fa1-bda3-a051c987f9ad",
+              "leftValue": "={{ $json.dry_run }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "3174a8a1-d676-4fb5-8674-107a55d5e2c5",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4176,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item, index) => ({\n  json: {\n    ...item.json,\n    execution_result:\n      item.json.recording_link_status === 'exact_recording_file_matched'\n        ? 'DRY_RUN_EXACT_MATCH_NO_DATABASE_UPDATE'\n        : 'DRY_RUN_UNMATCHED_NO_DATABASE_UPDATE'\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "50d2eae1-3119-4686-94ea-f1129db004e4",
+      "name": "Dry Run Results - REVIEW THIS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0072ec0-ef0f-405d-a310-a6eb65387d2c",
+              "leftValue": "={{ $json.recording_link_status }}",
+              "rightValue": "exact_recording_file_matched",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "e00e3a68-0365-4635-a2ab-447dcb1c0e51",
+              "leftValue": "={{ $json.recording_item_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "094f2b51-ac15-406c-a12b-6d1270d69f17",
+              "leftValue": "={{ $json.recording_drive_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2992702-35ac-4d0b-ae8a-68369377a35c",
+      "name": "Exactly One Safe File?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4400,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.recording_drive_id) + '/items/' + encodeURIComponent($json.recording_item_id) + '/createLink' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'view', scope: 'organization' }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "ccb5d249-eb66-47bf-bddf-70b9b0a16b43",
+      "name": "Create Organization View Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4624,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const matchedItems = $items('Exactly One Safe File?', 0, 0);\n\nfunction pairedIndex(item, fallback) {\n  const paired = item?.pairedItem;\n  if (Array.isArray(paired)) {\n    const value = Number(paired[0]?.item);\n    if (Number.isInteger(value)) return value;\n  }\n  const value = Number(paired?.item);\n  return Number.isInteger(value) ? value : fallback;\n}\n\nreturn items.map((item, index) => {\n  const matchedIndex = pairedIndex(item, index);\n  const lecture = matchedItems[matchedIndex]?.json || {};\n  const response = item.json || {};\n  const organizationUrl = String(response.link?.webUrl || '').trim() || null;\n  const itemUrl = String(lecture.recording_web_url || '').trim() || null;\n  const finalUrl = organizationUrl || itemUrl;\n\n  return {\n    json: {\n      ...lecture,\n      recording_url: finalUrl,\n      recording_link_status: organizationUrl\n        ? 'organization_view_link_created_exact_match'\n        : (itemUrl\n            ? 'drive_item_web_url_used_exact_match'\n            : 'create_link_failed_no_update'),\n      create_link_error: response.error?.message || null\n    },\n    pairedItem: { item: matchedIndex }\n  };\n});"
+      },
+      "id": "fb64be21-736a-4ab3-8481-68db4ba8a6aa",
+      "name": "Finalize Recording URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4848,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH input AS (\n  SELECT\n    NULLIF($1, '')::text AS session_id,\n    NULLIF($2, '')::text AS recording_url,\n    NULLIF($3, '')::text AS recording_item_id,\n    NULLIF($4, '')::text AS recording_drive_id,\n    NULLIF($5, '')::text AS recording_filename,\n    NULLIF($6, '')::text AS recording_link_status,\n    NULLIF($7, '')::text AS lecture_key,\n    NULLIF($8, '')::text AS meeting_id\n),\nsession_update AS (\n  UPDATE public.qa_doctors_sessions s\n  SET\n    recording_url = i.recording_url,\n    recording_item_id = i.recording_item_id,\n    recording_drive_id = i.recording_drive_id,\n    recording_filename = i.recording_filename,\n    recording_link_status = i.recording_link_status,\n    recording_link_updated_at = NOW()\n  FROM input i\n  WHERE s.session_id = i.session_id\n    AND i.recording_url IS NOT NULL\n    AND NULLIF(BTRIM(s.recording_url), '') IS NULL\n  RETURNING s.session_id\n),\nperfect_update AS (\n  UPDATE public.qa_perfect_lectures p\n  SET\n    recording_url = i.recording_url,\n    meeting_id = COALESCE(p.meeting_id, i.meeting_id),\n    session_id = COALESCE(p.session_id, i.session_id)\n  FROM input i\n  WHERE p.lecture_key = i.lecture_key\n    AND i.recording_url IS NOT NULL\n    AND NULLIF(BTRIM(p.recording_url), '') IS NULL\n  RETURNING p.lecture_key\n)\nSELECT\n  i.session_id,\n  i.lecture_key,\n  i.recording_url,\n  i.recording_filename,\n  i.recording_link_status,\n  EXISTS (SELECT 1 FROM session_update) AS session_updated,\n  EXISTS (SELECT 1 FROM perfect_update) AS perfect_updated\nFROM input i;",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.session_id,\n  $json.recording_url,\n  $json.recording_item_id,\n  $json.recording_drive_id,\n  $json.recording_filename,\n  $json.recording_link_status,\n  $json.lecture_key,\n  $json.meeting_id\n] }}"
+        }
+      },
+      "id": "ba5ab956-5dd5-496d-af4f-b03d61832de6",
+      "name": "Update Both Recording Tables",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        5072,
+        784
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item, index) => ({\n  json: {\n    ...item.json,\n    execution_result: 'NO_DATABASE_UPDATE_UNSAFE_OR_MISSING_MATCH'\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "331e55b4-812b-4241-980c-2e97d43fe183",
+      "name": "Unmatched - Never Update DB",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4624,
+        976
+      ]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Create Date Range",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run Settings - EDIT HERE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking Execute workflow": {
+      "main": [
+        [
+          {
+            "node": "Create Date Range",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run Settings - EDIT HERE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Date Range": {
+      "main": [
+        [
+          {
+            "node": "Get Active Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Today's Calendar Events": {
+      "main": [
+        [
+          {
+            "node": "Extract Calendar Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Calendar Fields": {
+      "main": [
+        [
+          {
+            "node": "Find Online Meeting by JoinWebUrl",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Online Meeting by JoinWebUrl": {
+      "main": [
+        [
+          {
+            "node": "Pick Meeting Id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Meeting Id": {
+      "main": [
+        [
+          {
+            "node": "Match Calendar to Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Groups": {
+      "main": [
+        [
+          {
+            "node": "Get Today's Calendar Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Calendar to Groups": {
+      "main": [
+        [
+          {
+            "node": "Matched Lecture?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matched Lecture?": {
+      "main": [
+        [
+          {
+            "node": "Execute QA One Lecture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Settings - EDIT HERE": {
+      "main": [
+        [
+          {
+            "node": "Get Target Lectures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Target Lectures": {
+      "main": [
+        [
+          {
+            "node": "Extract Exact Call IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Exact Call IDs": {
+      "main": [
+        [
+          {
+            "node": "Get Meeting Recordings by Meeting ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Meeting Recordings by Meeting ID": {
+      "main": [
+        [
+          {
+            "node": "Collect Lectures and Exact Graph Times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Lectures and Exact Graph Times": {
+      "main": [
+        [
+          {
+            "node": "Build One Search per Lecture Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build One Search per Lecture Date": {
+      "main": [
+        [
+          {
+            "node": "Search All Accessible SharePoint and OneDrive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search All Accessible SharePoint and OneDrive": {
+      "main": [
+        [
+          {
+            "node": "Collect Tenant Search Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Tenant Search Candidates": {
+      "main": [
+        [
+          {
+            "node": "Get All Joined Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Joined Teams": {
+      "main": [
+        [
+          {
+            "node": "Expand Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Teams": {
+      "main": [
+        [
+          {
+            "node": "Get Every Team Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Team Channel": {
+      "main": [
+        [
+          {
+            "node": "Expand All Channels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand All Channels": {
+      "main": [
+        [
+          {
+            "node": "Get Every Channel Files Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Channel Files Folder": {
+      "main": [
+        [
+          {
+            "node": "Prepare Channel Recording Folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Channel Recording Folders": {
+      "main": [
+        [
+          {
+            "node": "List Every Channel Recordings Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Every Channel Recordings Folder": {
+      "main": [
+        [
+          {
+            "node": "Collect All Channel Recording Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect All Channel Recording Files": {
+      "main": [
+        [
+          {
+            "node": "List Current User OneDrive Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Current User OneDrive Recordings": {
+      "main": [
+        [
+          {
+            "node": "Match Every Lecture Safely",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Every Lecture Safely": {
+      "main": [
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Dry Run Results - REVIEW THIS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Exactly One Safe File?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exactly One Safe File?": {
+      "main": [
+        [
+          {
+            "node": "Create Organization View Link",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unmatched - Never Update DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Organization View Link": {
+      "main": [
+        [
+          {
+            "node": "Finalize Recording URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Recording URL": {
+      "main": [
+        [
+          {
+            "node": "Update Both Recording Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "1df6b8eb7cad6964c4019ffc034ca93b67e15d54f1ef0b486646f0918cb85bc3"
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "name": "KBC Positive Clips - Media Job Producer",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "session_id",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "When Called By Analysis Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -260,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "session_ids",
+              "value": "={{ $json.session_id ? '{\"' + $json.session_id + '\"}' : '{}' }}",
+              "type": "string"
+            },
+            {
+              "id": "s2",
+              "name": "clip_keys",
+              "value": "={}",
+              "type": "string"
+            },
+            {
+              "id": "s3",
+              "name": "destination_drive_id",
+              "value": "={{ $vars.KBC_CLIPS_DEST_DRIVE_ID }}",
+              "type": "string"
+            },
+            {
+              "id": "s4",
+              "name": "destination_folder_item_id",
+              "value": "={{ $vars.KBC_CLIPS_DEST_FOLDER_ITEM_ID }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Build Producer Parameters",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -40,
+        0
+      ],
+      "notes": "session_ids empty ({}) queues every V5 lecture. Pass one session_id to scope the run to the lecture that just finished analysis."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- ===========================================================================\n-- KBC positive-clip media-job producer  (canonical, idempotent)\n--\n-- Expands qa_doctors_sessions.positive_clips (V5) into queueable media jobs.\n-- Pure SQL: every timestamp, key and filename is derived deterministically.\n-- No AI is asked to compute seconds.\n--\n-- Named placeholders (psycopg / n8n \"Execute Query\" style):\n--   :dest_drive_id        destination SharePoint drive id\n--   :dest_folder_item_id  destination SharePoint folder item id\n--   :session_ids          text[] of session_ids; empty array = all V5 lectures\n--   :clip_keys            text[] of clip_keys; empty array = no clip filter\n--\n-- Idempotency: a clip is excluded when it already has a completed asset OR a\n-- pending/processing/completed media job. The final INSERT additionally relies\n-- on the qa_media_jobs_job_key_key UNIQUE constraint.\n-- ===========================================================================\n\nWITH expanded AS (\n    SELECT\n        s.session_id,\n        s.date                         AS lecture_date,\n        s.subject,\n        s.trainer,\n        s.recording_drive_id,\n        s.recording_item_id,\n        c.ord::int                     AS clip_index,\n        c.clip\n    FROM public.qa_doctors_sessions s\n    CROSS JOIN LATERAL jsonb_array_elements(s.positive_clips) WITH ORDINALITY AS c(clip, ord)\n    WHERE s.clips_analysis_completeness = 'positive_clips_v5_final'\n      AND jsonb_typeof(s.positive_clips) = 'array'\n      AND jsonb_array_length(s.positive_clips) > 0\n      AND coalesce(s.recording_drive_id, '') <> ''\n      AND coalesce(s.recording_item_id, '') <> ''\n      AND coalesce(s.session_id, '') <> ''\n      AND (cardinality($3::text[]) = 0 OR s.session_id = ANY($3::text[]))\n),\nparsed AS (\n    SELECT\n        e.*,\n        e.clip ->> 'start'                       AS original_start,\n        e.clip ->> 'end'                         AS original_end,\n        e.clip ->> 'start_cue'                   AS start_cue_txt,\n        e.clip ->> 'end_cue'                     AS end_cue_txt,\n        -- Strict HH:MM:SS.mmm validation. Anything else is rejected, never guessed.\n        (e.clip ->> 'start') ~ '^\\d{1,3}:[0-5]\\d:[0-5]\\d\\.\\d{1,3}$' AS start_ts_valid,\n        (e.clip ->> 'end')   ~ '^\\d{1,3}:[0-5]\\d:[0-5]\\d\\.\\d{1,3}$' AS end_ts_valid,\n        (e.clip ->> 'start_cue') ~ '^\\d+$'       AS start_cue_valid,\n        (e.clip ->> 'end_cue')   ~ '^\\d+$'       AS end_cue_valid\n    FROM expanded e\n),\ncomputed AS (\n    SELECT\n        p.*,\n        -- interval arithmetic is exact to the microsecond and fully deterministic\n        CASE WHEN p.start_ts_valid THEN\n            round(EXTRACT(EPOCH FROM p.original_start::interval)::numeric, 3) END AS orig_start_seconds,\n        CASE WHEN p.end_ts_valid THEN\n            round(EXTRACT(EPOCH FROM p.original_end::interval)::numeric, 3)   END AS orig_end_seconds\n    FROM parsed p\n),\npadded AS (\n    SELECT\n        c.*,\n        -- Business rule: 60s before, 60s after the positive moment.\n        GREATEST(0::numeric, c.orig_start_seconds - 60) AS start_seconds,\n        c.orig_end_seconds + 60                         AS end_seconds,\n        c.start_cue_txt::int                            AS start_cue,\n        c.end_cue_txt::int                              AS end_cue\n    FROM computed c\n    WHERE c.start_ts_valid AND c.end_ts_valid\n      AND c.start_cue_valid AND c.end_cue_valid\n      AND c.orig_end_seconds > c.orig_start_seconds     -- original_end > original_start\n),\nkeyed AS (\n    SELECT\n        p.*,\n        -- Stable clip identity, unchanged from the existing system.\n        p.session_id || ':' || p.start_cue || ':' || p.end_cue                    AS clip_key,\n        -- Deterministic media-job key. md5(session_id)[:8] is the same short id\n        -- already used in existing clip filenames.\n        'positive:' || left(md5(p.session_id), 8) || ':' || p.start_cue || ':' || p.end_cue AS job_key,\n        -- Filename matches the existing convention exactly:\n        -- YYYYMMDD_<safe-subject>_<short-id>_clip-NN_cue-X-Y.mp4\n        to_char(p.lecture_date::date, 'YYYYMMDD') || '_'\n          || left(trim(BOTH '-' FROM regexp_replace(coalesce(p.subject, 'lecture'), '[^A-Za-z0-9]+', '-', 'g')), 60) || '_'\n          || left(md5(p.session_id), 8) || '_clip-'\n          || lpad(p.clip_index::text, 2, '0') || '_cue-'\n          || p.start_cue || '-' || p.end_cue || '.mp4'                            AS output_filename\n    FROM padded p\n    WHERE p.start_seconds >= 0\n      AND p.end_seconds > p.start_seconds\n),\ncandidates AS (\n    SELECT\n        k.*,\n        round(k.end_seconds - k.start_seconds, 3) AS requested_duration_seconds,\n        a.trim_status AS existing_asset_status,\n        j.status      AS existing_job_status\n    FROM keyed k\n    LEFT JOIN public.qa_positive_clip_assets a ON a.clip_key = k.clip_key\n    LEFT JOIN LATERAL (\n        SELECT mj.status FROM public.qa_media_jobs mj\n        WHERE mj.clip_key = k.clip_key\n        ORDER BY CASE mj.status WHEN 'completed' THEN 1 WHEN 'processing' THEN 2\n                                WHEN 'pending' THEN 3 ELSE 4 END\n        LIMIT 1\n    ) j ON TRUE\n    WHERE (cardinality($4::text[]) = 0 OR k.clip_key = ANY($4::text[]))\n)\n\n\n-- ===========================================================================\n-- Idempotent INSERT of positive-clip media jobs.\n-- Prepend 010_positive_clip_candidates.sql (its trailing SELECT is replaced\n-- by this INSERT); the runner and the n8n node both compose them this way.\n--\n-- Safe to run repeatedly. A second run inserts 0 rows.\n-- ===========================================================================\n\nINSERT INTO public.qa_media_jobs (\n    job_key, session_id, job_type, part_number, clip_key,\n    start_seconds, end_seconds, cut_mode, output_filename,\n    source_drive_id, source_item_id,\n    destination_drive_id, destination_folder_item_id,\n    status, attempt_count, not_before, metadata\n)\nSELECT\n    c.job_key,\n    c.session_id,\n    'positive_clip',\n    NULL,                      -- part_number is only for lecture_part jobs\n    c.clip_key,\n    c.start_seconds,\n    c.end_seconds,\n    'precise',\n    c.output_filename,\n    c.recording_drive_id,\n    c.recording_item_id,\n    $1,\n    $2,\n    'pending',\n    0,\n    NOW(),\n    jsonb_strip_nulls(jsonb_build_object(\n        'lecture_date',           to_char(c.lecture_date::date, 'YYYY-MM-DD'),\n        'subject',                c.subject,\n        'trainer',                c.trainer,\n        'clip_index',             c.clip_index,\n        'original_start',         c.original_start,\n        'original_end',           c.original_end,\n        'original_duration_seconds', round(c.orig_end_seconds - c.orig_start_seconds, 3),\n        'start_cue',              c.start_cue,\n        'end_cue',                c.end_cue,\n        'speaker',                c.clip ->> 'speaker',\n        'positive_speakers',      c.clip -> 'positive_speakers',\n        'category',               c.clip ->> 'category',\n        'positive_quote',         c.clip ->> 'positive_quote',\n        'quote',                  c.clip ->> 'quote',\n        'reason',                 c.clip ->> 'reason',\n        'confidence',             c.clip -> 'confidence',\n        'semantic_verification',  c.clip -> 'semantic_verification',\n        'padding_before_seconds', 60,\n        'padding_after_seconds',  60,\n        'produced_by',            'positive-clip-producer-v1'\n    ))\nFROM candidates c\nWHERE\n    -- A completed asset means the clip is already delivered. Never re-queue it.\n    (c.existing_asset_status IS DISTINCT FROM 'completed')\n    -- An active or finished job already covers this clip. A 'failed' job is\n    -- deliberately NOT excluded: it is retried through the queue, not duplicated\n    -- (the job_key UNIQUE constraint makes the retry reuse the same row).\n    AND (c.existing_job_status IS NULL OR c.existing_job_status NOT IN ('pending', 'processing', 'completed'))\nON CONFLICT (job_key) DO NOTHING\nRETURNING job_id, job_key, clip_key, session_id, job_type, status,\n          start_seconds, end_seconds,\n          round(end_seconds - start_seconds, 3) AS duration_seconds,\n          cut_mode, output_filename\n",
+        "options": {
+          "queryReplacement": "={{ $json.destination_drive_id }},{{ $json.destination_folder_item_id }},{{ $json.session_ids }},{{ $json.clip_keys }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Queue Positive Clip Media Jobs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        200,
+        0
+      ],
+      "credentials": {},
+      "notes": "Idempotent. Returns one item per NEWLY inserted job; returns nothing when everything is already queued."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "r1",
+              "name": "queued_count",
+              "value": "={{ $input.all().filter(i => i.json.job_id).length }}",
+              "type": "number"
+            },
+            {
+              "id": "r2",
+              "name": "job_keys",
+              "value": "={{ $input.all().filter(i => i.json.job_id).map(i => i.json.job_key) }}",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Summarise Queued Jobs",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        440,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "When Called By Analysis Workflow": {
+      "main": [
+        [
+          {
+            "node": "Build Producer Parameters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Producer Parameters": {
+      "main": [
+        [
+          {
+            "node": "Queue Positive Clip Media Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Positive Clip Media Jobs": {
+      "main": [
+        [
+          {
+            "node": "Summarise Queued Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "kbc-media"
+    }
+  ]
+}

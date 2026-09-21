@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# The container option. Use this INSTEAD of the Windows Scheduled Task, never
+# alongside it - two schedulers would both fire, and although the cycle-level
+# advisory lock makes that safe, it makes the logs a puzzle.
+#
+# Conventions deliberately match services/kbc-media-worker: the same restart
+# policy, the same log rotation, the same "no port, this is not a server".
+# ---------------------------------------------------------------------------
+# The Compose PROJECT name, stated rather than inherited from whatever the
+# deployment directory happens to be called. It keeps this stack its own
+# project on whatever host it lands on: its own default network, its own
+# container names, and a `docker compose down` here that cannot reach another
+# project's containers or volumes.
+#
+# n8n is NOT on this host. It runs on a separate VPS and this platform talks
+# to it over remote HTTPS only, read-only, through its management API.
+name: kbc-lecture-platform
+
+services:
+  lecture-scheduler:
+    build:
+      context: ../..
+      dockerfile: automation/scheduler/Dockerfile
+    image: kbc-lecture-scheduler:1.0.0
+    container_name: kbc-lecture-scheduler
+    # The container must STAY RUNNING for this option to schedule anything:
+    # it sleeps until the next cron instant and then runs one cycle.
+    restart: unless-stopped
+    # A cycle can be mid-write when the host asks the container to stop.
+    # SIGTERM makes the daemon finish the current cycle and exit; the default
+    # 10s grace period would SIGKILL it long before a real cycle finished.
+    # A killed cycle is SAFE - the transaction rolls back and PostgreSQL drops
+    # the session advisory lock - but a clean finish is better than a safe
+    # abort, and 300s is longer than any observed cycle.
+    stop_grace_period: 300s
+    env_file:
+      - ../../backend/.env
+    environment:
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      # Everything else - SCHEDULER_ENABLED, SCHEDULER_CRON, the timezone and
+      # the lookback - comes from backend/.env, so the container and the CLI
+      # cannot disagree about the schedule.
+      TZ: Africa/Cairo
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

@@ -1,0 +1,88 @@
+{
+  "name": "KBC Lecture Parts - COMPLETE/FAIL node snippets (DO NOT ACTIVATE)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "f0000000-0000-4000-8000-000000000001",
+      "name": "Manual Trigger (snippet holder only)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -360,
+        0
+      ],
+      "notes": "This workflow is a carrier for two nodes to be COPIED into the live Media Worker API workflows. It is not meant to run."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH job AS (\n    SELECT\n        j.job_id, j.session_id, j.part_number, j.metadata,\n        j.start_seconds, j.end_seconds, j.attempt_count,\n        j.source_drive_id, j.source_item_id,\n        j.output_filename, j.output_drive_id, j.output_item_id,\n        j.output_web_url, j.output_size_bytes,\n        coalesce(j.metadata ->> 'split_version', 'semantic_balanced_v1') AS split_version\n    FROM public.qa_media_jobs j\n    WHERE j.job_id = $1\n      AND j.job_type = 'lecture_part'\n      AND j.status   = 'completed'\n      AND j.part_number BETWEEN 1 AND 3\n      AND j.output_item_id IS NOT NULL\n      AND j.output_web_url IS NOT NULL\n),\nplan AS (\n    SELECT j.*, p.split_plan_id\n    FROM job j\n    JOIN public.qa_lecture_split_plans p\n      ON p.session_id = j.session_id\n     AND p.split_version = j.split_version\n    WHERE p.planner_status = 'planned'\n)\nINSERT INTO public.qa_lecture_part_assets (\n    split_plan_id, session_id, split_version, part_number,\n    source_start_seconds, source_end_seconds, duration_seconds,\n    source_drive_id, source_item_id,\n    output_filename, output_drive_id, output_item_id, output_web_url, output_size_bytes,\n    status, error, attempt_count, updated_at\n)\nSELECT\n    p.split_plan_id, p.session_id, p.split_version, p.part_number,\n    p.start_seconds, p.end_seconds, round(p.end_seconds - p.start_seconds, 3),\n    p.source_drive_id, p.source_item_id,\n    p.output_filename, p.output_drive_id, p.output_item_id, p.output_web_url, p.output_size_bytes,\n    'completed', NULL, p.attempt_count, NOW()\nFROM plan p\nON CONFLICT (session_id, split_version, part_number) DO UPDATE SET\n    split_plan_id        = EXCLUDED.split_plan_id,\n    source_start_seconds = EXCLUDED.source_start_seconds,\n    source_end_seconds   = EXCLUDED.source_end_seconds,\n    duration_seconds     = EXCLUDED.duration_seconds,\n    source_drive_id      = EXCLUDED.source_drive_id,\n    source_item_id       = EXCLUDED.source_item_id,\n    output_filename      = EXCLUDED.output_filename,\n    output_drive_id      = EXCLUDED.output_drive_id,\n    output_item_id       = EXCLUDED.output_item_id,\n    output_web_url       = EXCLUDED.output_web_url,\n    output_size_bytes    = EXCLUDED.output_size_bytes,\n    status               = 'completed',\n    error                = NULL,\n    attempt_count        = GREATEST(qa_lecture_part_assets.attempt_count, EXCLUDED.attempt_count),\n    updated_at           = NOW()\nWHERE EXCLUDED.output_item_id IS NOT NULL\n  AND EXCLUDED.output_web_url IS NOT NULL\nRETURNING part_asset_id, session_id, split_version, part_number, status, duration_seconds\n",
+        "options": {
+          "queryReplacement": "={{ $json.job_id }}"
+        }
+      },
+      "id": "f0000000-0000-4000-8000-000000000002",
+      "name": "Sync Lecture Part Asset",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -80,
+        -110
+      ],
+      "credentials": {},
+      "alwaysOutputData": true,
+      "notes": "COPY into the live COMPLETE workflow, after 'Sync Positive Clip Asset'. $1 = job_id. No-op for positive_clip jobs."
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE public.qa_lecture_part_assets a\nSET status        = 'failed',\n    error         = left($2, 4000),\n    attempt_count = GREATEST(a.attempt_count, j.attempt_count),\n    updated_at    = NOW()\nFROM public.qa_media_jobs j\nWHERE j.job_id = $1\n  AND j.job_type = 'lecture_part'\n  AND a.session_id    = j.session_id\n  AND a.split_version = coalesce(j.metadata ->> 'split_version', 'semantic_balanced_v1')\n  AND a.part_number   = j.part_number\n  AND a.status IS DISTINCT FROM 'completed'\n  AND a.output_item_id IS NULL\nRETURNING a.part_asset_id, a.session_id, a.part_number, a.status\n",
+        "options": {
+          "queryReplacement": "={{ $json.job_id }},{{ $json.error }}"
+        }
+      },
+      "id": "f0000000-0000-4000-8000-000000000003",
+      "name": "Fail Lecture Part Asset",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -80,
+        110
+      ],
+      "credentials": {},
+      "alwaysOutputData": true,
+      "notes": "COPY into the live FAIL workflow. $1 = job_id, $2 = redacted error. UPDATE-only; never downgrades a delivered part."
+    }
+  ],
+  "connections": {
+    "Manual Trigger (snippet holder only)": {
+      "main": [
+        [
+          {
+            "node": "Sync Lecture Part Asset",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fail Lecture Part Asset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "kbc-media"
+    },
+    {
+      "name": "lecture-parts"
+    }
+  ]
+}

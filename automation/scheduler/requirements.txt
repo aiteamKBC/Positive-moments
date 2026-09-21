@@ -1,0 +1,16 @@
+# Production dependencies for the scheduler container. Deliberately NOT
+# backend/requirements.txt and NOT requirements-dev.txt.
+#
+# The scheduler is a database client and two HTTPS callers. It does not serve
+# HTTP, so Django, DRF and django-cors-headers have no business in a
+# production image, and pytest has no business in one at all.
+#
+# `tzdata` is pinned here rather than inherited by accident. The whole schedule
+# is Africa/Cairo, and `ZoneInfo("Africa/Cairo")` falls back to this package
+# when the base image carries no system zoneinfo database. Leaving that to
+# chance is how an unattended scheduler silently runs at the wrong hour - and
+# it was previously only present because the image installed the DEV
+# requirements file.
+psycopg[binary]==3.2.9
+python-dotenv==1.1.1
+tzdata>=2025.2
