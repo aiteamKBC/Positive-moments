@@ -23,7 +23,10 @@ from app.orchestration.locks import (
 from app.orchestration.actions import GuardedActionService
 from app.orchestration.n8n_preflight import LegacyQaPreflight, N8nReadOnlyGateway
 from app.orchestration.operations import OperationsService
-from app.orchestration.orchestrator import PipelineOrchestrator
+from app.orchestration.orchestrator import (
+    DEFAULT_MAX_PASSES,
+    PipelineOrchestrator,
+)
 from app.orchestration.reconciliation import DayReconciliation
 from app.orchestration.runner import StageRunner, attendance_probe_factory
 from app.orchestration.scheduler import SchedulerConfig, SchedulerService
@@ -69,7 +72,8 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
                        allow_provider: bool = True, allow_legacy_writes: bool = True,
                        discover: bool = False,
                        perfect_eligibility_version=None,
-                       provider_contract_version=None, max_passes: int = 8,
+                       provider_contract_version=None,
+                       max_passes: int = DEFAULT_MAX_PASSES,
                        probe_attendance: bool | None = None):
     """
     Assemble the orchestrator.

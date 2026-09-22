@@ -1,4 +1,4 @@
-# KBC QA Core — Release Readiness (rc2)
+# KBC QA Core — Release Readiness (rc3)
 
 **Written for:** the Backend / Infrastructure team who will deploy this.
 
@@ -10,6 +10,21 @@ and continues in development; nothing in this release depends on it.
 > September 2026 lectures the stopped legacy n8n QA flow never processed. The
 > nightly schedule, the writer protections and the media exclusion are
 > unchanged.
+
+> **rc2 → rc3** is a one-line correctness fix with no new feature and no
+> relaxed protection. `public.qa_doctors_sessions` is a live compatibility
+> surface - the positive-clips producer and the Django dashboard read it - so a
+> recovered lecture must appear in the canonical platform **and** in that table.
+> The orchestrator's pass cap was `8` while the executable stage chain is 13
+> long, and a lecture advances by at most one stage per pass, so a lecture
+> discovered from nothing stopped at `QA_RENDER`: `LEGACY_QA_SYNC` never ran and
+> no compatibility row was written for it. The nightly window never showed this,
+> because yesterday's lectures are already most of the way down the chain; a
+> backfill, which starts every lecture at zero and visits each business date
+> exactly once, does. The cap is now derived from the stage list
+> (`len(EXECUTABLE_STAGES) + 3` = 16), so it can never fall short again. Every
+> ownership rule is unchanged: a foreign legacy row is still protected in every
+> mode, and the scheduler's safe set is still insert-or-nothing.
 
 ---
 

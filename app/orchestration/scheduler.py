@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import date as _date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.orchestration.stages import RUN_TYPE_SCHEDULED
+from app.orchestration.stages import DEFAULT_MAX_PASSES, RUN_TYPE_SCHEDULED
 
 
 # The legacy QA Master's own schedule and timezone. Kept as the compatibility
@@ -94,7 +94,8 @@ class SchedulerConfig:
     # QA/Perfect production sync. On by default, because a scheduler that
     # cannot finish a lecture is not finishing anything.
     allow_legacy_writes: bool = True
-    max_passes: int = 8
+    # One number, defined next to the stage chain it has to cover.
+    max_passes: int = DEFAULT_MAX_PASSES
     source: dict = field(default_factory=dict)
 
     @classmethod
@@ -109,7 +110,7 @@ class SchedulerConfig:
             allow_graph=_flag(names["allow_graph"], True),
             allow_provider=_flag(names["allow_provider"], True),
             allow_legacy_writes=_flag(names["allow_legacy_writes"], True),
-            max_passes=_int(names["max_passes"], 8),
+            max_passes=_int(names["max_passes"], DEFAULT_MAX_PASSES),
             source={key: os.environ.get(value, "") for key, value in names.items()})
         config.validate()
         return config

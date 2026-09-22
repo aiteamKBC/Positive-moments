@@ -312,7 +312,7 @@ default**.
 | `SCHEDULER_DISCOVER` | `true` | run Graph calendar discovery |
 | `SCHEDULER_ALLOW_GRAPH` | `true` | permit transcript acquisition |
 | `SCHEDULER_ALLOW_PROVIDER` | `true` | permit paid generations |
-| `SCHEDULER_MAX_PASSES` | `8` | defect detector, not a budget |
+| `SCHEDULER_MAX_PASSES` | `16` | defect detector, not a budget. Derived as `len(EXECUTABLE_STAGES) + 3`: a lecture advances by at most one stage per pass, so a cap below the chain length is a silent budget. It was `8`, and a lecture discovered from nothing stopped at `QA_RENDER` — never reaching `LEGACY_QA_SYNC`, so no `qa_doctors_sessions` compatibility row was created for it. Fixed in rc3. |
 
 The cron copies the legacy QA Master's own schedule. That is a compatibility
 decision, not a preference: inventing a new time would mean inventing new

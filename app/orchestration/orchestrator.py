@@ -62,6 +62,7 @@ from app.orchestration.n8n_preflight import (
 )
 from app.orchestration.stages import (
     AUTOMATABLE_ACTIONS,
+    DEFAULT_MAX_PASSES,
     IDLE_ACTIONS,
     ITEM_BLOCKED,
     ITEM_FAILED,
@@ -95,8 +96,6 @@ WRITER_INTEGRITY_CODES = frozenset({WRITER_GUARD_REFUSED})
 # Failures that will repeat identically for every remaining lecture.
 SHARED_INFRASTRUCTURE_CODES = frozenset({GRAPH_AUTH_ERROR, GRAPH_PERMISSION_ERROR,
                                          DATABASE_ERROR})
-
-DEFAULT_MAX_PASSES = 8
 
 
 class PipelineOrchestrator:

@@ -78,6 +78,25 @@ OBSERVED_ONLY_STAGES = frozenset({RECORDING_LINK, EXCEL_SYNC})
 EXECUTABLE_STAGES = tuple(stage for stage in STAGE_ORDER
                           if stage not in OBSERVED_ONLY_STAGES)
 
+# The pass cap, defined here because it is a fact about the stage chain.
+#
+# A lecture advances by AT MOST ONE stage per pass, so a cap below the length
+# of that chain is not a defect detector - it is a silent budget that abandons
+# a lecture partway down the pipeline. At 8 it did exactly that: a lecture
+# discovered from nothing reached QA_RENDER and stopped, so PERFECT_ELIGIBILITY,
+# LEGACY_QA_SYNC and PERFECT_SYNC never ran and no `qa_doctors_sessions`
+# compatibility row was ever created for it. A nightly window never showed the
+# defect, because yesterday's lectures are already several stages in; a
+# September backfill, which starts every lecture at zero and visits each
+# business date exactly once, does.
+#
+# Derived rather than written as a number, so adding a stage can never leave
+# the cap one short again. The margin covers passes that re-derive state
+# without advancing anything: a day-scoped service shared across lectures, or
+# a probe that reads an empty source and writes nothing.
+MAX_PASS_MARGIN = 3
+DEFAULT_MAX_PASSES = len(EXECUTABLE_STAGES) + MAX_PASS_MARGIN
+
 
 # --- next actions -----------------------------------------------------------
 
