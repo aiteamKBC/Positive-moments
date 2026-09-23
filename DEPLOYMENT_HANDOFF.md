@@ -71,12 +71,21 @@ The schema is applied by running the numbered files in order against
 `DATABASE_URL`. **QA Core rc2 requires `001` … `016` and `020`.**
 
 ```bash
+# On an EMPTY database only. Apply in order; see the warning below before
+# re-running anything against a database that is already migrated.
 for f in app/db/migrations/0{0,1}*.sql; do
   echo "== $f"; psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f";
 done
 ```
 
-Each file is idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running is safe.
+**Most files are idempotent (`CREATE TABLE IF NOT EXISTS`), but `003` and `004`
+are not.** They are one-time forward migrations superseded by later ones:
+`003` renames `lecture_sessions.organizer_upn`, and `004` indexes
+`lecture_transcript_artifacts.lecture_id`, which `006` drops. Re-running either
+on an already-migrated database fails with `UndefinedColumn` inside its own
+transaction, so nothing is changed and nothing is damaged - but the loop above
+stops there with `ON_ERROR_STOP=1`. There is no migration runner and no ledger
+table: apply only what is missing, checking `information_schema.tables` first.
 
 Migration `020` adds the two backfill tables and widens the `run_type` CHECK to
 admit `BACKFILL`. Additive and re-runnable.

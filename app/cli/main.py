@@ -101,6 +101,7 @@ from app.db.repositories.qa_writer import (
 )
 from app.db.repositories.qa_writer import GenerationAttemptRepository
 from app.writer.modes import CANARY_NEW_ONLY, DRY_RUN, WRITE_ENABLED_MODES, WRITE_MODES
+from app.qa.perfect import may_publish
 from app.rendering.evidence import RENDERER_VERSION
 from app.writer.perfect_service import PerfectLecturePlanner, plan_perfect_for_day
 from app.orchestration.factory import (
@@ -155,6 +156,17 @@ def guard_write_command(args) -> None:
         raise PlatformError(
             WRITER_GUARD_REFUSED,
             f"{args.mode} requires --confirm-write to perform a real legacy write")
+    # F-01. Refused before any connection is opened, and regardless of
+    # --skip-perfect-lecture: naming a non-publishable policy in a write mode is
+    # a mistake worth stopping, not a flag combination worth interpreting. The
+    # Perfect planner enforces the same rule again on its own.
+    policy = getattr(args, "perfect_policy", None)
+    if policy is not None and not may_publish(policy):
+        raise PlatformError(
+            WRITER_GUARD_REFUSED,
+            f"--perfect-policy {policy} may not be used with {args.mode}; it has no "
+            "attendance requirement and is retained for DRY_RUN historical "
+            "reproduction only")
 
 
 def build_parser() -> argparse.ArgumentParser:

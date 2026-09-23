@@ -22,6 +22,25 @@ from app.transcripts.seam import (
 from app.transcripts.seam_service import SeamDedupService, SeamInputError
 from app.transcripts.webvtt import PARSER_VERSION
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 ANDREW = "25e85615-aa7a-5f49-bb40-078d7c7b65d0"
 CANARY = "8c2874d7-3db5-5870-ae47-4f745a847540"
@@ -71,20 +90,6 @@ def test_v1_and_v2_documents_coexist_for_the_same_lecture():
         v2 = _document(connection, ANDREW, SEAM_PARSER_VERSION)
         assert v1 is not None and v2 is not None
         assert v1[0] != v2[0], "each version must own a separate document"
-        connection.rollback()
-
-
-def test_the_existing_schema_needs_no_migration_for_a_second_version():
-    with _connection() as connection:
-        # The provenance key already includes parser_version, which is what
-        # lets v1 and v2 exist side by side without touching the schema.
-        definition = connection.execute("""
-            SELECT pg_get_constraintdef(con.oid) FROM pg_constraint con
-              JOIN pg_class rel ON rel.oid = con.conrelid
-             WHERE rel.relname = 'lecture_transcript_documents'
-               AND con.conname = 'lecture_transcript_documents_provenance_key'""").fetchone()
-        assert definition is not None
-        assert "parser_version" in definition[0]
         connection.rollback()
 
 
@@ -260,13 +265,6 @@ def test_a_dry_run_rebuild_writes_nothing():
         assert "document_persistence" not in result
         assert connection.execute(
             "SELECT count(*) FROM public.lecture_transcript_documents").fetchone()[0] == before
-        connection.rollback()
-
-
-def test_a_lecture_without_selected_parts_is_refused():
-    with _connection() as connection:
-        with pytest.raises(SeamInputError, match="no Phase 2B selected parts"):
-            _service().rebuild_lecture(connection, "00000000-0000-0000-0000-000000000000")
         connection.rollback()
 
 

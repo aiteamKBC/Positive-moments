@@ -1,8 +1,10 @@
 """
 Phase 2A database behaviour, all inside a transaction that is rolled back.
 
-Every test asserts against the real schema and then discards its writes, so no
-Phase 2A test ever leaves a row behind.
+RELEASE GATE: self-contained. Each test seeds the canonical lecture it needs
+(tests/integration/seeding.py) instead of borrowing whichever lecture happens
+to be in the database, so it passes on a freshly migrated one. Every test
+asserts against the real schema and then discards its writes.
 """
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -10,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import psycopg
 import pytest
 
+from tests.integration.seeding import DAY, seed_lecture
 from app.common.hashing import content_sha256, provider_transcript_identity
 from app.config.settings import Settings
 from app.db.repositories.ready_lectures import ReadyLectureRepository
@@ -29,19 +32,15 @@ def _connection():
     return psycopg.connect(settings.database_url)
 
 
-def _any_lecture_id(connection):
-    row = connection.execute(
-        "SELECT lecture_id FROM public.lecture_sessions ORDER BY session_date DESC LIMIT 1"
-    ).fetchone()
-    if not row:
-        pytest.skip("no canonical lecture rows to attach a transcript artifact to")
-    return row[0]
+def _seeded_lecture_id(connection):
+    """A canonical lecture of this test's own making."""
+    return seed_lecture(connection, select=False)["lecture_id"]
 
 
 def _register(repository, connection, lecture_id, transcript_id):
     artifact_id = provider_transcript_identity(
         provider=PROVIDER_MICROSOFT_GRAPH, provider_transcript_id=transcript_id)
-    created = datetime(2026, 9, 4, 7, 58, tzinfo=timezone.utc)
+    created = datetime(2031, 3, 4, 7, 58, tzinfo=timezone.utc)
     outcome = repository.upsert(
         connection, artifact_id, lecture_id,
         provider=PROVIDER_MICROSOFT_GRAPH, provider_transcript_id=transcript_id,
@@ -58,7 +57,7 @@ def test_artifact_upsert_is_idempotent_and_content_versions_are_append_only():
     repository = TranscriptArtifactRepository()
     transcript_id = f"transcript-{uuid.uuid4().hex}"
     try:
-        lecture_id = _any_lecture_id(connection)
+        lecture_id = _seeded_lecture_id(connection)
         artifact_id, first = _register(repository, connection, lecture_id, transcript_id)
         _, second = _register(repository, connection, lecture_id, transcript_id)
         assert (first, second) == ("created", "existing")
@@ -109,7 +108,7 @@ def test_stored_content_is_hash_verifiable():
     connection = _connection()
     repository = TranscriptArtifactRepository()
     try:
-        lecture_id = _any_lecture_id(connection)
+        lecture_id = _seeded_lecture_id(connection)
         artifact_id, _ = _register(repository, connection, lecture_id,
                                    f"transcript-{uuid.uuid4().hex}")
         digest = content_sha256(VTT_ONE)
@@ -145,7 +144,7 @@ def test_database_rejects_an_incomplete_content_pointer():
     connection = _connection()
     repository = TranscriptArtifactRepository()
     try:
-        lecture_id = _any_lecture_id(connection)
+        lecture_id = _seeded_lecture_id(connection)
         artifact_id, _ = _register(repository, connection, lecture_id,
                                    f"transcript-{uuid.uuid4().hex}")
         with pytest.raises(psycopg.errors.CheckViolation):
@@ -162,8 +161,12 @@ def test_database_rejects_an_incomplete_content_pointer():
 def test_ready_lecture_repository_splits_ready_from_unresolved():
     connection = _connection()
     try:
-        result = ReadyLectureRepository().load_day(connection, date(2026, 9, 4))
+        ready = seed_lecture(connection, select=False)
+        unresolved = seed_lecture(connection, select=False, downstream_ready=False)
+        result = ReadyLectureRepository().load_day(connection, DAY)
         assert result["considered"] == len(result["ready"]) + len(result["skipped"])
+        assert str(ready["lecture_id"]) in {str(x.lecture_id) for x in result["ready"]}
+        assert str(unresolved["lecture_id"]) in {str(x["lecture_id"]) for x in result["skipped"]}
         for lecture in result["ready"]:
             assert lecture.meeting_id and lecture.meeting_lookup_user_id
         for skipped in result["skipped"]:
@@ -178,7 +181,7 @@ def test_acquisition_run_audit_records_counters_and_rolls_back():
     connection = _connection()
     runs = TranscriptAcquisitionRunRepository()
     try:
-        run_id = runs.start(connection, date(2026, 9, 4))
+        run_id = runs.start(connection, DAY)
         runs.complete(connection, run_id, {
             "status": "COMPLETED", "lectures_considered": 8, "lectures_ready": 7,
             "lectures_skipped_not_ready": 1, "meetings_queried": 7,
@@ -208,7 +211,7 @@ def test_qa_doctors_transcripts_is_not_used_by_phase_2a():
         before = connection.execute(
             "SELECT count(*) FROM public.qa_doctors_transcripts").fetchone()[0]
         repository = TranscriptArtifactRepository()
-        lecture_id = _any_lecture_id(connection)
+        lecture_id = _seeded_lecture_id(connection)
         artifact_id, _ = _register(repository, connection, lecture_id,
                                    f"transcript-{uuid.uuid4().hex}")
         repository.store_content(

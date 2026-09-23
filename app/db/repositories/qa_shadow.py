@@ -36,7 +36,13 @@ SELECT l.lecture_id, l.subject, l.module, l.meeting_id,
        e.engagement_percentage, e.engagement_score, e.learner_engagement_status,
        e.item7_override_applied, e.calculation_status, e.source_fingerprint,
        sn.attendance_resolution_version,
-       tr.speaker_id, tr.speaker_label_raw
+       tr.speaker_id, tr.speaker_label_raw,
+       -- The frozen counts of the SAME snapshot this input is built on, so the
+       -- service can ask the coverage question of the evidence it is actually
+       -- about to evaluate. Appended, never interleaved: every positional
+       -- index above is part of an existing contract.
+       sn.source_row_count, sn.present_row_count, sn.effective_member_count,
+       (sn.metadata ->> 'source_rows_any_status')::int
   FROM public.lecture_sessions l
   JOIN public.lecture_transcript_selections s ON s.lecture_id = l.lecture_id
   JOIN public.lecture_combined_transcripts cb ON cb.selection_id = s.selection_id
@@ -175,7 +181,11 @@ class QaInputRepository:
              "learner_engagement_status": row[31], "item7_override_applied": row[32],
              "engagement_calculation_status": row[33], "engagement_source_fingerprint": row[34],
              "attendance_roster_version": row[35],
-             "canonical_trainer_speaker_id": row[36], "canonical_trainer": row[37]}
+             "canonical_trainer_speaker_id": row[36], "canonical_trainer": row[37],
+             "attendance_source_row_count": row[38],
+             "attendance_present_row_count": row[39],
+             "attendance_effective_member_count": row[40],
+             "attendance_source_rows_any_status": row[41]}
             for row in rows
         ]
 

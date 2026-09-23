@@ -44,6 +44,7 @@ time and can still refuse. Two independent refusals guard every automated
 write, and the last word always belongs to the writer.
 """
 from app.writer.modes import (
+    BLOCKED_AMBIGUOUS_LEGACY_IDENTITY,
     BLOCKED_BACKFILL_NOT_AUTHORISED,
     BLOCKED_INVALID_PAYLOAD,
     BLOCKED_NOT_READY,
@@ -86,6 +87,9 @@ QA_MANUAL = {
     BLOCKED_INVALID_PAYLOAD: "PAYLOAD_INVARIANT_FAILED",
     BLOCKED_BACKFILL_NOT_AUTHORISED: "BACKFILL_NOT_AUTHORISED",
     REVIEW_REQUIRED: "WRITER_REQUIRES_REVIEW",
+    # F-02. Several existing rows could be this lecture occurrence. Inserting
+    # would risk a duplicate and picking one would be a guess.
+    BLOCKED_AMBIGUOUS_LEGACY_IDENTITY: "LEGACY_IDENTITY_AMBIGUOUS",
 }
 
 # --- Perfect ------------------------------------------------------------

@@ -30,6 +30,25 @@ from app.rendering.service import (
     RenderInputError,
 )
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET = date(2026, 9, 4)
 
@@ -144,13 +163,6 @@ def test_an_unusable_evaluation_is_reported_not_evaluated():
         assert len(not_ready) == 1
         assert summary["not_ready_count"] == 1
         assert summary["provider_calls"] == 0
-        connection.rollback()
-
-
-def test_missing_evidence_for_the_day_fails_loudly():
-    with _connection() as connection:
-        with pytest.raises(RenderInputError):
-            _service(legacy=False).render_day(connection, date(2019, 1, 1))
         connection.rollback()
 
 

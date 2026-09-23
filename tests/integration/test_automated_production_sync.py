@@ -38,6 +38,25 @@ from app.writer.perfect_mapping import (
     RECORDING_OWNED_COLUMNS,
 )
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 SEPTEMBER_18 = date(2026, 9, 18)
 
@@ -114,10 +133,6 @@ def test_each_synced_lecture_has_exactly_eleven_distinct_checklist_rows():
         assert total == 11 and distinct == 11, session_id
 
 
-def test_the_session_mapping_covers_twenty_two_columns():
-    assert len(SESSION_COLUMNS) == 22
-
-
 # --- 12, 13. Perfect: foreign fields and the mapped digest ----------------------
 
 def test_the_automated_perfect_row_preserved_every_foreign_owned_field():
@@ -157,12 +172,6 @@ def test_the_perfect_write_recorded_the_policy_and_mapping_it_used():
     assert row[0] == "WRITTEN"
     assert row[1] == "kbc_perfect_v2_attendance_required"
     assert row[2] == "legacy_qa_v8_perfect_writer_v1"
-
-
-def test_the_perfect_mapping_still_owns_ten_columns_and_disowns_the_rest():
-    assert len(CODED_OWNED_COLUMNS) == 10
-    assert set(FOREIGN_OWNED_COLUMNS) == {"excel_synced_at", "detected_at", "id"}
-    assert set(RECORDING_OWNED_COLUMNS) == {"recording_url", "recap_url"}
 
 
 # --- 5, 7, 14. running it again does nothing ------------------------------------
@@ -332,58 +341,7 @@ def test_revalidating_an_already_current_answer_is_refused_as_unchanged():
     assert outcome["provider_calls"] == 0
 
 
-def test_the_revalidation_service_has_no_provider_at_all():
-    """Structurally incapable of buying a generation, not merely told not to."""
-    service = _runner(persist=True)._qa_service(provider=None)
-    assert service.provider is None
-
-
 # --- 25. cycle-level concurrency ---------------------------------------------------
-
-def test_two_scheduler_cycles_cannot_run_at_once():
-    lock = SchedulerCycleLock()
-    first, second = _connection(), _connection()
-    try:
-        assert lock.try_acquire(first) is True
-        assert lock.try_acquire(second) is False
-    finally:
-        first.close()
-        second.close()
-
-
-def test_a_crashed_cycle_releases_the_cycle_lock():
-    lock = SchedulerCycleLock()
-    crashed = _connection()
-    assert lock.try_acquire(crashed) is True
-    crashed.close()
-    survivor = _connection()
-    try:
-        assert lock.try_acquire(survivor) is True
-    finally:
-        survivor.close()
-
-
-def test_the_cycle_lock_raises_rather_than_queueing():
-    lock = SchedulerCycleLock()
-    holder, waiter = _connection(), _connection()
-    try:
-        with lock.hold(holder):
-            with pytest.raises(SchedulerCycleBusy):
-                with lock.hold(waiter):
-                    pass
-    finally:
-        holder.close()
-        waiter.close()
-
-
-def test_the_cycle_key_cannot_collide_with_any_lecture_key():
-    from app.orchestration.locks import lock_key
-    with _connection() as connection:
-        ids = [str(row[0]) for row in connection.execute(
-            "SELECT lecture_id FROM public.lecture_sessions").fetchall()]
-        connection.rollback()
-    assert ids
-    assert CYCLE_LOCK_KEY not in {lock_key(value) for value in ids}
 
 
 # --- Part R: Operations reflects the new states --------------------------------------

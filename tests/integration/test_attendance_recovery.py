@@ -85,6 +85,25 @@ from app.rendering.service import RENDERER_VERSION, QaRenderingService
 from app.writer.modes import DRY_RUN, PERFECT_PENDING_ATTENDANCE_DATA
 from app.writer.perfect_service import PerfectLecturePlanner
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 G2_KEITH = "de8c6c60-6e73-5b50-b74d-ef5806b9d1bb"
 TARGET_DATE = date(2026, 9, 17)
@@ -611,18 +630,3 @@ def test_recovery_never_writes_to_the_external_attendance_table():
                 raise _Rollback
         except _Rollback:
             pass
-
-
-def test_the_qa_service_used_by_recovery_has_no_provider_at_all():
-    """Structurally incapable of buying a generation, not merely told not to."""
-    service = _service(FakeAttendanceSource([]))
-    assert service.qa_service.provider is None
-
-
-def test_an_unknown_lecture_is_refused_rather_than_widened():
-    from app.attendance.service import AttendanceScopeError
-    with _connection() as connection:
-        with pytest.raises(AttendanceScopeError):
-            _service(FakeAttendanceSource(SPOKE)).recover(
-                connection, "00000000-0000-0000-0000-000000000000", persist=False)
-        connection.rollback()

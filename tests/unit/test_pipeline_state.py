@@ -165,11 +165,20 @@ class StubConnection:
 
 class StubObservations:
     def __init__(self, *, recording_url=None, excel_synced_at=None,
-                 legacy_row=True, perfect_row=True):
+                 legacy_row=True, perfect_row=True, occurrence=None):
         self.recording_url = recording_url
         self.excel_synced_at = excel_synced_at
         self.legacy_row = legacy_row
         self.perfect_row = perfect_row
+        # F-02. What the same-occurrence guard would say. The default world of
+        # this stub holds no other legacy rows, so the honest default is CLEAR.
+        self.occurrence = occurrence
+
+    def legacy_qa_occurrence(self, connection, *, lecture_id, session_id,
+                             writer_version):
+        from app.writer.legacy_identity import CLEAR, OccurrenceVerdict
+
+        return self.occurrence or OccurrenceVerdict(CLEAR)
 
     def legacy_qa_session(self, connection, legacy_session_id):
         if not self.legacy_row:

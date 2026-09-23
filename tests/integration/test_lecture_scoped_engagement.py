@@ -22,6 +22,25 @@ from app.db.repositories.engagement import (
     EngagementInputRepository, EngagementRepository, EngagementRunRepository)
 from app.engagement.service import EngagementScopeError, EngagementService
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET_DATE = date(2026, 9, 16)
 STEVE = "eaccf843-845f-586e-b285-3ef181cd0c85"
@@ -118,13 +137,6 @@ def test_the_expected_snapshot_and_versions_are_selected():
 # 4-5: refusals
 # --------------------------------------------------------------------------
 
-def test_an_unknown_lecture_is_refused():
-    with _connection() as connection:
-        with pytest.raises(EngagementScopeError):
-            _service().calculate_lecture(
-                connection, "00000000-0000-5000-8000-000000000000", persist=False)
-        connection.rollback()
-
 
 def test_a_lecture_without_attendance_evidence_is_refused_not_silently_skipped():
     with _connection() as connection:
@@ -177,17 +189,3 @@ def test_lecture_mode_cannot_widen_to_the_date():
         assert rows
         assert {str(row["lecture_id"]) for row in rows} == {ANDREW}
         connection.rollback()
-
-
-def test_the_cli_requires_exactly_one_scope():
-    from app.cli.main import build_parser
-    parser = build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["calculate-engagement"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["calculate-engagement", "--date", "2026-09-16",
-                           "--lecture-id", STEVE])
-    scoped = parser.parse_args(["calculate-engagement", "--lecture-id", STEVE])
-    assert scoped.lecture_id == STEVE and scoped.date is None
-    dated = parser.parse_args(["calculate-engagement", "--date", "2026-09-16"])
-    assert dated.lecture_id is None and dated.date == TARGET_DATE

@@ -58,6 +58,25 @@ from app.writer.modes import (
 )
 from app.writer.perfect_service import PerfectLecturePlanner
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET_DATE = date(2026, 9, 17)
 G2_KEITH = "de8c6c60-6e73-5b50-b74d-ef5806b9d1bb"
@@ -161,16 +180,6 @@ def test_coverage_derives_from_frozen_snapshot_counts_not_the_external_table():
             assert _coverage(connection, lecture_id)["attendance_coverage_status"] == \
                 classify(source_row_count=row[0], present_row_count=row[1],
                          effective_member_count=row[2])
-        connection.rollback()
-
-
-def test_an_unknown_lecture_is_unknown_and_never_an_authoritative_zero():
-    with _connection() as connection:
-        coverage = AttendanceCoverageRepository().for_lecture(
-            connection, "00000000-0000-0000-0000-000000000000",
-            attendance_resolution_version=ATTENDANCE_RESOLUTION_VERSION)
-        assert coverage["snapshot_present"] is False
-        assert is_authoritative(coverage["attendance_coverage_status"]) is False
         connection.rollback()
 
 
@@ -365,33 +374,6 @@ def test_a_non_perfect_lecture_is_not_pending_even_with_missing_attendance():
         assert facts["reason"] == "NOT_ELIGIBLE_STATUS_NOT_ALL_MET"
         assert facts["attendance_pending"] is False
         connection.rollback()
-
-
-def test_the_v2_planner_can_never_exist_without_a_coverage_reader():
-    """
-    A policy that needs evidence must never run without the means to read it.
-
-    Phase 3C3D enforced that by refusing to construct. Phase 3C3E made v2 the
-    DEFAULT, so refusing would have turned every ordinary construction into an
-    error; instead the reader is supplied. The invariant is unchanged and in
-    fact stronger - there is now no way to reach the attendance-aware policy
-    without a reader - so this asserts the outcome rather than the mechanism.
-    """
-    planner = PerfectLecturePlanner(
-        result_repository=PerfectLectureResultRepository(),
-        ownership_repository=PerfectLectureOwnershipRepository(),
-        legacy_repository=LegacyPerfectLectureRepository(),
-        mode=DRY_RUN, eligibility_version=PERFECT_ELIGIBILITY_VERSION_V2)
-    assert planner.coverage_repository is not None
-    assert hasattr(planner.coverage_repository, "for_lecture")
-
-    # And the only way to decide WITHOUT attendance evidence is to say so.
-    legacy = PerfectLecturePlanner(
-        result_repository=PerfectLectureResultRepository(),
-        ownership_repository=PerfectLectureOwnershipRepository(),
-        legacy_repository=LegacyPerfectLectureRepository(),
-        mode=DRY_RUN, eligibility_version=PERFECT_ELIGIBILITY_VERSION)
-    assert legacy.eligibility_version == PERFECT_ELIGIBILITY_VERSION
 
 
 # --- engagement exposes the coverage state ----------------------------------

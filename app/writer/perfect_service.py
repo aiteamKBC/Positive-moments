@@ -41,6 +41,7 @@ import uuid
 from app.attendance.coverage import SOURCE_UNKNOWN
 from app.db.repositories.attendance_coverage import AttendanceCoverageRepository
 from app.attendance.roster import ATTENDANCE_RESOLUTION_VERSION
+from app.qa.perfect import may_publish
 from app.qa.perfect import (
     DEFAULT_PERFECT_ELIGIBILITY_VERSION,
     PERFECT_ELIGIBILITY_VERSION,
@@ -108,6 +109,13 @@ class PerfectLecturePlanner:
             if not confirmed:
                 raise WriterModeError(
                     f"{self.mode} requires an explicit write confirmation")
+            # F-01. Enforced here rather than only in the CLI, so no caller -
+            # CLI, runner or a future console action - can publish under a
+            # policy that has not been approved for publication.
+            if not may_publish(eligibility_version):
+                raise WriterModeError(
+                    f"{eligibility_version} may not be used in {self.mode}; it is "
+                    "retained for dry-run historical reproduction only")
         self.result_repository = result_repository
         self.ownership_repository = ownership_repository
         self.legacy_repository = legacy_repository

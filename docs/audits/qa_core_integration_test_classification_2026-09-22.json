@@ -1,0 +1,3852 @@
+{
+ "generated_for": "QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md",
+ "total": 390,
+ "counts": {
+  "CONVERTED_TO_SELF_CONTAINED": 66,
+  "PRODUCTION_DATA_ACCEPTANCE": 295,
+  "SELF_CONTAINED": 29
+ },
+ "suites": {
+  "acceptance": 295,
+  "release_gate": 95
+ },
+ "obsolete_or_duplicate": [],
+ "tests": [
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_a_changed_item7_makes_perfect_not_eligible_and_writes_no_perfect_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_a_changed_result_produces_its_own_render_rather_than_reusing_a_stale_one",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_a_second_recovery_with_no_new_source_change_is_a_noop",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_attendance_arrival_recovers_the_lecture_without_calling_the_model",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_becoming_eligible_still_writes_no_legacy_perfect_row_by_itself",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_engagement_recalculates_one_lecture_and_no_sibling",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_low_engagement_changes_item7_deterministically_without_the_model",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_perfect_moves_from_pending_to_eligible_and_offers_a_scoped_sync",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_recovery_is_lecture_scoped",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_recovery_never_writes_to_the_external_attendance_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_still_missing_returns_wait_and_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_absence_only_source_is_reported_as_partial_not_as_missing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_previous_source_missing_history_is_preserved",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_refreshed_evaluation_reuses_the_frozen_model_answer",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_second_recovery_after_an_item7_change_is_also_a_noop",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_source_is_asked_once_for_one_lecture_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_attendance_recovery",
+   "test": "test_the_superseded_evaluation_remains_auditable",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real 2026-09-17 recovery of G2 Keith: what the live external attendance source held, what it later held, and what the platform did about it.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_a_new_resolver_version_coexists_with_the_old_identity_decisions",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_a_new_role_version_coexists_and_does_not_touch_person_resolution",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_canonical_cues_speakers_and_external_tables_are_unchanged",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_changed_roster_adds_a_new_snapshot_without_deleting_the_old_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_every_lecture_has_exactly_one_trainer_candidate",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_first_run_persists_snapshots_resolutions_and_roles",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_legacy_trainer_parity_is_measured_read_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_matched_resolutions_carry_a_member_and_ambiguous_ones_never_do",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_no_duplicate_snapshots_members_resolutions_or_roles",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_no_statement_writes_an_external_source_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_run_audit_row_records_versions_and_counts_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_second_run_creates_nothing_new_and_keeps_the_same_decisions",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_snapshot_members_store_no_plain_email_address",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_summary_never_carries_a_speaker_or_attendee_name",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_summary_reports_no_engagement_and_no_ai_override",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_trainer_candidate_is_the_highest_gross_spoken_speaker",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_attendance_resolution_persistence",
+   "test": "test_two_parser_versions_of_one_lecture_agree_on_the_trainer",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Re-runs Phase 2C3 over the real 2026-09-04 roster and asserts the real snapshot, member, resolution and role counts plus the legacy trainer parity measurement.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_a_legacy_row_written_by_n8n_is_refused_not_adopted",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "real 2026 session date"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_a_safe_lecture_no_longer_stops_at_operator_action_required",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant MARTECH_FRI"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_a_second_plan_for_a_synced_lecture_is_skip_identical",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant SYNCED",
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_each_synced_lecture_has_exactly_eleven_distinct_checklist_rows",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_every_automated_qa_write_produced_a_complete_verified_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_every_synced_lecture_now_needs_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant SYNCED"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_recovery_left_every_upstream_stage_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE",
+    "production lecture constant RISK_MANAGEMENT"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_revalidating_an_already_current_answer_is_refused_as_unchanged",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_running_the_sync_again_writes_nothing_and_reports_a_noop",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant MARTECH_FRI",
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_attendance_waiting_lecture_still_waits_and_buys_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant RAY_WAITING"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_automated_perfect_row_preserved_every_foreign_owned_field",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_day_report_now_counts_five_synced_lectures",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_degenerate_clips_kept_their_real_status_and_never_rendered",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE",
+    "production lecture constant RISK_MANAGEMENT"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_duplicate_booking_is_now_retired_rather_than_merely_explained",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant RAY_DUPLICATE",
+    "production lecture constant RAY_WAITING"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_generation_history_was_not_rewritten",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE",
+    "production lecture constant RISK_MANAGEMENT"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_perfect_write_recorded_the_policy_and_mapping_it_used",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE"
+   ]
+  },
+  {
+   "module": "test_automated_production_sync",
+   "test": "test_the_recovered_lectures_spent_exactly_one_generation_ever",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The record of the real unattended production cycle of 2026-09-18: which named lectures synced, what the scheduler wrote and what it refused.",
+   "production_evidence": [
+    "production lecture constant G2_JULIANE",
+    "production lecture constant RISK_MANAGEMENT"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_a_changed_source_creates_a_new_document_and_preserves_the_old_one",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_a_new_parser_version_coexists_with_the_previous_document",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_ai_in_project_control_parses_like_any_other_transcript",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_all_seven_combined_transcripts_parse_from_the_database_alone",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_cues_are_written_in_one_batched_statement_per_document",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_database_rejects_a_duplicate_cue_index",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_database_rejects_impossible_cue_timings",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_duration_parity_with_phase_2b_is_stored_and_within_tolerance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_parsing_does_not_mutate_phase_2a_or_phase_2b_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_raw_speaker_labels_are_stored_without_identity_inference",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_second_run_reuses_documents_and_writes_no_duplicate_cues",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_canonical_transcript_persistence",
+   "test": "test_stored_cues_match_the_parsed_counts_and_are_ordered",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Parses the real stored transcripts of 2026-09-04 and asserts their real cue counts, durations and parity with Phase 2B.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_another_database_on_the_same_test_server_is_refused",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_bootstrap_refuses_an_unmarked_database_that_already_holds_tables",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_bootstrap_refuses_the_production_url_before_connecting",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_bootstrap_refuses_to_rebuild_the_marked_database_without_reset",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_settings_resolve_to_the_approved_test_database_only",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_the_approved_database_carries_the_marker",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_database_safety_gate",
+   "test": "test_the_real_production_url_is_refused_in_process",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Asserts the test-database gate itself; touches no lecture evidence.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_12_the_stored_provenance_points_at_the_winner",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "production lecture constant RAY_WINNER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_13_a_second_suppression_of_the_same_row_changes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_13b_a_second_day_resolution_finds_no_outstanding_work",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_15_the_day_stops_reporting_the_duplicate_as_an_unresolved_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_16_the_real_winner_is_completely_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "production lecture constant RAY_WINNER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_4_the_suppressed_lecture_reports_nothing_to_do",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_5_6_7_the_suppressed_row_offers_the_orchestrator_no_runnable_action",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_a_plan_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_before_suppression_the_runnable_action_is_the_suppression_itself",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_suppression_annotates_the_row_and_deletes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_discovery_diagnostics_already_on_the_row_survive",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_loser_has_no_downstream_footprint_at_all",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_real_ray_pair_is_recognised_as_one_suppressible_duplicate",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "production lecture constant RAY_WINNER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_registry_wide_scan_finds_no_case_needing_a_human",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_suppression_does_not_change_any_other_lecture_on_the_day",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "real date constant SEPTEMBER_18"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_two_events_really_are_distinct_calendar_entries",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_LOSER",
+    "production lecture constant RAY_WINNER"
+   ]
+  },
+  {
+   "module": "test_duplicate_resolution_persistence",
+   "test": "test_the_winner_never_becomes_a_suppression_candidate",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is the real Ray duplicate booking: two genuine calendar events for one class, and the suppression that retired one of them.",
+   "production_evidence": [
+    "production lecture constant RAY_WINNER"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_changed_attendance_snapshot_creates_new_engagement_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_engagement_never_queries_live_attendance_and_never_writes_qa",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_first_run_persists_one_result_per_snapshot_with_participants",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_item7_parity_holds_wherever_both_inputs_agree_with_legacy",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_legacy_parity_is_measured_and_the_algorithm_replays_exactly",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_new_engagement_algorithm_version_creates_a_new_record",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_new_platform_only_lecture_is_calculated_without_creating_qa",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_new_resolver_version_creates_new_engagement_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_new_role_version_creates_new_engagement_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_participant_counts_agree_with_the_summary_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_phase_2c3_evidence_and_qa_tables_are_unchanged",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_second_run_is_idempotent",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_spoke_participants_point_at_learner_speakers_of_the_same_snapshot",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_engagement_persistence",
+   "test": "test_summary_carries_no_personal_names_or_emails",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures engagement parity against the real legacy QA rows for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_a_lecture_scoped_run_selects_exactly_one_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "production lecture constant STEVE"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_a_lecture_without_attendance_evidence_is_refused_not_silently_skipped",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_a_rerun_on_unchanged_evidence_reuses_the_same_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "production lecture constant STEVE"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_lecture_mode_cannot_widen_to_the_date",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "production lecture constant ANDREW"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_same_day_siblings_are_not_touched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "production lecture constant STEVE",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_lecture_scoped_engagement",
+   "test": "test_the_expected_snapshot_and_versions_are_selected",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real engagement evidence of named lectures on a real date, including their real snapshot and version pins.",
+   "production_evidence": [
+    "production lecture constant STEVE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_changed_fingerprint_updates_only_a_coded_owned_target",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_checklist_failure_rolls_the_whole_lecture_back",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_real_evaluation_can_be_marked_review_required_without_losing_output",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_second_identical_canary_run_is_a_noop",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_verification_mismatch_rolls_back_and_is_reported",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_a_write_enabled_mode_still_refuses_a_legacy_owned_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_all_legacy_tables_are_unchanged_after_the_whole_suite_of_dry_runs",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_canary_write_creates_one_session_eleven_rows_and_one_owner",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_dry_run_protects_every_historical_session_and_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_dry_run_reports_a_field_level_diff_without_sensitive_content",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_item2_historical_rows_are_not_corrected_by_the_dry_run",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_rollback_refuses_a_legacy_owned_session",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_rollback_removes_only_a_coded_owned_session",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_rollback_requires_a_write_enabled_mode",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_the_canary_write_does_not_disturb_columns_owned_by_other_workflows",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_the_lecture_without_history_would_be_inserted_but_is_not",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_the_writer_issues_no_model_lms_attendance_or_graph_statement",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_legacy_writer_persistence",
+   "test": "test_two_writers_cannot_both_claim_the_same_session",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Exercises the writer against the real 2026-09-04 legacy rows n8n wrote, and re-asserts those real tables are byte-identical afterwards.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_engagement_does_not_live_query_attendance_under_v2",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_engagement_uses_only_the_requested_roster_version",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_kbc_attendance_is_never_written_by_either_rule",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_old_v1_rule_remains_reproducible_from_the_same_source",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_second_v2_chain_run_is_idempotent",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v1_and_v2_agree_on_every_speaker_decision",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v2_chain_preserves_old_snapshot_and_engagement_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v2_excluded_counts_equal_the_live_makeup_rows",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v2_parity_rows_have_no_mismatch_cause",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v2_rule_reaches_full_legacy_parity",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_makeup_roster_drift",
+   "test": "test_v2_snapshots_contain_no_live_makeup_member",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Measures the v1-to-v2 roster rule change against the real live makeup rows.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_a_single_part_lecture_is_still_the_identity",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "real name constant PPC"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_every_cue_of_a_real_lecture_lands_inside_real_media",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "real name constant ANDREW",
+    "real name constant PPC",
+    "real name constant RISK"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_every_measured_lecture_covers_its_own_transcript",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_the_identity_mapping_would_have_failed_on_the_multipart_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "real name constant ANDREW"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_the_measurement_has_been_run",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_the_multipart_lecture_really_does_span_two_recordings",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "real lecture or trainer name",
+    "real name constant ANDREW"
+   ]
+  },
+  {
+   "module": "test_media_timeline_real_lectures",
+   "test": "test_the_whole_lecture_is_covered_by_segments",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts that real cue timelines land inside really measured media for named lectures; there is no synthetic stand-in for a real recording duration.",
+   "production_evidence": [
+    "real name constant ANDREW",
+    "real name constant PPC",
+    "real name constant RISK"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_dry_run_over_two_real_days_writes_nothing_at_all",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_dry_run_reports_the_same_next_actions_the_resolver_does",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_held_lecture_is_skipped_by_a_concurrent_run_and_its_siblings_proceed",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real date constant SEPTEMBER_17",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_real_run_never_touches_a_legacy_production_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_real_run_on_the_waiting_day_costs_no_provider_call_and_no_graph_call",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_real_run_persists_a_run_row_and_one_item_per_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_second_run_over_the_same_window_changes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_a_waiting_lecture_is_not_offered_as_a_retry_and_never_as_a_force",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_an_enabled_legacy_qa_node_blocks_the_run_before_any_write",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_legacy_rows_the_platform_did_not_write_are_reported_as_protected",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real 2026 session date"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_no_lecture_on_the_settled_day_needs_qa_regenerated",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_16"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_requesting_a_retry_returns_a_plan_and_performs_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_day_report_names_every_stage_for_every_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_16"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_day_report_reconciles_with_the_lecture_states",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_operations_layer_answers_every_question_the_future_ui_needs",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_resolver_describes_the_real_pilot_day_correctly",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_run_counts_partition_the_lectures_seen",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_seam_rebuilt_lecture_is_not_reported_as_stale",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_16",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_two_waiting_lectures_are_waiting_on_attendance_and_nothing_else",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_waiting_lectures_are_still_waiting_after_a_run_and_wrote_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_orchestration_persistence",
+   "test": "test_the_window_report_sums_its_days",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Describes the real pilot days 2026-09-16/17 lecture by lecture: which were waiting, which were settled, and what a run over them would and would not do.",
+   "production_evidence": [
+    "real date constant SEPTEMBER_16",
+    "real date constant SEPTEMBER_17"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_dry_run_without_persist_still_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_key_already_pointing_at_another_session_blocks_the_write",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_legacy_owned_row_under_our_key_is_protected",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_mapping_change_reopens_the_update_even_with_a_frozen_source",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_non_eligible_result_has_a_reason_and_no_legacy_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_pending_attendance_result_never_creates_a_legacy_row_of_its_own",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_real_write_is_idempotent_and_leaves_no_trace_after_rollback",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_recording_enrichment_alone_never_reopens_the_write",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_a_recording_url_written_by_another_workflow_survives_our_update",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_andrew_carries_the_repaired_attended_count_and_its_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_andrew_is_now_a_noop_on_both_targets",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_andrew_is_perfect_in_shadow",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_every_finalized_render_has_a_persisted_eligibility_result",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_every_ineligible_production_row_is_explained_by_the_older_rule",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_no_other_coded_written_perfect_row_carries_the_attended_count_bug",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_not_perfect_to_perfect_records_the_transition_in_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant FIRST_CANARY",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_perfect_to_not_perfect_supersedes_without_deleting",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_persisting_the_same_answer_twice_moves_no_timestamp",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_andrew_canary_is_written_exactly_once_and_is_coded_owned",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_combined_canary_plan_reports_both_targets",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_dry_run_reports_a_perfect_action_and_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_first_production_canary_is_not_perfect_and_has_no_legacy_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant FIRST_CANARY",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_lecture_key_collision_hazard_is_real_and_measured",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_pilot_day_has_one_result_per_lecture_both_outcomes_represented",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_rendered_loader_supplies_every_field_the_perfect_mapping_reads",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_repair_did_not_duplicate_ownership_or_the_result",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_shadow_result_is_deterministic_and_recomputable_without_ai",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_two_policies_coexist_on_the_same_lecture_without_colliding",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_v1_pilot_day_is_still_fully_covered_by_the_v1_policy",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_written_perfect_row_is_compared_against_the_corrected_mapping",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name",
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_perfect_lecture_persistence",
+   "test": "test_the_written_perfect_row_leaves_the_foreign_columns_alone",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The Andrew canary and the real Perfect rows: what was written, the attended_count repair, and the v1/v2 policy history on real lectures.",
+   "production_evidence": [
+    "real name constant ANDREW_KEY"
+   ]
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_canary_write_creates_one_session_eleven_rows_and_one_owner",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_changed_fingerprint_updates_only_a_coded_owned_target",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_crashed_process_releases_its_lock_when_its_connection_dies",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_lecture_scoped_engagement_run_selects_exactly_one_lecture",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_lecture_the_source_never_mentions_reports_missing_not_zero",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_legacy_owned_perfect_row_under_our_key_is_protected",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_perfect_dry_run_writes_no_legacy_perfect_row",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_preview_run_makes_no_model_call_and_writes_no_evaluation",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_provider_error_never_becomes_not_met_verdicts",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_recording_url_written_by_another_workflow_survives_our_write",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_scoped_engagement_run_leaves_its_same_day_siblings_untouched",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_second_attendance_resolution_creates_no_new_evidence",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_second_run_reuses_the_evaluation_and_buys_no_second_generation",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_a_write_enabled_mode_still_refuses_a_row_the_platform_did_not_write",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_an_evaluation_and_a_render_are_unique_per_source_fingerprint",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_an_unknown_lecture_is_refused_rather_than_widened",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_attendance_resolution_never_writes_the_external_source",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_attendance_resolution_persists_a_snapshot_and_its_roles",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_database_rejects_a_duplicate_cue_index",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_database_rejects_a_duplicate_speaker_label_for_one_document_and_version",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_database_rejects_a_selected_selection_without_a_primary",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_database_rejects_a_transcript_candidate_without_a_canonical_lecture",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_database_rejects_impossible_cue_timings",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_different_lectures_lock_independently",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_engagement_never_widens_a_lecture_scope_to_the_whole_day",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_holding_a_lecture_twice_in_one_place_is_refused",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_one_perfect_lecture_key_can_only_exist_once",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_rollback_refuses_a_session_the_platform_does_not_own",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_rollback_removes_only_a_coded_owned_session",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_rollback_requires_a_write_enabled_mode",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_snapshot_members_store_no_plain_email_address",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_the_advisory_lock_is_visible_in_pg_locks_while_held",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_the_generation_cap_stops_paying_for_the_same_fingerprint",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_the_lock_is_released_when_the_work_inside_it_raises",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_the_same_lecture_cannot_be_locked_by_two_connections",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_the_write_never_disturbs_the_columns_other_workflows_own",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_pipeline_contracts",
+   "test": "test_two_writers_cannot_both_claim_the_same_legacy_session",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Converted from the production-evidence modules: the contract is generic, so it now seeds the minimal synthetic rows it needs.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_a_crashed_cycle_releases_the_cycle_lock",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_a_seam_rebuild_of_a_lecture_without_selected_parts_is_refused",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_a_second_parser_version_needs_no_migration",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_an_attendance_recovery_of_an_unknown_lecture_is_refused_rather_than_widened",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_an_unknown_lecture_is_unknown_and_never_an_authoritative_zero",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_document_identity_is_provenance_not_lecture",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_generation_attempts_are_append_only_and_numbered",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_rendering_a_day_with_no_evidence_fails_loudly",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_selection_id_is_stable_per_lecture_and_version",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_cycle_key_cannot_collide_with_any_lecture_key",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_cycle_lock_raises_rather_than_queueing",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_engagement_cli_requires_exactly_one_scope",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_ownership_unique_constraint_exists",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_perfect_mapping_still_owns_ten_columns_and_disowns_the_rest",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_perfect_migration_added_two_coded_tables_and_changed_nothing_legacy",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_platform_default_policy_is_the_attendance_aware_one",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_recovery_qa_service_has_no_provider_at_all",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_revalidation_service_has_no_provider_at_all",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_session_mapping_covers_twenty_two_columns",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_v1_roster_is_never_consumed_by_the_engine",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_the_v2_planner_can_never_exist_without_a_coverage_reader",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_platform_invariants",
+   "test": "test_two_scheduler_cycles_cannot_run_at_once",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Moved out of a production-evidence module: schema shape, mapping arity, locks, identity derivations and structural refusals never needed real history.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_a_changed_roster_creates_new_snapshot_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_a_new_renderer_version_creates_new_provenance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_an_unchanged_roster_reuses_the_same_snapshot",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_an_unusable_evaluation_is_reported_not_evaluated",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_corrected_item2_is_kept_and_the_legacy_value_is_carried_separately",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_counts_reflect_the_final_statuses_including_overrides",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_every_lecture_renders_eleven_checklist_rows_with_canonical_strings",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_every_rendered_quote_traces_back_to_stored_cue_ids",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_item7_evidence_comes_from_persisted_engagement_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_item7_rendering_never_queries_live_attendance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_lms_snapshot_matches_the_legacy_query_semantics",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_non_delivered_lecture_renders_the_cancelled_payload",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_only_the_phase_3b_tables_are_written",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_phase_3a_evidence_and_legacy_tables_are_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_rendered_evidence_is_reproducible_from_clips_and_canonical_cues",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_renderer_consumes_completed_and_non_delivered_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_rendering_after_a_snapshot_exists_does_not_query_the_lms_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_second_run_reuses_everything_and_creates_no_duplicates",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_session_compatibility_payload_matches_legacy_deterministic_fields",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_the_lms_table_is_never_written",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_the_renderer_has_no_provider_and_records_zero_calls",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_qa_rendering_persistence",
+   "test": "test_the_run_audit_carries_no_learner_names_or_quotes",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Renders the real 2026-09-04 evaluations and asserts parity with the real legacy payload, including LMS snapshot semantics against the live roster.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_registry_repository",
+   "test": "test_database_rejects_a_non_canonical_registry_row",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Always built its own lecture; only its date literals echoed production and they are now synthetic.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_registry_repository",
+   "test": "test_database_rejects_downstream_ready_without_a_meeting",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Always built its own lecture; only its date literals echoed production and they are now synthetic.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_registry_repository",
+   "test": "test_readonly_connection_is_database_enforced",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Always built its own lecture; only its date literals echoed production and they are now synthetic.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_registry_repository",
+   "test": "test_registry_upsert_and_discovery_audit_rollback",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Always built its own lecture; only its date literals echoed production and they are now synthetic.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_A_a_foreign_row_under_the_other_spelling_is_protected",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_A_explicit_backfill_with_update_allowed_still_protects_the_foreign_row",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_B_an_approved_update_lands_in_place_on_the_published_id",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_B_an_owned_row_under_the_old_spelling_is_the_target",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_C_same_meeting_same_day_without_proof_is_ambiguous",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_C_two_rows_for_one_occurrence_are_ambiguous_and_never_written",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_D_the_resolver_sees_an_owned_equivalent_row_as_ours_not_missing",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_D_writer_and_resolver_agree_on_the_same_occurrence",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_E_the_two_spellings_decode_to_one_identity",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_E_twin_artifacts_collapse_to_one_candidate_through_real_sql",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_F_a_v1_dry_run_still_reproduces_history_and_writes_nothing",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_F_the_cli_refuses_v1_with_a_write_mode_before_opening_a_connection",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_F_the_scheduler_writer_refuses_perfect_v1_in_every_write_mode",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_G_non_authoritative_attendance_buys_nothing_and_persists_nothing",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_H_authoritative_attendance_still_evaluates_and_persists_normally",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_I_a_new_lecture_is_projected_once_and_a_rerun_is_identical",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_I_the_pass_cap_still_covers_the_whole_stage_chain",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_safety_fixes_integration",
+   "test": "test_I_the_projection_leaves_the_clips_and_recording_columns_alone",
+   "class": "SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Written in this release for F-01/F-02/F-03; seeds its own lecture chain.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_a_dry_run_rebuild_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_any_qa_evaluation_for_the_multi_part_lecture_uses_the_v2_document",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_every_v2_cue_carries_its_source_part_artifact_and_offset",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_no_later_part_cue_survives_inside_earlier_coverage",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_rebuilding_twice_changes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_document_metadata_records_the_seam_audit",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_first_production_canary_is_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant CANARY"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_multi_part_legacy_rows_exist_exactly_once_and_are_coded_owned",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_phase_2b_selection_and_offsets_are_unchanged",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_raw_artifacts_were_never_rewritten",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_rebuild_makes_no_provider_or_graph_call",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_v1_document_and_cues_are_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_the_v2_timeline_never_steps_backwards",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_v1_and_v2_documents_coexist_for_the_same_lecture",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_v2_drops_only_the_duplicated_seam_cues",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_v2_preserves_the_call_relative_origin_and_the_span_duration",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_v2_reproduces_every_single_part_lecture_exactly",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_seam_dedup_persistence",
+   "test": "test_within_part_overlap_is_preserved_rather_than_deduplicated",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The subject is a real two-part recording and the seam its rebuild removes.",
+   "production_evidence": [
+    "production lecture constant ANDREW",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_a_new_engine_version_creates_new_provenance_without_deleting_the_old",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_an_explicit_force_may_still_retry_after_the_cap",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_canonical_trainer_is_kept_and_the_model_guess_is_only_recorded",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_delivered_lectures_persist_deterministic_overrides",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_evidence_clips_are_validated_against_the_real_cue_timeline",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_forced_re_evaluation_calls_the_model_again",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_hallucinated_timestamp_is_recorded_not_repaired",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_inputs_come_from_the_v2_evidence_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_item2_differences_are_explained_by_the_legacy_timezone_defect",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_legacy_and_external_tables_are_untouched",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_legacy_deterministic_parity_is_reported",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_missing_provider_records_pending_with_the_deterministic_layer",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_no_statement_touches_graph_attendance_or_lms_and_no_qa_write",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_non_delivered_evaluation_persists_eleven_not_met_rows",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_our_item2_follows_the_corrected_timing_not_the_legacy_status",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_preview_makes_no_call_and_writes_no_evaluation",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_prompt_contains_the_transcript_but_the_run_audit_does_not",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_provider_error_never_becomes_not_met_verdicts",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_run_summary_carries_no_transcript_text_or_personal_names",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_second_run_reuses_evaluations_and_makes_no_new_calls",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_short_lecture_is_routed_to_the_non_delivered_path_from_live_duration",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_successful_evaluations_are_never_capped_or_mutated",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_three_invalid_generations_close_the_fingerprint_and_stop_calling",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_shadow_qa_persistence",
+   "test": "test_v1_and_v2_engagement_differ_so_the_pin_matters",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real frozen model answers, the real generation history and the legacy deterministic parity for the real cohort.",
+   "production_evidence": [
+    "module-level: the real dataset"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_a_second_inventory_version_coexists_without_reusing_ids",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_aggregates_match_the_cues_they_came_from",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_all_cues_with_a_label_are_accounted_for",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_canonical_documents_and_cues_are_never_modified",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_database_rejects_a_duplicate_label_for_one_document_and_version",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_every_document_yields_one_row_per_distinct_raw_label",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_external_attendance_and_lms_tables_are_never_read_for_identity",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_legacy_trainer_diagnostic_is_read_only_and_assigns_no_role",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_normalized_labels_are_the_conservative_form",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_overlap_relationship_between_gross_speech_and_duration_is_reported",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_raw_labels_are_byte_identical_to_the_cue_labels",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_speaker_inventory_persistence",
+   "test": "test_second_run_creates_no_duplicate_speaker_rows",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Aggregates the real speaker labels of the real transcripts of 2026-09-04.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_acquisition_run_audit_records_counters_and_rolls_back",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_artifact_upsert_is_idempotent_and_content_versions_are_append_only",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_candidate_link_requires_an_existing_canonical_lecture",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_database_rejects_an_incomplete_content_pointer",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_qa_doctors_transcripts_is_not_used_by_phase_2a",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_ready_lecture_repository_splits_ready_from_unresolved",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_artifact_repository",
+   "test": "test_stored_content_is_hash_verifiable",
+   "class": "CONVERTED_TO_SELF_CONTAINED",
+   "suite": "release_gate",
+   "reason": "Used to borrow whichever lecture happened to be in the database; now seeds one.",
+   "production_evidence": []
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_ai_in_project_control_is_selected_without_any_qa_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_database_rejects_a_selected_row_without_a_primary",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_derived_combined_content_is_hash_verifiable_and_separate_from_raw",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_real_legacy_session_id_parity_for_2026_09_04",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_selection_does_not_mutate_phase_2a_raw_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_selection_persistence_is_idempotent_across_reruns",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_selection_runs_entirely_from_persisted_evidence",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_transcript_selection_persistence",
+   "test": "test_the_unresolved_msp_occurrence_is_skipped_not_selected",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "Asserts the real selection outcome for 2026-09-04, including legacy session-id parity and the real unresolved occurrence.",
+   "production_evidence": [
+    "real date constant TARGET"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_a_completed_lecture_already_agrees_or_is_repairable_the_same_way",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_a_non_perfect_lecture_is_not_pending_even_with_missing_attendance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant STEPHEN",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_a_zero_attended_count_is_not_read_as_confirmed_zero",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_calculating_engagement_dry_writes_nothing",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH",
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_coverage_derives_from_frozen_snapshot_counts_not_the_external_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH",
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_coverage_is_readable_for_every_lecture_on_the_pilot_day",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_engagement_distinguishes_a_data_gap_from_a_finding",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_engagement_reports_the_coverage_state_it_calculated_under",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH",
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_martechs_legacy_row_and_ownership_are_byte_identical_after_planning",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant MARTECH",
+    "real date constant TARGET_DATE",
+    "real name constant MARTECH_KEY"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_reconciling_never_touches_an_attempt_row",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_reconciling_the_aggregate_matches_the_attempts_table",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_reconciling_twice_is_a_no_op_and_never_inflates_the_count",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_recovery_reports_attempts_remaining_per_generation_contract",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_recovery_state_answers_every_question_a_resume_needs",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_recovery_state_is_read_only",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH",
+    "production lecture constant STEPHEN"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_authoritative_attempts_table_still_holds_the_three_old_attempts",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_coverage_state_is_persisted_where_operations_can_read_it",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_lecture_with_source_rows_reports_members",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant STEPHEN",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_lectures_with_no_source_rows_report_missing_not_zero",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant G2_KEITH",
+    "production lecture constant MARTECH"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_v1_planner_still_sees_martech_as_an_identical_no_op",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant MARTECH",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_the_v2_planner_proposes_no_legacy_write_for_martech",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant MARTECH",
+    "real date constant TARGET_DATE"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_v1_still_reproduces_the_written_martech_answer_exactly",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant MARTECH",
+    "real date constant TARGET_DATE",
+    "real lecture or trainer name"
+   ]
+  },
+  {
+   "module": "test_unattended_readiness",
+   "test": "test_v2_would_have_held_martech_back_for_missing_attendance",
+   "class": "PRODUCTION_DATA_ACCEPTANCE",
+   "suite": "acceptance",
+   "reason": "The three real lectures whose attendance evidence exposed F-03, and the real Perfect rows written under v1.",
+   "production_evidence": [
+    "production lecture constant MARTECH",
+    "real date constant TARGET_DATE"
+   ]
+  }
+ ]
+}

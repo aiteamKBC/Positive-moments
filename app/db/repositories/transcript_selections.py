@@ -9,6 +9,7 @@ import json
 import uuid
 
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.transcripts.identity import canonical_key
 from app.transcripts.selection import CandidateArtifact
 
 
@@ -16,7 +17,8 @@ COMBINED_NAMESPACE = uuid.UUID("7d41e0b9-3f52-4c86-9a17-6be2c8d05f34")
 
 LOAD_CANDIDATES = """
 SELECT a.artifact_id, a.provider_transcript_id, a.provider_created_at, a.provider_end_at,
-       a.provider_call_id, a.meeting_id, a.content_sha256, a.content_bytes
+       a.provider_call_id, a.meeting_id, a.content_sha256, a.content_bytes,
+       a.first_seen_at
   FROM public.lecture_transcript_candidates c
   JOIN public.lecture_transcript_artifacts a ON a.artifact_id = c.artifact_id
  WHERE c.lecture_id = %s
@@ -46,7 +48,7 @@ class TranscriptSelectionRepository:
                 provider_call_id=row[4], meeting_id=row[5],
                 content_sha256=row[6], content_bytes=row[7],
             )
-            for row in rows
+            for row in collapse_equivalent_transcripts(rows)
         ]
 
     def load_current_content(self, connection, artifact_id) -> tuple[str, str, bool] | None:
@@ -228,3 +230,33 @@ class TranscriptSelectionRunRepository:
             )
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "could not complete selection run") from exc
+
+
+def collapse_equivalent_transcripts(rows) -> list:
+    """
+    One candidate per real transcript, however many ways Graph has spelled it.
+
+    Graph re-serialized its transcript ids on 2026-09-22, so a lecture can see
+    the SAME transcript as two artifacts. Left alone, the selector ranks them
+    identically and its part-attachment rule (same call id) attaches both - the
+    same transcript twice, every cue duplicated - or picks whichever sorts
+    first, so the legacy session_id can change between runs with nothing about
+    the lecture having changed.
+
+    The representative is the spelling the platform saw FIRST (earliest
+    first_seen_at, then artifact_id). That makes the choice stable against
+    every future re-serialization: a new spelling can arrive, but it can never
+    displace the one a lecture is already published under.
+
+    Ids that do not decode keep their raw identity and are never collapsed.
+    Row order is preserved, so the selector's own tie-breaking is unchanged.
+    """
+    rows = list(rows)
+    keeper = {}
+    for row in rows:
+        key = canonical_key(row[1])
+        rank = (row[8] is None, row[8], str(row[0]))
+        if key not in keeper or rank < keeper[key][0]:
+            keeper[key] = (rank, row[0])
+    kept = {artifact for _, artifact in keeper.values()}
+    return [row for row in rows if row[0] in kept]

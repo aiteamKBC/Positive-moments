@@ -88,13 +88,28 @@ TEMPLATES = [{
 }]
 WSGI_APPLICATION = "config.wsgi.application"
 
+# A test command NEVER derives its database from DATABASE_URL. Django creates
+# and drops `test_<NAME>` on whatever server DATABASES points at, so pointing it
+# at production means creating and dropping a database on the production server
+# - which is exactly what `manage.py test` used to do here. The `test_` prefix
+# is no protection: it is the SERVER that must not be production.
+from config.test_database import is_test_command, test_database_config  # noqa: E402
+
+TEST_RUNNER = "config.test_runner.SafeDatabaseTestRunner"
+
 database_url = os.getenv("DATABASE_URL", "").strip()
-DATABASES = {
-    "default": postgres_config(database_url) if database_url else {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+if is_test_command():
+    # Fails closed: no TEST_DATABASE_URL, a production URL, a production server
+    # or a database name without a test marker all raise here, before Django
+    # opens a connection.
+    DATABASES = {"default": test_database_config(postgres_config)}
+else:
+    DATABASES = {
+        "default": postgres_config(database_url) if database_url else {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

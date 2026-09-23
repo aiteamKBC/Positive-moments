@@ -20,6 +20,25 @@ from app.db.repositories.transcript_documents import (
 from app.transcripts.document_service import CanonicalTranscriptService
 from app.transcripts.webvtt import PARSED, PARSER_VERSION
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET = date(2026, 9, 4)
 
@@ -46,17 +65,6 @@ def _skip_without_combined(connection):
 
 
 # --- provenance identity ---------------------------------------------------------
-
-
-def test_document_identity_is_provenance_not_lecture():
-    base = dict(selection_id="sel-1", source_content_sha256="a" * 64,
-                parser_version=PARSER_VERSION)
-    first = document_identity(**base)
-    assert first == document_identity(**base)
-    # Any one ingredient changing yields a different document.
-    assert first != document_identity(**{**base, "selection_id": "sel-2"})
-    assert first != document_identity(**{**base, "source_content_sha256": "b" * 64})
-    assert first != document_identity(**{**base, "parser_version": "webvtt_canonical_v2"})
 
 
 # --- real parse ------------------------------------------------------------------

@@ -41,6 +41,25 @@ from app.orchestration.stages import (
 )
 from app.orchestration.state import PipelineStateResolver
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 G2_KEITH = "de8c6c60-6e73-5b50-b74d-ef5806b9d1bb"
 SEPTEMBER_16 = date(2026, 9, 16)
@@ -361,43 +380,6 @@ def test_an_enabled_legacy_qa_node_blocks_the_run_before_any_write():
 
 # --- 23, 24, 25. real advisory locks -------------------------------------------
 
-def test_the_same_lecture_cannot_be_locked_by_two_connections():
-    manager = LectureLockManager()
-    first, second = _connection(), _connection()
-    try:
-        assert manager.try_acquire(first, G2_KEITH) is True
-        assert manager.try_acquire(second, G2_KEITH) is False
-    finally:
-        first.close()
-        second.close()
-
-
-def test_different_lectures_lock_independently():
-    manager = LectureLockManager()
-    first, second = _connection(), _connection()
-    try:
-        assert manager.try_acquire(first, G2_KEITH) is True
-        assert manager.try_acquire(second, "other-lecture") is True
-    finally:
-        first.close()
-        second.close()
-
-
-def test_a_crashed_process_releases_its_lock_when_its_connection_dies():
-    """
-    The reason these are advisory locks and not rows in a table. Nothing runs
-    a cleanup path here: the connection simply ends, and the server lets go.
-    """
-    manager = LectureLockManager()
-    crashed = _connection()
-    assert manager.try_acquire(crashed, G2_KEITH) is True
-    crashed.close()
-    survivor = _connection()
-    try:
-        assert manager.try_acquire(survivor, G2_KEITH) is True
-    finally:
-        survivor.close()
-
 
 def test_a_held_lecture_is_skipped_by_a_concurrent_run_and_its_siblings_proceed():
     manager = LectureLockManager()
@@ -418,39 +400,6 @@ def test_a_held_lecture_is_skipped_by_a_concurrent_run_and_its_siblings_proceed(
                 connection.rollback()
     finally:
         holder.close()
-
-
-def test_the_lock_is_released_when_the_work_inside_it_raises():
-    manager = LectureLockManager()
-    with _connection() as connection:
-        with pytest.raises(ValueError):
-            with manager.hold(connection, G2_KEITH):
-                raise ValueError("boom")
-        assert manager.try_acquire(connection, G2_KEITH) is True
-        manager.release(connection, G2_KEITH)
-
-
-def test_holding_a_lecture_twice_in_one_place_is_refused():
-    manager = LectureLockManager()
-    first, second = _connection(), _connection()
-    try:
-        with manager.hold(first, G2_KEITH):
-            with pytest.raises(LectureBusy):
-                with manager.hold(second, G2_KEITH):
-                    pass
-    finally:
-        first.close()
-        second.close()
-
-
-def test_the_advisory_lock_is_visible_in_pg_locks_while_held():
-    manager = LectureLockManager()
-    connection = _connection()
-    try:
-        with manager.hold(connection, G2_KEITH):
-            assert lock_key(G2_KEITH) in manager.holders(connection)
-    finally:
-        connection.close()
 
 
 # --- 28..30. reconciliation against real rows ----------------------------------

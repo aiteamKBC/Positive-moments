@@ -104,6 +104,11 @@ from app.transcripts.seam import SEAM_PARSER_VERSION
 from app.transcripts.selection import SELECTION_VERSION
 from app.transcripts.speakers import SPEAKER_INVENTORY_VERSION
 from app.transcripts.webvtt import PARSER_VERSION
+from app.writer.legacy_identity import (
+    AMBIGUOUS,
+    FOREIGN_SAME_OCCURRENCE,
+    OWNED_SAME_OCCURRENCE,
+)
 from app.writer.mapping import WRITER_VERSION
 from app.writer.perfect_mapping import PERFECT_WRITER_VERSION
 
@@ -800,6 +805,36 @@ class PipelineStateResolver:
             return _stage(NOT_APPLICABLE, reason="LEGACY_ROW_NOT_CODED_OWNED",
                           legacy_session_id=target, coded_owned=False,
                           owner="LEGACY_N8N_PIPELINE"), target
+        # F-02. "No row under this exact session_id" is not "no row for this
+        # lecture": Graph can re-serialize a transcript id, and the old answer
+        # here put SYNC_LEGACY_QA in front of the scheduler for lectures n8n
+        # had already recorded. Ask the same guard the writer asks.
+        if target and self.legacy_observations is not None:
+            occurrence = self.legacy_observations.legacy_qa_occurrence(
+                connection, lecture_id=lecture["lecture_id"], session_id=target,
+                writer_version=self.writer_version)
+            detail = {**occurrence.as_dict(), "legacy_session_id": target}
+            if occurrence.verdict == FOREIGN_SAME_OCCURRENCE:
+                # Exactly the architecture's answer for an exact-id foreign
+                # row: protected history, not work we owe.
+                return _stage(NOT_APPLICABLE, reason="LEGACY_ROW_NOT_CODED_OWNED",
+                              coded_owned=False, owner="LEGACY_N8N_PIPELINE",
+                              **{**detail, "legacy_session_id":
+                                 occurrence.target_session_id}), \
+                    occurrence.target_session_id
+            if occurrence.verdict == OWNED_SAME_OCCURRENCE:
+                # Ours, under the id it was first published with. The writer
+                # re-addresses to that row; it can never insert a second one.
+                return _stage(STALE, action=SYNC_LEGACY_QA,
+                              reason="LEGACY_ROW_UNDER_EQUIVALENT_SESSION_ID",
+                              coded_owned=True,
+                              **{**detail, "legacy_session_id":
+                                 occurrence.target_session_id}), \
+                    occurrence.target_session_id
+            if occurrence.verdict == AMBIGUOUS:
+                return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                              reason="LEGACY_IDENTITY_AMBIGUOUS",
+                              coded_owned=False, **detail), None
         return _stage(MISSING, action=SYNC_LEGACY_QA,
                       writer_version=self.writer_version,
                       legacy_session_id=target, coded_owned=False), None

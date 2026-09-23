@@ -65,6 +65,8 @@ from app.writer.modes import (
     plan_decision,
     plan_perfect_decision,
 )
+from app.transcripts.identity import canonical_key
+from app.writer.legacy_identity import Candidate, LegacyOccurrenceGuard
 from app.writer.service import LegacyQaWriter
 
 from test_legacy_writer import items, rendered
@@ -157,6 +159,40 @@ class FakeOwnership:
         return {"write_id": entry["write_id"], "created": created}
 
 
+class FakeOccurrenceRepository:
+    """
+    The same-occurrence guard's facts, read from the SAME in-memory legacy
+    table and ownership ledger the writer writes to - so the real guard logic
+    runs against exactly the rows the test built, and a row the writer inserts
+    is immediately visible to the next plan.
+
+    `lectures` maps lecture_id -> {"meeting_id", "dates", "transcripts"}.
+    """
+
+    def __init__(self, legacy, ownership, lectures=None):
+        self.legacy = legacy
+        self.ownership = ownership
+        self.lectures = lectures or {}
+
+    def load(self, connection, *, lecture_id, session_id, writer_version):
+        context = self.lectures.get(str(lecture_id), {})
+        dates = {str(d) for d in context.get("dates", ())}
+        own = {canonical_key(t) for t in context.get("transcripts", ())}
+        own.add(canonical_key(session_id))
+        candidates = []
+        for sid, row in self.legacy.sessions.items():
+            if sid == session_id:
+                continue
+            owner = self.ownership.owned.get(sid, {}).get("lecture_id")
+            on_date = str(row.get("date")) in dates
+            if on_date or (owner is not None and str(owner) == str(lecture_id)):
+                candidates.append(Candidate(sid, row.get("meeting_id"),
+                                            row.get("date"),
+                                            str(owner) if owner else None))
+        return {"meeting_id": context.get("meeting_id"),
+                "own_transcript_keys": own, "candidates": candidates}
+
+
 class FakePayloads:
     def __init__(self, session, checklist):
         self.session = session
@@ -170,15 +206,21 @@ class FakePayloads:
 
 
 def writer_for(*, legacy, ownership, payload=None, mode=PRODUCTION_NEW_ONLY,
-               allow_update_existing=False):
+               allow_update_existing=False, lectures=None):
     payload = payload or rendered()
+    context = lectures or {str(payload["lecture_id"]): {
+        "meeting_id": payload["meeting_id"],
+        "dates": [payload["legacy_date"], payload["canonical_session_date"]],
+        "transcripts": [payload["session_id"]]}}
     return LegacyQaWriter(
         payload_repository=FakePayloads(payload, items(payload["session_id"])),
         legacy_repository=legacy, ownership_repository=ownership, mode=mode,
         lecture_ids=[str(payload["lecture_id"])], confirmed=True,
         allow_update_existing=allow_update_existing,
         # The derived Perfect target has its own lifecycle and its own tests.
-        perfect_planner=None)
+        perfect_planner=None,
+        occurrence_guard=LegacyOccurrenceGuard(
+            FakeOccurrenceRepository(legacy, ownership, context)))
 
 
 def sync_one(writer):

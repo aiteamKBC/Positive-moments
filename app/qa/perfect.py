@@ -66,6 +66,18 @@ PERFECT_ELIGIBILITY_VERSIONS = (PERFECT_ELIGIBILITY_VERSION,
 # was versioned rather than edited.
 DEFAULT_PERFECT_ELIGIBILITY_VERSION = PERFECT_ELIGIBILITY_VERSION_V2
 
+# F-01. The policies allowed to PUBLISH a Perfect Lecture row. An allowlist, not
+# a blocklist: v1 has no attendance condition and published an 11/11 lecture
+# with zero attendees on 2026-09-18, so a policy may reach a legacy table only
+# once somebody has decided it should. v1 remains fully usable for dry-run
+# historical reproduction - it is only barred from write-enabled modes.
+PUBLISHABLE_PERFECT_ELIGIBILITY_VERSIONS = frozenset({PERFECT_ELIGIBILITY_VERSION_V2})
+
+
+def may_publish(eligibility_version) -> bool:
+    """Whether a Perfect policy may be used in a write-enabled mode."""
+    return eligibility_version in PUBLISHABLE_PERFECT_ELIGIBILITY_VERSIONS
+
 # Non-final. Never written to the legacy table, never an ownership record.
 PENDING_ATTENDANCE_DATA = "PENDING_ATTENDANCE_DATA"
 

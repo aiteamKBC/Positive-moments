@@ -114,6 +114,13 @@ def package(**overrides):
         "attendance_roster_version": REQUIRED_ATTENDANCE_ROSTER_VERSION,
         "canonical_trainer_speaker_id": uuid.UUID(int=7),
         "canonical_trainer": "Morgan Trainerfield",
+        # F-03. The snapshot behind those ten attendees, stated explicitly: the
+        # service now refuses to finalize on attendance it cannot show the
+        # source actually answered. Ten rows, ten present, ten members is the
+        # same fact `attended_count` above already asserts.
+        "attendance_source_row_count": 10, "attendance_present_row_count": 10,
+        "attendance_effective_member_count": 10,
+        "attendance_source_rows_any_status": None,
     }
     base.update(overrides)
     base["delivery_status"] = delivery_status(base["duration_minutes"])

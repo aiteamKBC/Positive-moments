@@ -32,8 +32,16 @@ from app.writer.mapping import (
     payload_is_valid,
     session_row,
 )
+from app.rendering.compatibility import session_id_match
+from app.writer.legacy_identity import (
+    AMBIGUOUS,
+    FOREIGN_SAME_OCCURRENCE,
+    OWNED_SAME_OCCURRENCE,
+    LegacyOccurrenceGuard,
+)
 from app.writer.modes import (
     ACTIONABLE_DECISIONS,
+    BLOCKED_AMBIGUOUS_LEGACY_IDENTITY,
     BLOCKED_INVALID_PAYLOAD,
     CANARY_NEW_ONLY,
     BLOCKED_NOT_READY,
@@ -74,7 +82,8 @@ class LegacyQaWriter:
                  mode: str = DRY_RUN, writer_version: str = WRITER_VERSION,
                  renderer_version: str = "legacy_qa_v8_renderer_v1",
                  allow_update_existing: bool = False, lecture_ids=None,
-                 confirmed: bool = False, perfect_planner=None):
+                 confirmed: bool = False, perfect_planner=None,
+                 occurrence_guard=None):
         # An unknown mode is refused before anything is read.
         self.mode = validate_mode(mode)
         # Phase 3C2 defence in depth: the same guard the CLI applies, enforced
@@ -105,6 +114,9 @@ class LegacyQaWriter:
         # QA writer keeps working unchanged when it is not supplied, and
         # planned in the same pass so ONE canary plan reports both targets.
         self.perfect_planner = perfect_planner
+        # F-02. Always on: there is no configuration of this writer that finds
+        # its target by exact session_id alone. Injectable for tests only.
+        self.occurrence_guard = occurrence_guard or LegacyOccurrenceGuard()
         self.log = logging.getLogger(__name__)
 
     @property
@@ -160,13 +172,44 @@ class LegacyQaWriter:
             connection, rendered["rendered_session_id"])
         valid, invariant_error = payload_is_valid(rendered, items)
 
-        session_id = rendered["session_id"]
+        proposed_session_id = rendered["session_id"]
+        session_id = proposed_session_id
         existing_session = (self.legacy_repository.load_session(connection, session_id)
                             if session_id else None)
+
+        # F-02. The exact lookup found nothing - which is precisely when the
+        # writer used to insert. Before that is allowed, ask whether some OTHER
+        # row already represents this lecture occurrence under a different
+        # serialization of the same transcript id.
+        occurrence = None
+        if session_id and existing_session is None:
+            occurrence = self.occurrence_guard.evaluate(
+                connection, lecture_id=rendered["lecture_id"],
+                session_id=session_id, writer_version=self.writer_version)
+            if occurrence.verdict == OWNED_SAME_OCCURRENCE:
+                # Case C. Our own row, under the id it was first published
+                # with. That published id is the legacy key and it stays: the
+                # payload is re-addressed to it rather than a second row
+                # being created beside it.
+                rendered, items = _retarget(rendered, items,
+                                            occurrence.target_session_id)
+                session_id = rendered["session_id"]
+                valid, invariant_error = payload_is_valid(rendered, items)
+                existing_session = self.legacy_repository.load_session(
+                    connection, session_id)
+            elif occurrence.verdict == FOREIGN_SAME_OCCURRENCE:
+                # Case B. Somebody else's row for this occurrence. Treated as
+                # the target exactly as an exact-id foreign row would be, so the
+                # ordinary ownership policy returns PROTECTED - in every mode.
+                existing_session = self.legacy_repository.load_session(
+                    connection, occurrence.target_session_id)
+
+        protected_target = (occurrence is not None
+                            and occurrence.verdict == FOREIGN_SAME_OCCURRENCE)
         existing_items = (self.legacy_repository.load_checklist(connection, session_id)
-                          if session_id else [])
+                          if session_id and not protected_target else [])
         ownership = (self.ownership_repository.find(connection, session_id, self.writer_version)
-                     if session_id else None)
+                     if session_id and not protected_target else None)
 
         decision = plan_decision(
             mode=self.mode, render_status=rendered["render_status"],
@@ -177,13 +220,23 @@ class LegacyQaWriter:
                                      and ownership["source_fingerprint"]
                                      == rendered["source_fingerprint"]),
             allow_update_existing=self.allow_update_existing)
+        if (occurrence is not None and occurrence.verdict == AMBIGUOUS
+                and decision == WOULD_INSERT):
+            # Case D. The readiness and payload refusals above still take
+            # precedence; this only ever replaces what would have been an
+            # insert, and it never guesses which candidate is the real one.
+            decision = BLOCKED_AMBIGUOUS_LEGACY_IDENTITY
 
         counters[decision.lower()] = counters.get(decision.lower(), 0) + 1
         pre_digest = digest(existing_session, existing_items)
 
         result = {
             "subject": rendered["subject"], "lecture_id": str(rendered["lecture_id"]),
-            "legacy_session_id": session_id,
+            "legacy_session_id": (occurrence.target_session_id if protected_target
+                                  else session_id),
+            "proposed_session_id": proposed_session_id,
+            **(occurrence.as_dict() if occurrence is not None
+               else {"same_occurrence_verdict": None}),
             "render_status": rendered["render_status"], "qa_status": rendered["qa_status"],
             "decision": decision, "coded_owned": ownership is not None,
             "legacy_row_exists": existing_session is not None,
@@ -355,3 +408,20 @@ def _summarise_checklist_diff(diff: dict) -> dict:
             diff["status_difference_count"] - (1 if item2_differs else 0),
     }
 
+
+def _retarget(rendered: dict, items, session_id: str):
+    """
+    Re-address a rendered payload to the legacy key this lecture already owns.
+
+    Only the key moves. Every checklist row's session_id and its
+    session_id_match ("<session_id>_<order>") move with it, because the
+    checklist upsert is keyed on session_id_match - leaving the old one would
+    write eleven orphan checklist rows under an id no session row carries.
+    """
+    moved = {**rendered, "session_id": session_id,
+             "retargeted_from_session_id": rendered["session_id"]}
+    moved_items = [{**item, "session_id": session_id,
+                    "session_id_match": session_id_match(session_id,
+                                                         item["checklist_order"])}
+                   for item in items]
+    return moved, moved_items

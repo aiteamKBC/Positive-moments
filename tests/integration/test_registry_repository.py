@@ -1,9 +1,16 @@
+"""
+Phase 1 registry behaviour against the real schema and its CHECK constraints.
+
+RELEASE GATE: self-contained. Every row here is built by the test itself and
+rolled back, and the dates are synthetic.
+"""
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import psycopg
 import pytest
 
+from tests.integration.seeding import DAY, START
 from app.common.errors import PlatformError
 from app.config.settings import Settings
 from app.db.connection import readonly_database_connection
@@ -13,13 +20,13 @@ from app.lectures.models import Lecture
 
 
 def _lecture(unique: str, **overrides) -> Lecture:
-    start = datetime(2026, 9, 4, 7, tzinfo=timezone.utc)
+    start = START
     fields = dict(
         lecture_id=uuid.uuid4(), calendar_user_upn="phase1-test@example.invalid",
         calendar_event_id=f"event-{unique}", i_cal_uid=f"ical-{unique}", meeting_id="meeting-test",
         join_url=f"https://teams.microsoft.com/l/meetup-join/{unique}", subject="Original",
         normalized_subject="original", module="Original", scheduled_start=start,
-        scheduled_end=start + timedelta(hours=1), session_date=date(2026, 9, 4),
+        scheduled_end=start + timedelta(hours=1), session_date=DAY,
         calendar_timezone="UTC",
         calendar_organizer_address="CohortGroup@example.invalid",
         meeting_organizer_user_id="meeting-organizer-user-id",
@@ -57,7 +64,7 @@ def test_registry_upsert_and_discovery_audit_rollback():
         assert stored == (1, "Updated", True)
 
         runs = DiscoveryRunRepository()
-        run_id = runs.start(connection, date(2026, 9, 4))
+        run_id = runs.start(connection, DAY)
         runs.complete(connection, run_id, {
             "status": "COMPLETED", "calendar_events_found": 1, "teams_events_found": 1,
             "online_meetings_resolved": 1, "active_group_matches": 1,

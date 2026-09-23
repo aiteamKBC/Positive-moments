@@ -44,6 +44,25 @@ from app.writer.perfect_mapping import (
 )
 from app.writer.perfect_service import PerfectLecturePlanner
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 ANDREW = "25e85615-aa7a-5f49-bb40-078d7c7b65d0"
 ANDREW_KEY = "2026-09-16|Andrew-Scheduling Professional (SP) Jan 2026"
@@ -103,42 +122,9 @@ def _planner(mode=DRY_RUN, lecture_ids=None, confirmed=False, persist=False,
         persist_shadow_result=persist)
 
 
-def test_the_platform_default_policy_is_no_longer_the_one_this_file_pins():
-    """Phase 3C3E. Stated here so the pinning above cannot become stale."""
-    from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION
-    assert DEFAULT_PERFECT_ELIGIBILITY_VERSION == PERFECT_ELIGIBILITY_VERSION_V2
-    assert DEFAULT_PERFECT_ELIGIBILITY_VERSION != PERFECT_ELIGIBILITY_VERSION
-    default = PerfectLecturePlanner(
-        result_repository=PerfectLectureResultRepository(),
-        ownership_repository=PerfectLectureOwnershipRepository(),
-        legacy_repository=LegacyPerfectLectureRepository(), mode=DRY_RUN)
-    assert default.eligibility_version == PERFECT_ELIGIBILITY_VERSION_V2
-
-
 # --------------------------------------------------------------------------
 # read-only facts
 # --------------------------------------------------------------------------
-
-def test_the_migration_added_two_coded_tables_and_changed_nothing_legacy():
-    with _connection() as connection:
-        for table in ("lecture_perfect_lecture_results",
-                      "lecture_perfect_lecture_legacy_writes"):
-            assert connection.execute(
-                "SELECT to_regclass(%s) IS NOT NULL", (f"public.{table}",)).fetchone()[0]
-        # qa_perfect_lectures keeps exactly the shape legacy expects.
-        columns = [row[0] for row in connection.execute(
-            "SELECT column_name FROM information_schema.columns "
-            " WHERE table_schema='public' AND table_name='qa_perfect_lectures' "
-            " ORDER BY ordinal_position").fetchall()]
-        assert columns == ["id", "lecture_key", "session_date", "subject", "module",
-                           "trainer", "engagement", "attended_count", "met_count",
-                           "recording_url", "recap_url", "detected_at", "meeting_id",
-                           "session_id", "excel_synced_at"]
-        triggers = connection.execute(
-            "SELECT count(*) FROM pg_trigger t JOIN pg_class r ON r.oid=t.tgrelid "
-            " WHERE r.relname='qa_perfect_lectures' AND NOT t.tgisinternal").fetchone()[0]
-        assert triggers == 0
-        connection.rollback()
 
 
 def test_andrew_is_perfect_in_shadow():

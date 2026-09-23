@@ -20,6 +20,25 @@ from app.db.repositories.transcript_selections import (
 from app.transcripts.selection import SELECTION_VERSION
 from app.transcripts.selection_service import TranscriptSelectionService
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET = date(2026, 9, 4)
 
@@ -213,13 +232,6 @@ def test_selection_does_not_mutate_phase_2a_raw_evidence():
     finally:
         connection.rollback()
         connection.close()
-
-
-def test_selection_id_is_stable_per_lecture_and_version():
-    first = selection_identity(lecture_id="lec-1", selection_version=SELECTION_VERSION)
-    assert first == selection_identity(lecture_id="lec-1", selection_version=SELECTION_VERSION)
-    assert first != selection_identity(lecture_id="lec-2", selection_version=SELECTION_VERSION)
-    assert first != selection_identity(lecture_id="lec-1", selection_version="other_v2")
 
 
 def test_database_rejects_a_selected_row_without_a_primary():

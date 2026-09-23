@@ -33,6 +33,25 @@ from app.writer.modes import (
 )
 from app.writer.service import WRITE_VERIFICATION_FAILED, LegacyQaWriter, WriteVerificationError
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET = date(2026, 9, 4)
 LEGACY_TABLES = ("qa_doctors_sessions", "qa_doctors_checklist_items",
@@ -468,37 +487,7 @@ def test_two_writers_cannot_both_claim_the_same_session():
         second.rollback()
 
 
-def test_the_ownership_unique_constraint_exists():
-    with _connection() as connection:
-        definition = connection.execute("""
-        SELECT pg_get_constraintdef(oid) FROM pg_constraint
-         WHERE conrelid = 'public.lecture_qa_legacy_writes'::regclass AND contype = 'u'
-        """).fetchone()[0]
-        assert "legacy_session_id" in definition and "writer_version" in definition
-        connection.rollback()
-
-
 # --- bounded generations, against the real table ----------------------------------------
-
-def test_generation_attempts_are_append_only_and_numbered():
-    repository = GenerationAttemptRepository()
-    fingerprint = "e" * 64
-    with _connection() as connection:
-        base = {"lecture_id": None, "source_fingerprint": fingerprint,
-                "qa_engine_version": "engine", "prompt_version": "prompt",
-                "model_name": "gpt-5.2", "outcome": "INVALID_EVIDENCE"}
-        assert repository.count(connection, fingerprint) == 0
-        assert repository.record(connection, base) == 1
-        assert repository.record(connection, base) == 2
-        assert repository.record(connection, base) == 3
-        assert repository.count(connection, fingerprint) == 3
-        # Earlier attempts are preserved, not overwritten.
-        numbers = connection.execute(
-            "SELECT generation_number FROM public.lecture_qa_generation_attempts "
-            " WHERE source_fingerprint = %s ORDER BY generation_number",
-            (fingerprint,)).fetchall()
-        assert [row[0] for row in numbers] == [1, 2, 3]
-        connection.rollback()
 
 
 def test_a_real_evaluation_can_be_marked_review_required_without_losing_output():

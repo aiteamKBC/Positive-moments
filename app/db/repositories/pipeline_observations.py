@@ -12,6 +12,7 @@ Every statement here is a SELECT. There is no write path in this module at
 all, which is the only form of "will not write" that survives a refactor.
 """
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.writer.legacy_identity import LegacyOccurrenceGuard
 
 
 RECORDING_LINK = """
@@ -36,6 +37,20 @@ SELECT count(*)::int,
 
 class LegacyObservationRepository:
     """Read-only windows onto the legacy rows and the two columns they own."""
+
+    def __init__(self, occurrence_guard=None):
+        # The SAME guard the writer uses, not a copy of its rules. The
+        # resolver and the writer must never disagree about whether an
+        # automatic insert is safe, and sharing the implementation is the only
+        # durable way to make that true.
+        self.occurrence_guard = occurrence_guard or LegacyOccurrenceGuard()
+
+    def legacy_qa_occurrence(self, connection, *, lecture_id, session_id,
+                             writer_version):
+        """Whether an existing legacy row already represents this occurrence."""
+        return self.occurrence_guard.evaluate(
+            connection, lecture_id=lecture_id, session_id=session_id,
+            writer_version=writer_version)
 
     def legacy_qa_session(self, connection, legacy_session_id) -> dict | None:
         """

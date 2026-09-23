@@ -291,10 +291,35 @@ Do **not** "solve" this by blanking `DATABASE_URL` to fall back to sqlite:
 39 of the 76 tests skip and one errors, which looks like a pass and proves
 almost nothing.
 
-**2. The integration suite takes hours, not minutes.** 362 tests, each opening
-its own connection to managed Postgres in eu-west-2, at roughly 20 seconds per
-test. It is not hung. The 1262-test unit suite runs in about 4 seconds and is
-what to use during development; the integration suite is a pre-release gate.
+**2. The integration suite never runs against production, and it is split in
+two.** It used to read `DATABASE_URL` from `backend/.env` and run rolled-back
+DML against the managed Postgres in eu-west-2. It now runs only against an
+isolated test database named by `TEST_DATABASE_URL`, and `tests/conftest.py`
+refuses anything else. The same gate covers `manage.py test`, which used to
+create and drop `test_AiTeamKBC` on the production server.
+
+*The release gate* is everything that must pass before a tag - the unit suite
+plus the self-contained integration suite:
+
+```bash
+docker run -d --name kbc-qa-integration-test -p 127.0.0.1:55432:5432   -e POSTGRES_USER=kbc_test -e POSTGRES_PASSWORD=<throwaway>   -e POSTGRES_DB=kbc_qa_integration_test postgres:16-alpine
+export APP_ENV=test
+export TEST_DATABASE_URL=postgresql://kbc_test:<throwaway>@127.0.0.1:55432/kbc_qa_integration_test
+python -m tools.release_gate --reset          # builds the schema, then runs the gate
+```
+
+That is `pytest -m "not production_data"`, and it must report **0 failed**. It
+takes about 20 seconds.
+
+*The production-data acceptance suite* is the rest of `tests/integration`:
+tests whose subject is KBC's real history - named lectures, real session dates,
+the real legacy dataset, legacy parity measurements. They carry
+`pytest.mark.production_data`, are deselected by the gate, and need an approved
+acceptance dataset. They are never pointed at production. See
+`docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md`.
+
+Without `TEST_DATABASE_URL` the integration tests are skipped; with a value
+that fails any check the session aborts. The unit suite needs no database.
 `pytest-xdist` is not installed, so there is no parallel mode today.
 
 ## Operating the release

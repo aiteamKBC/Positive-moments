@@ -31,6 +31,25 @@ from app.qa.provider import ProviderError
 from app.qa.punctuality import LEGACY_CALL_BOUNDS
 from app.qa.service import COMPLETED, MODEL_ERROR, PENDING, QaInputError, ShadowQaService
 
+# ---------------------------------------------------------------------------
+# PRODUCTION-DATA ACCEPTANCE SUITE
+#
+# Every test in this module asserts behaviour against KBC's real historical
+# evidence: named lectures, real session dates, real transcripts, the real
+# legacy dataset. It is NOT part of the RC release gate and is deselected by
+#     pytest tests/integration -m "not production_data"
+# because on a database without that evidence it can only fail or pass
+# vacuously - neither of which validates anything.
+#
+# The contracts in here that never needed real history have been moved to the
+# self-contained gate modules (test_pipeline_contracts.py,
+# test_platform_invariants.py, test_safety_fixes_integration.py).
+#
+# To run this suite, an approved acceptance dataset must be configured - never
+# production. See docs/audits/QA_CORE_RC4_TEST_GATE_FINAL_2026-09-22.md.
+# ---------------------------------------------------------------------------
+pytestmark = pytest.mark.production_data
+
 
 TARGET = date(2026, 9, 4)
 
@@ -163,11 +182,6 @@ def test_inputs_come_from_the_v2_evidence_only():
         assert all(row["canonical_trainer"] for row in rows)
         assert all(row["combined_content"].startswith("WEBVTT") for row in rows)
         connection.rollback()
-
-
-def test_the_v1_roster_is_never_consumed_by_the_engine():
-    with pytest.raises(QaInputError):
-        _service(roster=ATTENDANCE_ROSTER_V1)
 
 
 def test_v1_and_v2_engagement_differ_so_the_pin_matters():

@@ -82,6 +82,8 @@ from app.qa.validation import (
 )
 from app.lectures.matching import normalize_group
 from app.transcripts.speakers import normalize_speaker_label
+from app.attendance.coverage import classify as classify_coverage
+from app.attendance.coverage import is_authoritative
 from app.qa.evidence_policy import (
     DEFAULT_EVIDENCE_POLICY,
     EVIDENCE_POLICY_V1,
@@ -97,6 +99,12 @@ MODEL_ERROR = "MODEL_ERROR"
 INVALID_STRUCTURED_OUTPUT = "INVALID_STRUCTURED_OUTPUT"
 INVALID_EVIDENCE = "INVALID_EVIDENCE"
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
+# Not a QA outcome and never persisted: the attendance source has not answered,
+# so there is nothing to evaluate yet. Named after the orchestrator's own
+# WAIT_FOR_ATTENDANCE_SOURCE so the operator path and the scheduler describe
+# the same situation with the same words.
+WAITING_FOR_ATTENDANCE_SOURCE = "WAITING_FOR_ATTENDANCE_SOURCE"
+ATTENDANCE_NOT_AUTHORITATIVE = "ATTENDANCE_NOT_AUTHORITATIVE"
 
 # Phase 2C4 statuses that must not silently become a finished QA result.
 ENGAGEMENT_REVIEW_STATUSES = frozenset(
@@ -234,7 +242,7 @@ class ShadowQaService:
         counters = {name: 0 for name in (
             "lectures_considered", "delivered_count", "non_delivered_count", "provider_calls",
             "reused_evaluations", "evaluations_created", "evaluations_updated",
-            "review_required_count", "error_count")}
+            "review_required_count", "error_count", "attendance_waiting_count")}
         counters["lectures_considered"] = len(packages)
         results = []
 
@@ -365,12 +373,40 @@ class ShadowQaService:
             "ai_called": False, "provider_calls": 0,
         }
 
+        coverage = package_attendance_coverage(package)
+        result["attendance_coverage_status"] = coverage
+        result["attendance_source_authoritative"] = is_authoritative(coverage)
+
         if not execute:
             result["qa_status"] = PENDING
             result["mode"] = "PREVIEW"
             return result
 
         existing = self.evaluation_repository.find_by_fingerprint(connection, fingerprint)
+
+        # F-03. The attendance gate used to live ONLY in the orchestrator's
+        # resolver, so an operator running this service directly could finalize
+        # a lecture whose attendance source had never answered - which is how
+        # two 11/11 evaluations came to rest on empty snapshots. The service now
+        # asks the same question itself, with the same predicate, of the exact
+        # snapshot it is about to consume. It checks BEFORE reuse as well: an
+        # evaluation finalized on non-authoritative attendance must not be
+        # re-reported as a current answer either.
+        if not is_authoritative(coverage):
+            counters["attendance_waiting_count"] = (
+                counters.get("attendance_waiting_count", 0) + 1)
+            result.update({
+                "qa_status": WAITING_FOR_ATTENDANCE_SOURCE,
+                "review_reason": ATTENDANCE_NOT_AUTHORITATIVE,
+                "persisted": False, "ai_called": False, "provider_calls": 0,
+                # Reported, never reused: the caller should see that a stale
+                # answer exists without that answer being passed off as current.
+                "existing_evaluation_id": (str(existing["evaluation_id"])
+                                           if existing else None),
+                "existing_qa_status": existing["qa_status"] if existing else None,
+            })
+            return result
+
         if existing and existing["qa_status"] in (COMPLETED, "NON_DELIVERED") and not force:
             # Same inputs, same prompt, same model, same engine: nothing to buy.
             counters["reused_evaluations"] += 1
@@ -1370,3 +1406,20 @@ def _end_status(difference) -> str:
     if difference is None:
         return ""
     return "OnTime" if difference == 0 else ("EarlyFinish" if difference < 0 else "Overrun")
+
+
+def package_attendance_coverage(package) -> str:
+    """
+    The coverage status of the attendance snapshot a QA input was built on.
+
+    Deliberately NOT a second definition of "authoritative": the status comes
+    from the same `classify` the coverage repository and the orchestrator's
+    resolver use, over the same frozen counts. A package that carries no counts
+    classifies as SOURCE_UNKNOWN, which is not authoritative - so a caller that
+    forgot to supply them is refused rather than waved through.
+    """
+    return classify_coverage(
+        source_row_count=package.get("attendance_source_row_count"),
+        present_row_count=package.get("attendance_present_row_count"),
+        effective_member_count=package.get("attendance_effective_member_count"),
+        source_rows_any_status=package.get("attendance_source_rows_any_status"))
