@@ -7,7 +7,11 @@ and docs/audits/QA_CORE_SAFETY_FIX_VALIDATION_2026-09-22.md for the fixes.
   F-02  one lecture occurrence must never gain a second qa_doctors_sessions row
         because Graph re-serialized its transcript id;
   F-01  a Perfect policy with no attendance requirement must never publish;
-  F-03  shadow QA must never finalize on non-authoritative attendance.
+  F-03  shadow QA must never PUBLISH attendance it does not have. Superseded
+        on 2026-09-24 by attendance-optional QA (attendance_optional_qa_v1):
+        missing attendance no longer blocks QA, but everything attendance
+        alone can supply stays UNKNOWN - never the empty snapshot's zero -
+        and Item 7 stays the model's answer.
 
 The first group reproduces REAL Graph ids byte-for-byte from a test-side
 encoder. That is deliberately stronger than "the decoder returns something":
@@ -661,8 +665,22 @@ def test_11f_the_cli_still_accepts_v1_in_a_dry_run_and_v2_in_a_write():
 
 
 # ---------------------------------------------------------------------------
-# Fix E - shadow QA refuses to finalize on non-authoritative attendance
+# Fix E, as amended by attendance-optional QA: QA runs from the transcript,
+# and an absent attendance source never becomes a published zero.
 # ---------------------------------------------------------------------------
+
+UNKNOWN_ATTENDANCE_FIELDS = ("attended_count", "spoke_count", "engagement_percentage",
+                             "engagement_score")
+
+
+def _assert_attendance_unknown(result, stored):
+    assert result["attendance_source_authoritative"] is False
+    assert result["attendance_flag"] == "PENDING_ATTENDANCE"
+    evaluation = stored["evaluation"]
+    for field in UNKNOWN_ATTENDANCE_FIELDS:
+        assert evaluation[field] is None, field          # UNKNOWN != ZERO
+    assert evaluation["item7_override_applied"] is False
+    assert evaluation["metadata"]["attendance_flag"] == "PENDING_ATTENDANCE"
 
 EMPTY_SNAPSHOT = {"attendance_source_row_count": 0, "attendance_present_row_count": 0,
                   "attendance_effective_member_count": 0,
@@ -673,34 +691,44 @@ EMPTY_SNAPSHOT = {"attendance_source_row_count": 0, "attendance_present_row_coun
 
 @pytest.mark.parametrize("lecture", ["Martech - Thur",
                                      "G2 - Keith - Strategy and Planning - June 2026"])
-def test_12_the_two_f03_lectures_cannot_be_finalized(lecture):
+def test_12_the_two_f03_lectures_are_evaluated_without_a_fabricated_zero(lecture):
     """
-    Test 12, reproducing 2026-09-17: an empty SOURCE_MISSING snapshot and a
-    model ready to return 11/11. Nothing may be bought and nothing persisted.
+    Test 12, reproducing 2026-09-17: an empty SOURCE_MISSING snapshot whose
+    engagement row says 0 attended. QA now runs from the transcript; what it
+    must never do is carry that zero into the evaluation.
     """
     provider = StubProvider(good_output())
     evaluations = StubEvaluations()
     result, stored, _ = run_one(package(subject=lecture, module=lecture, **EMPTY_SNAPSHOT),
                                 provider, evaluations)
-    assert result["qa_status"] == WAITING_FOR_ATTENDANCE_SOURCE
-    assert result["qa_status"] != COMPLETED
+    assert result["qa_status"] == COMPLETED
+    assert result["qa_status"] != WAITING_FOR_ATTENDANCE_SOURCE
     assert result["attendance_coverage_status"] == "SOURCE_MISSING"
-    assert result["persisted"] is False
-    assert provider.calls == 0
-    assert stored is None and evaluations.writes == 0
+    assert provider.calls == 1
+    _assert_attendance_unknown(result, stored)
 
 
-def test_12b_a_stale_finalized_answer_is_reported_but_not_reused():
-    """G2 Keith already holds a COMPLETED evaluation on its empty snapshot."""
+def test_12b_an_answer_finalized_on_the_fabricated_zero_is_not_reused():
+    """
+    G2 Keith already holds a COMPLETED evaluation on its empty snapshot, made
+    before attendance was optional and carrying 0 attended / score 1. The
+    attendance-pending answer is a DIFFERENT evaluation (its fingerprint says
+    so), so the old one is never passed off as current. The orchestrator
+    reaches it through the free deterministic refresh, not this path.
+    """
+    from app.qa.inputs import qa_source_fingerprint
+
     item = package(**EMPTY_SNAPSHOT)
-    provider = StubProvider(good_output())
-    fingerprint = run_one(item, StubProvider(good_output()))[0]["source_fingerprint"]
-    existing = {fingerprint: {"evaluation_id": uuid.UUID(int=77), "qa_status": COMPLETED}}
-    result, _, _ = run_one(item, provider, StubEvaluations(existing=existing))
-    assert result["qa_status"] == WAITING_FOR_ATTENDANCE_SOURCE
+    pending = run_one(item, StubProvider(good_output()))[0]["source_fingerprint"]
+    old = qa_source_fingerprint(package={**item, "provider_contract_version": None},
+                                model="gpt-5.2")
+    assert old != pending
+    existing = {old: {"evaluation_id": uuid.UUID(int=77), "qa_status": COMPLETED}}
+    result, stored, _ = run_one(item, StubProvider(good_output()),
+                                StubEvaluations(existing=existing))
     assert result.get("reused") is not True
-    assert result["existing_qa_status"] == COMPLETED
-    assert provider.calls == 0
+    assert result["source_fingerprint"] == pending
+    _assert_attendance_unknown(result, stored)
 
 
 @pytest.mark.parametrize("counts,status", [
@@ -710,12 +738,15 @@ def test_12b_a_stale_finalized_answer_is_reported_but_not_reused():
     ({"attendance_source_row_count": 4, "attendance_present_row_count": 4,
       "attendance_effective_member_count": 0}, "SOURCE_PARTIAL_OR_INVALID"),
 ])
-def test_12c_every_non_authoritative_status_waits(counts, status):
+def test_12c_every_non_authoritative_status_runs_qa_with_attendance_unknown(counts, status):
     provider = StubProvider(good_output())
+    # The fixture's roster has members and an Item 7 override: on a
+    # non-authoritative snapshot neither may reach the evaluation.
     result, stored, _ = run_one(package(**counts), provider)
     assert result["attendance_coverage_status"] == status
-    assert result["qa_status"] == WAITING_FOR_ATTENDANCE_SOURCE
-    assert provider.calls == 0 and stored is None
+    assert result["qa_status"] == COMPLETED
+    assert provider.calls == 1
+    _assert_attendance_unknown(result, stored)
 
 
 def test_13_authoritative_attendance_behaves_exactly_as_before():

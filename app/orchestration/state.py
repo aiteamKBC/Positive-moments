@@ -49,6 +49,7 @@ from app.lectures.duplicates import (
 from app.orchestration.stages import (
     ACQUIRE_TRANSCRIPT,
     OPERATOR_ONLY_ACTIONS,
+    IDLE_ACTIONS,
     ATTENDANCE,
     BUILD_CANONICAL_CUES,
     CALCULATE_ENGAGEMENT,
@@ -102,6 +103,8 @@ from app.qa.deterministic import NON_DELIVERED
 from app.qa.evidence_policy import DEFAULT_EVIDENCE_POLICY
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION, PENDING_ATTENDANCE_DATA
 from app.qa.recovery import recovery_state
+from app.qa.inputs import attendance_flag
+from app.qa.structured_output import DEFAULT_PROVIDER_CONTRACT
 from app.qa.provider import PROVIDER_CONFIGURATION_ERROR
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
@@ -439,6 +442,8 @@ class PipelineStateResolver:
             "attendance_coverage_status": downstream["attendance_coverage_status"],
             "attendance_source_authoritative":
                 downstream["attendance_source_authoritative"],
+            # Informational only: missing attendance never means QA failed.
+            **attendance_flag(downstream["attendance_source_authoritative"]),
             "perfect_policy_version": self.perfect_eligibility_version,
             "is_suppressed_duplicate": False,
             "duplicate_resolution": duplicate,
@@ -763,7 +768,10 @@ class PipelineStateResolver:
             return _stage(MISSING, action=RESOLVE_ATTENDANCE, **detail)
         # Resolved, and the honest answer was "the source has not told us".
         # The only thing that changes this is the source itself, so the state
-        # is WAITING - work we cannot do, not work we forgot.
+        # is WAITING - work we cannot do, not work we forgot. It is a FLAG on
+        # the lecture, not a gate: `_next_action` steps over it, so QA, render
+        # and the legacy sync still run from the transcript.
+        detail.update(attendance_flag(False), blocks_qa=False)
         if self.attendance_probe is not None and self.attendance_probe(
                 connection, lecture):
             return _stage(STALE, action=RECOVER_ATTENDANCE,
@@ -879,6 +887,24 @@ class PipelineStateResolver:
                               reason="DELIVERY_POLICY_RECLASSIFIES_NON_DELIVERED",
                               delivery_classification=decision.classification,
                               delivery=decision.diagnostics, **detail)
+        if (current["qa_status"] == "COMPLETED"
+                and not downstream["attendance_source_authoritative"]
+                and current.get("carries_attendance_values")):
+            # Built before attendance became optional: it states numbers the
+            # empty snapshot never supported (0 attended, score 1). If the
+            # model answer can still be reused, the fix is the free
+            # deterministic refresh, which re-derives those fields as UNKNOWN.
+            if (current.get("model_output_reusable")
+                    and current.get("provider_contract_version")
+                    == DEFAULT_PROVIDER_CONTRACT):
+                return _stage(STALE, action=REFRESH_DETERMINISTIC_QA,
+                              reason="EVALUATION_CARRIES_UNVERIFIED_ATTENDANCE", **detail)
+            # An answer bought under another provider contract answers a
+            # different question and cannot be reused; replacing it would be a
+            # new paid generation AND a rewrite of a published row. Neither is
+            # the scheduler's call.
+            return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                          reason="UNVERIFIED_ATTENDANCE_ANSWER_NOT_REFRESHABLE", **detail)
         engagement = engagement or {}
         if (engagement.get("engagement_id") and current.get("engagement_id")
                 and engagement["engagement_id"] != current["engagement_id"]):
@@ -1123,15 +1149,33 @@ class PipelineStateResolver:
 
         `operator_actions` collects whatever a human still owes, so re-gating
         an action later loses nothing.
+
+        A WAITING stage is someone else's move - the attendance source, the
+        Perfect policy's attendance requirement, a recording - so it is
+        stepped over rather than treated as a wall: everything that does not
+        need it still runs. Only when nothing else is left does the first wait
+        become the answer, which is also how the orchestrator still hands a
+        waiting lecture to the free RECOVER_ATTENDANCE probe every cycle.
+        Stages that genuinely depend on a waiting one say so themselves
+        (Perfect sync on a pending eligibility is NOT_APPLICABLE, Perfect
+        eligibility on missing attendance is itself WAITING).
         """
         headline = (NOTHING_TO_DO, None)
         executable = (NOTHING_TO_DO, None)
+        first_wait = None
         operator = []
         for stage in STAGE_ORDER:
             item = stages[stage]
             if item["state"] in SETTLED_STATES:
                 continue
             action = item["action"] or MANUAL_REVIEW_REQUIRED
+            if item["state"] == WAITING or action in IDLE_ACTIONS:
+                # Includes the observed-only waits (recording, Excel), so a
+                # missing recording link can never hide the attendance wait
+                # that keeps the late-attendance probe running.
+                if first_wait is None:
+                    first_wait = (action, stage)
+                continue
             if headline[1] is None:
                 headline = (action, stage)
             if action in OPERATOR_ONLY_ACTIONS:
@@ -1140,4 +1184,9 @@ class PipelineStateResolver:
                 continue
             if executable[1] is None:
                 executable = (action, stage)
+        if first_wait is not None:
+            if headline[1] is None:
+                headline = first_wait
+            if executable[1] is None:
+                executable = first_wait
         return headline, executable, operator

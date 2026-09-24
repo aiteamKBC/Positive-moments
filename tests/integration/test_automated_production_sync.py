@@ -67,7 +67,8 @@ RISK_MANAGEMENT = "708211ef-53c4-5fbd-9588-ebb0e96745fd"
 MARTECH_FRI = "5c84a940-ca3a-5901-9be4-c6db4d199ac4"
 # Duplicate calendar booking; no online meeting.
 RAY_DUPLICATE = "26e74d25-ea3f-5e3d-ab08-19ab949eb75f"
-# Real, and genuinely waiting on the attendance source.
+# Real, and its attendance source is genuinely empty. Under attendance-optional
+# QA it no longer waits: the pipeline runs on and the row carries the flag.
 RAY_WAITING = "ea3e1c87-5c6c-5394-82b1-ff9fb8307ab6"
 
 SYNCED = (G2_JULIANE, RISK_MANAGEMENT, MARTECH_FRI,
@@ -372,11 +373,14 @@ def test_the_day_report_now_counts_five_synced_lectures():
     assert report["complete_count"] == 5
     # Phase 4B left the duplicate booking as a manual review. Phase 4C1
     # retired it deterministically, so the day now reads: seven calendar
-    # events, six lectures, one of which is still waiting on attendance.
+    # events, six lectures. Attendance-optional QA (2026-09-24): the one with
+    # no attendance no longer waits - it is in progress (CALCULATE_ENGAGEMENT,
+    # then its QA) and carries the PENDING_ATTENDANCE flag.
     assert report["review_count"] == 0
     assert report["suppressed_duplicate_count"] == 1
     assert report["business_lecture_count"] == 6
-    assert report["waiting_count"] == 1
+    assert report["waiting_count"] == 0
+    assert report["in_progress_count"] == 1
     assert report["failed_count"] == 0
     assert (report["complete_count"] + report["waiting_count"]
             + report["review_count"] + report["failed_count"]
@@ -400,13 +404,17 @@ def test_the_duplicate_booking_is_now_retired_rather_than_merely_explained():
     assert state["next_executable_action"] == "NOTHING_TO_DO"
 
 
-def test_the_attendance_waiting_lecture_still_waits_and_buys_nothing():
+def test_the_attendance_pending_lecture_proceeds_with_its_flag():
     with _connection() as connection:
         state = _resolver().for_lecture(connection, RAY_WAITING)
         connection.rollback()
+    # Values from the read-only 2026-09-24 audit; the contract itself runs in
+    # the gate in test_attendance_optional_acceptance.py ("andrew" shape).
     assert state["stages"]["ATTENDANCE"]["state"] == "WAITING"
-    assert state["next_executable_action"] == "WAIT_FOR_ATTENDANCE_SOURCE"
+    assert state["stages"]["ATTENDANCE"]["blocks_qa"] is False
+    assert state["next_executable_action"] == "CALCULATE_ENGAGEMENT"
     assert state["attendance_source_authoritative"] is False
+    assert state["attendance_flag"] == "PENDING_ATTENDANCE"
 
 
 def _legacy_counts(connection) -> dict:

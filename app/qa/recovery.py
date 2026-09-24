@@ -76,7 +76,7 @@ SELECT m.engagement_id, m.calculation_status, m.attended_count, m.spoke_count,
        m.metadata ->> 'attendance_coverage_version'
   FROM public.lecture_engagement_metrics m
  WHERE m.lecture_id = %s
- ORDER BY m.updated_at DESC, m.engagement_id DESC LIMIT 1
+ ORDER BY m.updated_at DESC, m.engagement_id DESC
 """
 
 EVALUATIONS = """
@@ -87,7 +87,12 @@ SELECT e.evaluation_id, e.source_fingerprint, e.qa_status, e.review_reason,
        e.updated_at, e.engagement_id, e.attendance_snapshot_id,
        e.metadata ->> 'model_input_fingerprint',
        e.metadata #>> '{deterministic_refresh,deterministic_refresh_version}',
-       e.document_id, e.metadata ->> 'evidence_policy_version'
+       e.document_id, e.metadata ->> 'evidence_policy_version',
+       -- Appended: does this answer state attendance-derived numbers? On
+       -- non-authoritative attendance those numbers can only be the empty
+       -- snapshot's fabricated zero.
+       (e.attended_count IS NOT NULL OR e.engagement_percentage IS NOT NULL
+        OR e.engagement_score IS NOT NULL)
   FROM public.lecture_qa_evaluations e
  WHERE e.lecture_id = %s
  ORDER BY e.updated_at DESC, e.evaluation_id DESC
@@ -118,7 +123,7 @@ SELECT rs.rendered_session_id, rs.render_status, rs.renderer_version,
        rs.evaluation_id, rs.session_id
   FROM public.lecture_qa_rendered_sessions rs
  WHERE rs.lecture_id = %s
- ORDER BY rs.updated_at DESC, rs.rendered_session_id DESC LIMIT 1
+ ORDER BY rs.updated_at DESC, rs.rendered_session_id DESC
 """
 
 QA_WRITES = """
@@ -177,10 +182,17 @@ def recovery_state(connection, lecture_id, *,
     coverage["attendance_source_authoritative"] = is_authoritative(
         coverage["attendance_coverage_status"])
 
-    engagement_row = _rows(connection, ENGAGEMENT, lecture_id)
+    engagement_rows = _rows(connection, ENGAGEMENT, lecture_id)
     engagement = None
-    if engagement_row:
-        row = engagement_row[0]
+    if engagement_rows:
+        # The engagement OF THE CURRENT SNAPSHOT, when there is one. Engagement
+        # is recalculated for every snapshot the lecture holds, history
+        # included, and each upsert stamps updated_at = now(), so the
+        # superseded row ties with the current one inside the cycle that
+        # recovered attendance; newest-by-timestamp would then be a uuid coin.
+        snapshot_id = coverage.get("attendance_snapshot_id")
+        row = next((item for item in engagement_rows if str(item[8]) == str(snapshot_id)),
+                   engagement_rows[0])
         engagement = {"engagement_id": str(row[0]), "calculation_status": row[1],
                       "attended_count": row[2], "spoke_count": row[3],
                       "engagement_score": row[4], "item7_override_applied": row[5],
@@ -247,6 +259,7 @@ def recovery_state(connection, lecture_id, *,
             # Phase 4B: which rule judged this answer's evidence. An answer
             # rejected by an older rule can be re-judged for nothing.
             "evidence_policy_version": row[17] or EVIDENCE_POLICY_V1,
+            "carries_attendance_values": bool(row[18]),
             # The stored aggregate and the authoritative count, side by side:
             # a disagreement is a defect, not something to average.
             # `provider_attempts` counts every recorded call; the budget below
@@ -270,10 +283,21 @@ def recovery_state(connection, lecture_id, *,
                 for key, value in attempts_by_fingerprint.items()
                 if key not in {item["source_fingerprint"] for item in evaluations}]
 
-    rendered_row = _rows(connection, RENDERED, lecture_id)
+    rendered_rows = _rows(connection, RENDERED, lecture_id)
     rendered = None
-    if rendered_row:
-        row = rendered_row[0]
+    if rendered_rows:
+        # The render that matters is the render OF THE CURRENT ANSWER, not
+        # whichever render row was touched last. Rendering is an idempotent
+        # upsert that stamps updated_at = now(), so one cycle that renders a
+        # recovered evaluation can also re-touch the superseded evaluation's
+        # render, and the two then tie on updated_at inside that cycle's
+        # transaction - where a uuid tie-break would pick the superseded one
+        # about half the time and leave the published row stale for ever.
+        # Only when the current answer has no render yet does the newest
+        # render stand in, and then its lineage correctly reads as superseded.
+        current_id = evaluations[0]["evaluation_id"] if evaluations else None
+        row = next((item for item in rendered_rows if str(item[7]) == current_id),
+                   rendered_rows[0])
         rendered = {"rendered_session_id": str(row[0]), "render_status": row[1],
                     "renderer_version": row[2],
                     "source_fingerprint_prefix": row[3][:16],
@@ -343,11 +367,15 @@ def _next_action(state) -> str:
     engagement = state.get("engagement")
     current = state.get("current_evaluation")
 
-    # 1. the source has not answered. Nothing downstream can be fixed by us.
-    if not state["attendance_source_authoritative"]:
+    authoritative = state["attendance_source_authoritative"]
+
+    # 1. attendance never resolved at all: nothing to build engagement on yet.
+    if not authoritative and state.get("attendance_snapshot_id") is None:
         return WAIT_FOR_ATTENDANCE_SOURCE
 
-    # 2. the source answered, but the engagement we hold predates that answer.
+    # 2. the engagement we hold predates the current snapshot. A snapshot
+    #    that says "the source has not answered" still gets its engagement
+    #    row: that row is the lineage a late answer is detected against.
     if engagement is None or not engagement.get("is_current_snapshot"):
         return RECALCULATE_ENGAGEMENT
 
@@ -368,6 +396,12 @@ def _next_action(state) -> str:
 
     if state["rendered"] is None or state["rendered"]["render_status"] != "RENDERED":
         return REFRESH_RENDER
+
+    # Missing attendance never blocked anything above: QA runs from the
+    # transcript. It is only now, with QA finished, that the lecture waits -
+    # for the enrichment, and for Perfect, which still requires it.
+    if not authoritative:
+        return WAIT_FOR_ATTENDANCE_SOURCE
 
     # 5. Perfect, under the policy that governs NEW work.
     perfect = _perfect_under(state["perfect_results"],

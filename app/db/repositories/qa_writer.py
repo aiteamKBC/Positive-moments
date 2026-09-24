@@ -77,6 +77,37 @@ SELECT checklist_order, checklist_item, status, session_id, session_id_match, ev
 class RenderedPayloadRepository:
     """READ-ONLY access to the Phase 3B payload the writer would persist."""
 
+    def is_deterministic_refresh_of(self, connection, published_evaluation_id,
+                                    current_evaluation_id) -> bool:
+        """
+        Is the current evaluation a deterministic refresh that reuses the
+        published evaluation's stored model answer - same lecture, same
+        provider question, byte-identical output?
+
+        This is what makes a late-attendance update a deterministic change
+        rather than a new verdict: the AI analysis is the one already
+        published, and only the fields attendance supplies can differ. A
+        DIFFERENT evaluation is required, stamped by the refresh itself, so a
+        regeneration written over the published evaluation in place can never
+        pass by being compared with itself.
+        """
+        try:
+            row = connection.execute("""
+            SELECT p.lecture_id = c.lecture_id
+               AND p.evaluation_id <> c.evaluation_id
+               AND c.metadata ? 'deterministic_refresh'
+               AND p.ai_raw_output IS NOT NULL
+               AND p.ai_raw_output = c.ai_raw_output
+               AND p.metadata ->> 'model_input_fingerprint' IS NOT NULL
+               AND p.metadata ->> 'model_input_fingerprint'
+                   = c.metadata ->> 'model_input_fingerprint'
+              FROM public.lecture_qa_evaluations p, public.lecture_qa_evaluations c
+             WHERE p.evaluation_id = %s AND c.evaluation_id = %s
+            """, (published_evaluation_id, current_evaluation_id)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "model answer comparison failed") from exc
+        return bool(row and row[0])
+
     def load_sessions(self, connection, target_date, renderer_version) -> list[dict]:
         try:
             rows = connection.execute(LOAD_RENDERED, (target_date, renderer_version)).fetchall()
@@ -271,7 +302,7 @@ class WriterOwnershipRepository:
         try:
             row = connection.execute("""
             SELECT write_id, lecture_id, source_fingerprint, write_status, write_mode,
-                   post_write_digest
+                   post_write_digest, evaluation_id, legacy_session_id
               FROM public.lecture_qa_legacy_writes
              WHERE legacy_session_id = %s AND writer_version = %s
             """, (legacy_session_id, writer_version)).fetchone()
@@ -280,7 +311,8 @@ class WriterOwnershipRepository:
         if row is None:
             return None
         return {"write_id": row[0], "lecture_id": row[1], "source_fingerprint": row[2],
-                "write_status": row[3], "write_mode": row[4], "post_write_digest": row[5]}
+                "write_status": row[3], "write_mode": row[4], "post_write_digest": row[5],
+                "evaluation_id": row[6], "legacy_session_id": row[7]}
 
     def record(self, connection, entry: dict) -> dict:
         """

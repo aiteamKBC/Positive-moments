@@ -25,7 +25,11 @@ Exactly two things, and they are both about the ABSENCE of ambiguity:
 Everything else is ambiguous in a way a machine must not resolve alone:
 
   * `WOULD_UPDATE` - something changed. WHAT changed, and whether rewriting a
-    published row is the right response, is a judgement.
+    published row is the right response, is a judgement. With ONE exception,
+    proven by the writer itself: the late-attendance deterministic refresh of
+    a row we own (same lecture, same session id, the identical stored model
+    answer, and only the engagement numbers, the counts and Item 7 moving).
+    The automated write pass re-checks that proof inside the writer.
   * `PROTECTED_EXISTING_LEGACY_ROW` - the row is n8n's. Never, in any mode.
   * `PERFECT_BLOCKED_KEY_COLLISION` - `date|subject` already points at a
     different session. Production already contains one such pair.
@@ -117,6 +121,7 @@ PERFECT_MANUAL = {
 
 
 UNKNOWN_DECISION = "UNKNOWN_WRITER_DECISION"
+DETERMINISTIC_REFRESH_UPDATE = "DETERMINISTIC_REFRESH_UPDATE"
 
 
 def classify_qa(decision: str) -> dict:
@@ -154,6 +159,11 @@ def classify_plan(plan: dict) -> dict:
     reported, so nothing unsafe passes silently.
     """
     qa = classify_qa(plan.get("decision"))
+    if (plan.get("decision") == WOULD_UPDATE
+            and (plan.get("deterministic_refresh_update") or {}).get("eligible")):
+        # The single update the scheduler may make; see the module docstring.
+        qa = {**_safe(WOULD_UPDATE, "WRITE"),
+              "update_kind": DETERMINISTIC_REFRESH_UPDATE}
     perfect_plan = plan.get("perfect_lecture") or {}
     perfect_decision = perfect_plan.get("perfect_decision")
     perfect = (classify_perfect(perfect_decision) if perfect_decision

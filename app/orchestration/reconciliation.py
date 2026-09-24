@@ -20,6 +20,7 @@ from app.orchestration.stages import (
     COMPLETE,
     EXCEL_SYNC,
     FAILED,
+    IDLE_ACTIONS,
     LEGACY_QA_SYNC,
     MISSING,
     NOT_APPLICABLE,
@@ -31,6 +32,7 @@ from app.orchestration.stages import (
     REVIEW_REQUIRED,
     STAGE_ORDER,
     WAITING,
+    WAIT_FOR_ATTENDANCE_SOURCE,
 )
 from app.qa.perfect import PENDING_ATTENDANCE_DATA
 
@@ -70,12 +72,19 @@ def bucket_for(state: dict) -> str:
         return BUCKET_FAILED
     if any(item["state"] == REVIEW_REQUIRED for item in stages.values()):
         return BUCKET_REVIEW
-    if state["next_executable_action"] == NOTHING_TO_DO:
+    if state["next_executable_action"] in (NOTHING_TO_DO, WAIT_FOR_ATTENDANCE_SOURCE):
         # Everything the coded platform owns is done. A missing recording link
         # or Excel stamp belongs to a live legacy workflow and is reported
-        # separately rather than holding the lecture open.
+        # separately rather than holding the lecture open. So is attendance:
+        # the resolver offers the attendance wait only once QA, render and the
+        # legacy sync are all settled, and the pending source is reported as a
+        # flag (`attendance_waiting_count`, the row's `attendance_flag`) - it
+        # is not QA work still owed.
         return BUCKET_COMPLETE
-    if any(item["state"] == WAITING for item in stages.values()):
+    if (any(item["state"] == WAITING for item in stages.values())
+            and state["next_executable_action"] in IDLE_ACTIONS):
+        # Waiting means nothing is runnable. A lecture with QA still to run is
+        # in progress, whatever its attendance flag says.
         return BUCKET_WAITING
     return BUCKET_IN_PROGRESS
 
@@ -170,6 +179,7 @@ def _row(state, bucket) -> dict:
         "module": state.get("module"),
         "scheduled_start": state.get("scheduled_start"),
         "next_action": state["next_action"],
+        "attendance_flag": state.get("attendance_flag"),
         "is_suppressed_duplicate": bool(state.get("is_suppressed_duplicate")),
         "duplicate_winner_lecture_id": (state.get("duplicate_resolution") or {})
             .get("winner_lecture_id"),

@@ -17,6 +17,11 @@ and rolls it back. Nothing here reads, copies or reproduces production data:
 only the columns that carry meaning for it and the schema supplies the rest.
 That keeps the fixtures minimal and the tests readable, and it means a new NOT
 NULL column cannot silently break every test in the suite.
+
+FAIL CLOSED: every helper here that touches a connection first calls
+`integration_db_guard.assert_isolated`, so importing these helpers into a
+standalone script whose connection came from DATABASE_URL (production on an
+operator machine) raises before a single statement is sent.
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ from app.qa.inputs import REQUIRED_ATTENDANCE_ROSTER_VERSION
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.selection import SELECTION_VERSION
 from app.transcripts.webvtt import PARSER_VERSION
+from tools.integration_db_guard import assert_isolated
 
 
 # A date far outside the platform's real history, so a fixture can never be
@@ -145,6 +151,7 @@ _COLUMNS: dict = {}
 
 
 def columns(connection, table):
+    assert_isolated(connection)
     if table not in _COLUMNS:
         _COLUMNS[table] = connection.execute("""
             SELECT column_name, data_type, is_nullable = 'NO', column_default IS NOT NULL
@@ -167,6 +174,7 @@ def _filler(name, data_type):
 
 def insert(connection, table, **values):
     """INSERT, filling every NOT NULL column the caller did not name."""
+    assert_isolated(connection)
     cols = columns(connection, table)
     assert cols, f"no such table {table}"
     types = {name: data_type for name, data_type, _, _ in cols}

@@ -437,6 +437,13 @@ def test_a_settled_lecture_is_offered_no_work_on_a_second_backfill_pass():
 # --- 6. attendance WAIT -------------------------------------------------------
 
 def test_a_lecture_waiting_on_attendance_never_reaches_the_compatibility_sync():
+    """
+    Scripted: the resolver has NOTHING left for this lecture but the attendance
+    wait. The orchestrator must not invent work from it. (Since
+    attendance-optional QA the real resolver only reaches this state once QA,
+    render and the legacy sync are already settled - see
+    test_attendance_optional_qa.py - so this is "no extra work", not "no QA".)
+    """
     lecture = ScriptedLecture("waiting", [WAIT_FOR_ATTENDANCE_SOURCE], waiting=True,
                               attendance_state="WAITING")
     runner = RecordingRunner([lecture], day_actions=DAY_SCOPED)

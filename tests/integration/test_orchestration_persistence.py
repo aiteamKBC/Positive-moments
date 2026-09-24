@@ -2,8 +2,11 @@
 Phase 4A integration tests: the orchestrator against the real database.
 
 The fixtures are the real pilot lectures. 2026-09-17 is the interesting day:
-Stephen is finished, G2 Keith and Martech are genuinely waiting on an
-attendance source that is genuinely empty. Nothing here substitutes any of
+Stephen is finished; G2 Keith and Martech have an attendance source that is
+genuinely empty. Under attendance-optional QA neither WAITS: both carry the
+PENDING_ATTENDANCE flag, G2 Keith's pre-fix false zero is offered the free
+deterministic refresh, and Martech's json_object_v1 answer - which cannot be
+reused - goes to review. Nothing here substitutes any of
 that - the whole point is to find out what the orchestrator does when the
 state is the awkward state we actually have.
 
@@ -37,9 +40,12 @@ from app.orchestration.stages import (
     RUN_BLOCKED_LEGACY_QA_ACTIVE,
     RUN_COMPLETED,
     RUN_TYPE_MANUAL,
+    MANUAL_REVIEW_REQUIRED,
+    REFRESH_DETERMINISTIC_QA,
     WAIT_FOR_ATTENDANCE_SOURCE,
 )
 from app.orchestration.state import PipelineStateResolver
+from app.qa.inputs import ATTENDANCE_PENDING
 
 # ---------------------------------------------------------------------------
 # PRODUCTION-DATA ACCEPTANCE SUITE
@@ -142,30 +148,48 @@ def test_the_resolver_describes_the_real_pilot_day_correctly():
                   for item in _resolver().for_day(connection, SEPTEMBER_17)}
         connection.rollback()
     assert len(states) == 3
+    # Attendance-optional QA (2026-09-24): missing attendance is a FLAG, not a
+    # wait. Real-history values below come from the read-only 2026-09-24
+    # audit; the same contract runs in the gate on the synthetic fixture in
+    # test_attendance_optional_acceptance.py.
     by_action = {subject: state["next_executable_action"]
                  for subject, state in states.items()}
-    waiting = [subject for subject, action in by_action.items()
-               if action == WAIT_FOR_ATTENDANCE_SOURCE]
-    assert len(waiting) == 2, by_action
-    assert any("Keith" in subject for subject in waiting)
-    assert any("Martech" in subject for subject in waiting)
+    assert WAIT_FOR_ATTENDANCE_SOURCE not in by_action.values(), by_action
+    keith = next(action for subject, action in by_action.items() if "Keith" in subject)
+    martech = next(action for subject, action in by_action.items() if "Martech" in subject)
+    assert keith == REFRESH_DETERMINISTIC_QA
+    assert martech == MANUAL_REVIEW_REQUIRED
     stephen = next(state for subject, state in states.items()
                    if "Stephen" in subject)
     assert stephen["next_executable_action"] == NOTHING_TO_DO
 
 
-def test_the_two_waiting_lectures_are_waiting_on_attendance_and_nothing_else():
+def test_the_two_attendance_pending_lectures_are_flagged_not_blocked():
     with _connection() as connection:
         states = [item for item in _resolver().for_day(connection, SEPTEMBER_17)
-                  if item["next_executable_action"] == WAIT_FOR_ATTENDANCE_SOURCE]
+                  if not item["attendance_source_authoritative"]]
         connection.rollback()
+    # Attendance-optional QA (2026-09-24): missing attendance is a FLAG, not a
+    # wait. Real-history values below come from the read-only 2026-09-24
+    # audit; the same contract runs in the gate on the synthetic fixture in
+    # test_attendance_optional_acceptance.py.
+    assert len(states) == 2
     for state in states:
         assert state["stages"]["ATTENDANCE"]["state"] == "WAITING"
-        assert state["attendance_source_authoritative"] is False
-        assert state["requires_review"] is False
+        assert state["stages"]["ATTENDANCE"]["blocks_qa"] is False
+        assert state["attendance_flag"] == ATTENDANCE_PENDING
         for stage in ("TRANSCRIPT", "SELECTION", "CANONICAL_CUES", "SPEAKERS",
-                      "ENGAGEMENT", "QA_EVALUATION", "QA_RENDER"):
+                      "ENGAGEMENT", "QA_RENDER"):
             assert state["stages"][stage]["state"] == "COMPLETE", stage
+        qa = state["stages"]["QA_EVALUATION"]
+        if "Keith" in state["subject"]:
+            assert (qa["state"], qa["reason"]) == (
+                "STALE", "EVALUATION_CARRIES_UNVERIFIED_ATTENDANCE")
+            assert state["requires_review"] is False
+        else:
+            assert (qa["state"], qa["reason"]) == (
+                "REVIEW_REQUIRED", "UNVERIFIED_ATTENDANCE_ANSWER_NOT_REFRESHABLE")
+            assert state["requires_review"] is True
 
 
 def test_no_lecture_on_the_settled_day_needs_qa_regenerated():
@@ -283,17 +307,18 @@ def test_the_run_counts_partition_the_lectures_seen():
 
 def test_a_real_run_on_the_waiting_day_costs_no_provider_call_and_no_graph_call():
     """
-    The load-bearing economic property. Two of three lectures are waiting on
-    attendance, and every cycle from now until that data lands must cost
-    nothing but reads.
+    The load-bearing economic property. Two of three lectures have no
+    attendance, and every cycle from now until that data lands must cost no
+    provider call and no Graph call. The one write the day still needs - G2
+    Keith's own coded row, its false zero refreshed to UNKNOWN - is free.
     """
     with _connection() as connection:
         try:
             outcome = _orchestrator().run_window(connection, SEPTEMBER_17)
             assert outcome["provider_calls"] == 0
             assert outcome["graph_calls"] == 0
-            assert outcome["legacy_rows_written"] == 0
-            assert outcome["counts"]["waiting_count"] == 2
+            assert outcome["legacy_rows_written"] <= 1
+            assert outcome["counts"]["waiting_count"] == 0
             raise _Rollback
         except _Rollback:
             connection.rollback()
@@ -337,20 +362,25 @@ def test_a_second_run_over_the_same_window_changes_nothing():
             connection.rollback()
 
 
-def test_the_waiting_lectures_are_still_waiting_after_a_run_and_wrote_nothing():
+def test_the_pending_lectures_after_a_run_bought_nothing_and_only_keith_refreshed():
     with _connection() as connection:
         try:
             before = _counts(connection)
             outcome = _orchestrator().run_window(connection, SEPTEMBER_17)
             after = _counts(connection)
-            waiting = [item for item in outcome["lectures"]
-                       if item["final_action"] == WAIT_FOR_ATTENDANCE_SOURCE]
-            assert len(waiting) == 2
+            final = {item["subject"]: item["final_action"] for item in outcome["lectures"]}
+            keith = next(action for subject, action in final.items() if "Keith" in subject)
+            martech = next(action for subject, action in final.items()
+                           if "Martech" in subject)
+            assert keith == WAIT_FOR_ATTENDANCE_SOURCE      # refreshed; flag remains
+            assert martech == MANUAL_REVIEW_REQUIRED
+            assert outcome["provider_calls"] == 0
             assert before["lecture_attendance_snapshots"] == \
                 after["lecture_attendance_snapshots"]
             assert before["lecture_engagement_metrics"] == \
                 after["lecture_engagement_metrics"]
-            assert before["lecture_qa_evaluations"] == after["lecture_qa_evaluations"]
+            # G2 Keith's deterministic refresh: one new evaluation, no model call.
+            assert after["lecture_qa_evaluations"] == before["lecture_qa_evaluations"] + 1
             raise _Rollback
         except _Rollback:
             connection.rollback()
@@ -453,21 +483,25 @@ def test_the_operations_layer_answers_every_question_the_future_ui_needs():
         connection.rollback()
     assert day["canonical_lecture_count"] == 3
     assert matrix["stages"]["ATTENDANCE"]["state"] == "WAITING"
-    assert action["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
+    assert action["next_action"] == REFRESH_DETERMINISTIC_QA
     assert len(pending) == 2
-    assert review == []
+    assert [row["subject"] for row in review if "Martech" in row["subject"]] == \
+        [row["subject"] for row in review]
+    assert len(review) == 1
     assert isinstance(runs, list) and isinstance(history, list)
 
 
-def test_a_waiting_lecture_is_not_offered_as_a_retry_and_never_as_a_force():
+def test_a_pending_lecture_is_offered_its_free_refresh_and_never_a_force():
     with _connection() as connection:
         operations = OperationsService(resolver=_resolver())
         matrix = operations.lecture_stage_matrix(connection, G2_KEITH)
         request = operations.request_retry(connection, G2_KEITH)
         connection.rollback()
-    assert matrix["retry_eligibility"]["retry_eligible"] is False
-    assert matrix["retry_eligibility"]["retry_reason"] == \
-        "WAITING_ON_EXTERNAL_SOURCE"
+    # G2 Keith no longer waits: its pre-fix false zero has a free,
+    # deterministic refresh, and a retry resumes exactly there.
+    assert matrix["retry_eligibility"]["retry_eligible"] is True
+    assert matrix["retry_eligibility"]["retry_reason"] is None
+    assert request["action"] == REFRESH_DETERMINISTIC_QA
     assert matrix["force_reprocess_eligibility"]["available_to_scheduler"] is False
     assert matrix["force_reprocess_eligibility"][
         "requires_explicit_operator_action"] is True

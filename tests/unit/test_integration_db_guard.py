@@ -61,21 +61,30 @@ def test_database_name_without_a_test_token_is_refused(dbname):
     assert "no 'test' marker" in _refused(_env(TEST_DATABASE_URL=url))
 
 
-@pytest.mark.parametrize("dbname", ["kbc_qa_integration_test", "test_kbc", "qa-test-db"])
-def test_database_name_with_a_test_token_is_accepted(dbname):
+def test_the_approved_test_database_name_is_accepted():
+    url = "postgresql://u:p@127.0.0.1:55432/kbc_qa_integration_test"
+    assert guard.check_static(_env(TEST_DATABASE_URL=url), [PROD]).dbname == \
+        guard.APPROVED_TEST_DATABASE
+
+
+@pytest.mark.parametrize("dbname", ["test_kbc", "qa-test-db", "kbc_other_test",
+                                    "kbc_qa_integration_test_2"])
+def test_a_test_token_is_not_enough_only_the_approved_name_is_accepted(dbname):
+    """TEST_DATABASE_URL is not trusted merely because it is present and 'looks'
+    like a test database: the name must be exactly the approved one."""
     url = f"postgresql://u:p@127.0.0.1:55432/{dbname}"
-    assert guard.check_static(_env(TEST_DATABASE_URL=url), [PROD]).dbname == dbname
+    assert "not the approved isolated test database" in _refused(_env(TEST_DATABASE_URL=url))
 
 
 # --- signal 4: loopback unless explicitly allowed -------------------------------
 
 def test_remote_host_is_refused_without_the_explicit_opt_in():
-    url = "postgresql://u:p@10.0.0.9:5432/kbc_test"
+    url = "postgresql://u:p@10.0.0.9:5432/kbc_qa_integration_test"
     assert "not loopback" in _refused(_env(TEST_DATABASE_URL=url))
 
 
 def test_remote_host_needs_the_opt_in_and_still_every_other_check():
-    url = "postgresql://u:p@ci-db.internal:5432/kbc_test"
+    url = "postgresql://u:p@ci-db.internal:5432/kbc_qa_integration_test"
     env = _env(TEST_DATABASE_URL=url, KBC_TEST_DB_ALLOW_REMOTE_HOST="1")
     assert guard.check_static(env, [PROD]).host == "ci-db.internal"
 
@@ -84,14 +93,14 @@ def test_remote_host_needs_the_opt_in_and_still_every_other_check():
 
 def test_test_url_identical_to_database_url_is_refused():
     # A production database renamed *_test is still production.
-    same = "postgresql://u:p@127.0.0.1:5432/kbc_test"
+    same = "postgresql://u:p@127.0.0.1:5432/kbc_qa_integration_test"
     assert "identical to a production URL" in _refused(
         _env(TEST_DATABASE_URL=same, DATABASE_URL=same), production=[same])
 
 
 def test_a_test_database_on_the_production_server_is_refused():
     prod = "postgresql://u:p@db.prod.example.com:5432/kbc_production"
-    other = "postgresql://u:p@db.prod.example.com:5432/kbc_test"
+    other = "postgresql://u:p@db.prod.example.com:5432/kbc_qa_integration_test"
     env = _env(TEST_DATABASE_URL=other, KBC_TEST_DB_ALLOW_REMOTE_HOST="1")
     assert "same server" in _refused(env, production=[prod])
 
@@ -100,7 +109,7 @@ def test_loopback_production_is_distinguished_by_port():
     # Production reached through a local tunnel on 5432 is refused; a test
     # container on another loopback port is not the same server.
     tunnel = "postgresql://u:p@localhost:5432/kbc_production"
-    same_port = "postgresql://u:p@127.0.0.1:5432/kbc_test"
+    same_port = "postgresql://u:p@127.0.0.1:5432/kbc_qa_integration_test"
     assert "same server" in _refused(_env(TEST_DATABASE_URL=same_port), production=[tunnel])
     assert guard.check_static(_env(), [tunnel]).port == "55432"
 
@@ -148,13 +157,138 @@ def test_live_check_refuses_a_marker_that_declares_another_purpose():
 
 def test_live_check_refuses_a_different_connected_database():
     target = guard.check_static(_env(), [PROD])
-    with pytest.raises(UnsafeTestDatabase, match="expected the test database"):
-        guard.check_live(_FakeConnection("kbc_production"), target)
+    with pytest.raises(UnsafeTestDatabase, match="not the approved isolated test database"):
+        guard.check_live(_FakeConnection("kbc_production"), target, production=[])
 
 
 def test_live_check_accepts_the_marked_test_database():
     target = guard.check_static(_env(), [PROD])
-    guard.check_live(_FakeConnection(target.dbname), target)
+    guard.check_live(_FakeConnection(target.dbname), target, production=[PROD])
+
+
+def test_live_check_refuses_a_production_database_name_even_if_marked():
+    target = guard.check_static(_env(), [PROD])
+    with pytest.raises(UnsafeTestDatabase, match="PRODUCTION database name"):
+        guard.check_live(_FakeConnection("kbc_production"), target, production=[PROD])
+
+
+def test_live_check_refuses_another_marked_test_token_database():
+    target = guard.check_static(_env(), [PROD])
+    with pytest.raises(UnsafeTestDatabase, match="not the approved isolated test database"):
+        guard.check_live(_FakeConnection("kbc_other_test"), target, production=[PROD])
+
+
+# --- the per-connection guard every writing test helper calls first -------------
+
+class _Info:
+    def __init__(self, url):
+        target = guard.parse_target(url)
+        self.dbname, self.host, self.port = target.dbname, target.host, target.port
+
+
+class _UntouchableConnection:
+    """A connection that must be refused before any statement is sent."""
+    autocommit = True
+    closed = False
+
+    def __init__(self, url):
+        self.info = _Info(url)
+        self.statements = []
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        raise AssertionError("a statement reached a connection the guard must refuse")
+
+
+class _MarkedConnection(_FakeConnection):
+    def __init__(self, url):
+        super().__init__(guard.parse_target(url).dbname)
+        self.info = _Info(url)
+        self.statements = 0
+
+    def execute(self, sql, params=None):
+        self.statements += 1
+        return super().execute(sql, params)
+
+
+def _backend_production_url():
+    from dotenv import dotenv_values
+
+    values = dotenv_values(guard.REPO_ROOT / "backend" / ".env")
+    return (values.get("DATABASE_URL") or "").strip()
+
+
+def test_a_production_connection_is_refused_before_any_statement():
+    connection = _UntouchableConnection(PROD)
+    with pytest.raises(UnsafeTestDatabase, match="PRODUCTION database name") as error:
+        guard.assert_isolated(connection, production=[PROD])
+    assert connection.statements == []
+    assert "prod-secret-pw" not in str(error.value)
+
+
+def test_the_real_backend_env_production_database_is_refused_before_any_statement():
+    """The regression that matters: a helper handed a connection opened from the
+    operator's real DATABASE_URL (backend/.env) refuses it - by name, before a
+    single statement, without the URL ever being printed."""
+    production = _backend_production_url()
+    if not production:
+        pytest.skip("no backend/.env production URL on this machine")
+    connection = _UntouchableConnection(production)
+    with pytest.raises(UnsafeTestDatabase) as error:
+        guard.assert_isolated(connection)          # production read from backend/.env
+    assert connection.statements == []
+    assert production not in str(error.value)
+    assert "PRODUCTION database name" in str(error.value)
+
+
+@pytest.mark.parametrize("url", [
+    "postgresql://u:p@127.0.0.1:55432/kbc_other_test",
+    "postgresql://u:p@127.0.0.1:55432/postgres",
+    "postgresql://u:p@db.prod.example.com:5432/kbc_qa_integration_test",
+])
+def test_any_non_approved_connection_is_refused_before_any_statement(url, monkeypatch):
+    monkeypatch.delenv(guard.ALLOW_REMOTE_ENV, raising=False)
+    connection = _UntouchableConnection(url)
+    with pytest.raises(UnsafeTestDatabase):
+        guard.assert_isolated(connection, production=[PROD])
+    assert connection.statements == []
+
+
+def test_the_approved_connection_is_verified_live_once_then_cached():
+    connection = _MarkedConnection(TEST)
+    guard.assert_isolated(connection, production=[PROD])
+    after_first = connection.statements
+    assert after_first >= 2                        # current_database() + marker
+    guard.assert_isolated(connection, production=[PROD])
+    assert connection.statements == after_first
+
+
+def test_seeding_helpers_refuse_a_production_connection_before_any_statement():
+    """How the 2026-09-24 debug scripts reached production: they imported these
+    helpers and handed them a DATABASE_URL connection. That now fails closed."""
+    from tests.integration import seeding
+
+    connection = _UntouchableConnection(PROD)
+    with pytest.raises(UnsafeTestDatabase):
+        seeding.insert(connection, "lecture_sessions", subject="x")
+    with pytest.raises(UnsafeTestDatabase):
+        seeding.seed_lecture(connection)
+    assert connection.statements == []
+
+
+def test_connect_test_database_never_falls_back_to_database_url(monkeypatch):
+    monkeypatch.delenv(guard.TEST_URL_ENV, raising=False)
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("DATABASE_URL", PROD)
+    with pytest.raises(UnsafeTestDatabase, match="never falls back"):
+        guard.connect_test_database()
+
+
+def test_connect_test_database_refuses_a_non_approved_test_url(monkeypatch):
+    monkeypatch.setenv(guard.TEST_URL_ENV, "postgresql://u:p@127.0.0.1:55432/kbc_other_test")
+    monkeypatch.setenv("APP_ENV", "test")
+    with pytest.raises(UnsafeTestDatabase, match="not the approved"):
+        guard.connect_test_database()
 
 
 # --- the process-wide connect guard ---------------------------------------------

@@ -73,7 +73,8 @@ COVERAGE_EVALUATION_ID = "66666666-6666-5666-8666-6666666666cc"
 
 def evaluation_row(*, evaluation_id=EVALUATION_ID, status="COMPLETED", review=None,
                    document_id=DOCUMENT_ID, engagement_id=ENGAGEMENT_ID,
-                   fingerprint=FINGERPRINT, updated_at=NOW, ai_called=True):
+                   fingerprint=FINGERPRINT, updated_at=NOW, ai_called=True,
+                   carries_attendance=True):
     """One row of the recovery EVALUATIONS query, in column order."""
     counts = (11, 0, 0) if status == "COMPLETED" else (
         (0, 0, 11) if status == "NON_DELIVERED" else (None, None, None))
@@ -81,7 +82,7 @@ def evaluation_row(*, evaluation_id=EVALUATION_ID, status="COMPLETED", review=No
             ai_called, *counts, "strict_json_schema_v1", "canonical_cue_bounds_v1",
             updated_at, engagement_id, SNAPSHOT_ID,
             "c" * 64 if ai_called else None, None, document_id,
-            DEFAULT_EVIDENCE_POLICY)
+            DEFAULT_EVIDENCE_POLICY, carries_attendance)
 
 
 def engagement_on(document_id, engagement_id=ENGAGEMENT_ID):

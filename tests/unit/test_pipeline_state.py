@@ -310,7 +310,7 @@ def complete_rows(**overrides) -> dict:
                          11, 0, 0, "strict_json_schema_v1",
                          "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
                          SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
-                         DEFAULT_EVIDENCE_POLICY)],
+                         DEFAULT_EVIDENCE_POLICY, True)],
         "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [""], [""], [""], None)],
         "rendered": [(RENDER_ID, "RENDERED", RENDERER_VERSION, FINGERPRINT,
                       11, 0, 0, EVALUATION_ID, LEGACY_SESSION_ID)],
@@ -327,6 +327,22 @@ def complete_rows(**overrides) -> dict:
                                   DEFAULT_PERFECT_ELIGIBILITY_VERSION,
                                   LEGACY_LECTURE_KEY, "result-1")],
     }
+    rows.update(overrides)
+    return rows
+
+
+def pending_attendance_rows(**overrides) -> dict:
+    """
+    A finished lecture whose attendance source never answered: an empty
+    SOURCE_MISSING snapshot, and an evaluation built under the
+    attendance-optional policy - so it states NO attendance-derived numbers.
+    """
+    rows = complete_rows(
+        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)],
+        evaluations=[(EVALUATION_ID, FINGERPRINT, "COMPLETED", None, 1, True,
+                      11, 0, 0, "strict_json_schema_v1", "canonical_cue_bounds_v1",
+                      NOW, ENGAGEMENT_ID, SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
+                      DEFAULT_EVIDENCE_POLICY, False)])
     rows.update(overrides)
     return rows
 
@@ -674,7 +690,7 @@ def test_an_evaluation_built_on_a_superseded_engagement_refreshes_deterministica
         EVALUATION_ID, FINGERPRINT, "COMPLETED", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
         "superseded-engagement", SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
-        DEFAULT_EVIDENCE_POLICY)])
+        DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == STALE
     assert result["next_action"] == REFRESH_DETERMINISTIC_QA
@@ -713,7 +729,7 @@ def test_review_required_with_budget_left_is_retryable_qa():
         EVALUATION_ID, FINGERPRINT, "REVIEW_REQUIRED", "INVALID_KSB_TYPE", 1,
         True, 0, 0, 0, "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
         ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-        DEFAULT_EVIDENCE_POLICY)])
+        DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == REVIEW_REQUIRED
     assert result["stages"][QA_EVALUATION]["attempts_remaining"] > 0
@@ -731,7 +747,7 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
                       "INVALID_KSB_TYPE", 3, True, 0, 0, 0,
                       "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-                      DEFAULT_EVIDENCE_POLICY)],
+                      DEFAULT_EVIDENCE_POLICY, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
                    ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3,
                    [""] * 3, [""] * 3, None)])
@@ -745,13 +761,18 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
 # --- 8..9. attendance --------------------------------------------------------
 
 def test_a_missing_attendance_source_waits_rather_than_failing():
-    rows = complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)])
-    result = resolve(rows)
+    """
+    Attendance-optional QA: once everything the transcript can support is
+    done, the only thing left is the external source - a wait and a flag,
+    never a failure or a review.
+    """
+    result = resolve(pending_attendance_rows())
     assert result["stages"][ATTENDANCE]["state"] == WAITING
+    assert result["stages"][ATTENDANCE]["blocks_qa"] is False
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
     assert result["is_waiting"] is True
     assert result["requires_review"] is False
+    assert result["attendance_flag"] == "PENDING_ATTENDANCE"
 
 
 def test_recorded_absences_also_wait_and_never_confirm_a_zero():
@@ -783,8 +804,7 @@ def test_no_snapshot_at_all_means_resolve_attendance_not_wait():
 
 
 def test_the_resolver_asks_the_attendance_source_nothing_by_default():
-    connection = StubConnection(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
+    connection = StubConnection(pending_attendance_rows())
     resolver = PipelineStateResolver(legacy_observations=StubObservations())
     result = resolver.for_lecture(connection, LECTURE_ID)
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
@@ -856,8 +876,7 @@ def test_a_missing_perfect_answer_asks_for_the_evaluation():
 
 
 def test_perfect_pending_attendance_waits_and_does_not_look_eligible():
-    rows = complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)],
+    rows = pending_attendance_rows(
         perfect_results=[(DEFAULT_PERFECT_ELIGIBILITY_VERSION, False,
                           PENDING_ATTENDANCE_DATA, "SOURCE_MISSING",
                           ELIGIBLE, NOW)],
@@ -865,7 +884,9 @@ def test_perfect_pending_attendance_waits_and_does_not_look_eligible():
         perfect_writes=[], perfect_writes_state=[])
     result = resolve(rows)
     assert result["stages"][PERFECT_ELIGIBILITY]["state"] == WAITING
-    # Attendance blocks first, which is the earlier and truer cause.
+    # The legacy QA sync is not held back by the pending Perfect answer.
+    assert result["stages"][LEGACY_QA_SYNC]["state"] == COMPLETE
+    # Both waits are attendance; the earlier one is reported.
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
 
 
@@ -946,21 +967,29 @@ def _states(*results):
 
 
 def test_day_counts_are_a_partition_of_the_lectures():
+    """
+    Attendance-optional QA: a lecture whose QA is published and whose
+    attendance is still pending is COMPLETE (the pending source is a flag,
+    counted separately); one whose QA is still owed is IN PROGRESS.
+    """
     complete = resolve()
-    waiting = resolve(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
+    published_pending = resolve(pending_attendance_rows())
+    qa_owed = resolve(pending_attendance_rows(evaluations=[], attempts=[], rendered=[],
+                                              qa_writes=[], legacy_writes_state=[]))
     review = resolve(complete_rows(lecture_state=[(
         LECTURE_ID, "Example", "example", "Module", SESSION_DATE, NOW, False,
         "REVIEW", "RESOLVED", "MATCHED", "meeting-1", True, None)]))
     report = DayReconciliation(resolver=None).from_states(
-        SESSION_DATE, _states(complete, waiting, review))
+        SESSION_DATE, _states(complete, published_pending, qa_owed, review))
     total = (report["complete_count"] + report["waiting_count"]
              + report["review_count"] + report["failed_count"]
              + report["in_progress_count"])
-    assert total == report["canonical_lecture_count"] == 3
-    assert report["complete_count"] == 1
-    assert report["waiting_count"] == 1
+    assert total == report["canonical_lecture_count"] == 4
+    assert report["complete_count"] == 2
+    assert report["in_progress_count"] == 1
+    assert report["waiting_count"] == 0
     assert report["review_count"] == 1
+    assert report["attendance_waiting_count"] == 2
 
 
 def test_pending_attendance_is_reported_distinctly_from_review():
@@ -1042,17 +1071,19 @@ def test_a_legacy_sync_is_now_the_scheduler_own_next_action():
     assert result["operator_actions"] == []
 
 
-def test_waiting_and_review_still_stop_the_executable_search():
+def test_waiting_is_stepped_over_but_review_still_stops_the_executable_search():
     """
-    The limit of the rule. A WAITING attendance source and an unreviewed
-    discovery both make everything below them provisional, so the executable
-    search stops there - unlike a pending legacy write, which invalidates
-    nothing.
+    The limit of the rule. An unreviewed discovery makes everything below it
+    provisional, so the executable search stops there. A WAITING attendance
+    source does not: attendance is enrichment, and QA still runs from the
+    transcript (attendance-optional QA).
     """
-    waiting = resolve(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
-    assert waiting["next_executable_action"] == WAIT_FOR_ATTENDANCE_SOURCE
-    assert waiting["executable_stage"] == ATTENDANCE
+    waiting = resolve(pending_attendance_rows(evaluations=[], attempts=[],
+                                              rendered=[], qa_writes=[],
+                                              legacy_writes_state=[]))
+    assert waiting["stages"][ATTENDANCE]["state"] == WAITING
+    assert waiting["next_executable_action"] == RUN_QA
+    assert waiting["executable_stage"] == QA_EVALUATION
 
     review = resolve(complete_rows(lecture_state=[(
         LECTURE_ID, "Example", "example", "Module", SESSION_DATE, NOW, False,
@@ -1105,7 +1136,7 @@ def test_an_answer_rejected_by_an_older_evidence_rule_is_re_judged_not_re_bought
     rows = complete_rows(evaluations=[(
         EVALUATION_ID, FINGERPRINT, "INVALID_EVIDENCE", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
-        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, EVIDENCE_POLICY_V1)])
+        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, EVIDENCE_POLICY_V1, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == STALE
     assert result["stages"][QA_EVALUATION]["reason"] == "EVIDENCE_POLICY_SUPERSEDED"
@@ -1117,7 +1148,7 @@ def test_an_answer_already_judged_by_the_current_rule_is_not_re_judged():
     rows = complete_rows(evaluations=[(
         EVALUATION_ID, FINGERPRINT, "INVALID_EVIDENCE", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
-        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, DEFAULT_EVIDENCE_POLICY)])
+        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["next_action"] == RUN_QA
 
@@ -1133,7 +1164,7 @@ def test_an_exhausted_budget_still_wins_over_a_superseded_policy():
                       "MAX_GENERATIONS_EXHAUSTED", 3, True, 0, 0, 0,
                       "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-                      EVIDENCE_POLICY_V1)],
+                      EVIDENCE_POLICY_V1, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
                    ["FAILED", "FAILED", "FAILED"], ["X"] * 3, [""] * 3, [""] * 3, None)])
     result = resolve(rows)

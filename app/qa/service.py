@@ -72,6 +72,7 @@ from app.qa.prompt import (
     prompt_sha256,
 )
 from app.qa.generation_budget import generation_budget
+from app.qa.inputs import ATTENDANCE_DERIVED_FIELDS, attendance_flag
 from app.qa.provider import (
     PROVIDER_CONFIGURATION_BLOCKED,
     PROVIDER_CONFIGURATION_ERROR,
@@ -330,6 +331,7 @@ class ShadowQaService:
             # needs as its independent evidence.
             self._apply_punctuality_source(row)
             self._classify_delivery(row)
+            self._apply_attendance_coverage(row)
             seen[row["lecture_id"]] = row
         packages = list(seen.values())
         if self.lecture_ids is not None:
@@ -415,9 +417,19 @@ class ShadowQaService:
             "ai_called": False, "provider_calls": 0,
         }
 
-        coverage = package_attendance_coverage(package)
+        coverage = package["attendance_coverage_status"]
         result["attendance_coverage_status"] = coverage
-        result["attendance_source_authoritative"] = is_authoritative(coverage)
+        result["attendance_source_authoritative"] = package[
+            "attendance_source_authoritative"]
+        result.update(attendance_flag(package["attendance_source_authoritative"]))
+        if not package["attendance_source_authoritative"]:
+            # A flag, not a gate. The transcript is the QA evidence; the
+            # attendance-derived values were already left UNKNOWN when the
+            # package was loaded, so nothing below can publish a zero the
+            # source never reported. (F-03 used to stop here; the business
+            # rule is now that missing attendance must not block QA.)
+            counters["attendance_pending_count"] = (
+                counters.get("attendance_pending_count", 0) + 1)
 
         if not execute:
             result["qa_status"] = PENDING
@@ -425,29 +437,6 @@ class ShadowQaService:
             return result
 
         existing = self.evaluation_repository.find_by_fingerprint(connection, fingerprint)
-
-        # F-03. The attendance gate used to live ONLY in the orchestrator's
-        # resolver, so an operator running this service directly could finalize
-        # a lecture whose attendance source had never answered - which is how
-        # two 11/11 evaluations came to rest on empty snapshots. The service now
-        # asks the same question itself, with the same predicate, of the exact
-        # snapshot it is about to consume. It checks BEFORE reuse as well: an
-        # evaluation finalized on non-authoritative attendance must not be
-        # re-reported as a current answer either.
-        if not is_authoritative(coverage):
-            counters["attendance_waiting_count"] = (
-                counters.get("attendance_waiting_count", 0) + 1)
-            result.update({
-                "qa_status": WAITING_FOR_ATTENDANCE_SOURCE,
-                "review_reason": ATTENDANCE_NOT_AUTHORITATIVE,
-                "persisted": False, "ai_called": False, "provider_calls": 0,
-                # Reported, never reused: the caller should see that a stale
-                # answer exists without that answer being passed off as current.
-                "existing_evaluation_id": (str(existing["evaluation_id"])
-                                           if existing else None),
-                "existing_qa_status": existing["qa_status"] if existing else None,
-            })
-            return result
 
         if existing and existing["qa_status"] in (COMPLETED, "NON_DELIVERED") and not force:
             # Same inputs, same prompt, same model, same engine: nothing to buy.
@@ -705,7 +694,7 @@ class ShadowQaService:
             result.update({**summary, "created": False, "mode": "DRY_RUN"})
             return result
 
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, clips)
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, clips)
         result.update({**summary, "evaluation_id": str(written["evaluation_id"]),
                        "created": bool(written["created"])})
         return result
@@ -863,7 +852,7 @@ class ShadowQaService:
             "ai_raw_output": output,
             "metadata": metadata,
         }
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist,
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist,
                                                     clips)
         result.update({"evaluation_id": str(written["evaluation_id"]),
                        "created": bool(written["created"]),
@@ -891,8 +880,31 @@ class ShadowQaService:
                 f"unexpected roster version {row['attendance_roster_version']}")
         self._apply_punctuality_source(row)
         self._classify_delivery(row)
+        self._apply_attendance_coverage(row)
         row["provider_contract_version"] = self.provider_contract_version
         return row
+
+    def _apply_attendance_coverage(self, row) -> None:
+        """
+        Ask the coverage question of the exact snapshot this input is built
+        on, with the same predicate the resolver and Perfect use.
+
+        Non-authoritative attendance does not stop QA. It does mean nothing in
+        this package may claim to know who attended: the Phase 2C4 row for an
+        empty snapshot says 0 attended and score 1, which is legacy's encoding
+        of "nobody came", so those values are replaced by UNKNOWN and the Item
+        7 override is withheld. The engagement row itself is untouched - it is
+        still the lineage the late-attendance refresh is detected against.
+        """
+        coverage = package_attendance_coverage(row)
+        authoritative = is_authoritative(coverage)
+        row["attendance_coverage_status"] = coverage
+        row["attendance_source_authoritative"] = authoritative
+        row.update(attendance_flag(authoritative))
+        if not authoritative:
+            for field in ATTENDANCE_DERIVED_FIELDS:
+                row[field] = None
+            row["item7_override_applied"] = False
 
     def _record_attempt(self, connection, package, fingerprint, outcome, records,
                         forced, *, used=None) -> None:
@@ -971,7 +983,7 @@ class ShadowQaService:
                          "duration_minutes": package["duration_minutes"],
                          **_delivery_metadata(package)},
         }
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, [])
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, [])
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         result.update({
@@ -1020,7 +1032,7 @@ class ShadowQaService:
                          "punctuality": package.get("punctuality"),
                          **_delivery_metadata(package)},
         }
-        written = self.evaluation_repository.upsert(connection, evaluation, [], [])
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), [], [])
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         counters["review_required_count"] += 1
@@ -1108,7 +1120,7 @@ class ShadowQaService:
                              "http_status": error.http_status,
                              "provider_failure": failure},
             })
-            written = self.evaluation_repository.upsert(connection, evaluation, [], [])
+            written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), [], [])
             counters["evaluations_created"] += written["created"]
             counters["evaluations_updated"] += written["updated"]
             result.update({"qa_status": MODEL_ERROR, "ai_called": True,
@@ -1197,7 +1209,7 @@ class ShadowQaService:
                          "usage": response.get("usage"),
                          "forced_re_evaluation": bool(force)},
         })
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, clips)
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, clips)
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         result.update({
@@ -1258,7 +1270,7 @@ class ShadowQaService:
         # than being invented.
         deterministic_rows = self._deterministic_only_checklist(package)
         written = self.evaluation_repository.upsert(
-            connection, evaluation, deterministic_rows, [])
+            connection, _stamp_attendance(evaluation, package), deterministic_rows, [])
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         counters["review_required_count"] += 1
@@ -1583,6 +1595,19 @@ def _end_status(difference) -> str:
     if difference is None:
         return ""
     return "OnTime" if difference == 0 else ("EarlyFinish" if difference < 0 else "Overrun")
+
+
+def _stamp_attendance(evaluation, package) -> dict:
+    """Record, on the evaluation itself, what attendance it was built on."""
+    authoritative = package.get("attendance_source_authoritative")
+    if authoritative is None:
+        return evaluation
+    evaluation["metadata"] = {
+        **(evaluation.get("metadata") or {}),
+        "attendance_coverage_status": package.get("attendance_coverage_status"),
+        "attendance_source_authoritative": authoritative,
+        **attendance_flag(authoritative)}
+    return evaluation
 
 
 def package_attendance_coverage(package) -> str:

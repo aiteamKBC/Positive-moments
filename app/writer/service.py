@@ -48,6 +48,7 @@ from app.writer.modes import (
     DRY_RUN,
     INSERTING_DECISIONS,
     PROTECTED_EXISTING_LEGACY_ROW,
+    REVIEW_REQUIRED,
     WOULD_INSERT,
     WOULD_SKIP_IDENTICAL,
     WOULD_UPDATE,
@@ -77,13 +78,26 @@ class WriteVerificationError(RuntimeError):
     """The rows read back after a write do not match what was written."""
 
 
+# Attendance-optional QA. A lecture published before its attendance source
+# answered is refreshed deterministically when attendance arrives: the model
+# answer is reused, and only what attendance supplies moves - the engagement
+# numbers, Item 7, and therefore the counts. That update, and nothing wider,
+# is one the scheduler may make on a row it already owns.
+DETERMINISTIC_REFRESH_UPDATE_POLICY = "deterministic_refresh_update_v1"
+DETERMINISTIC_REFRESH_ONLY = "DETERMINISTIC_REFRESH_ONLY"
+DETERMINISTIC_SESSION_COLUMNS = frozenset({
+    "Engagement", "engagement_score", "met_count", "partial_count", "not_met_count"})
+DETERMINISTIC_CHECKLIST_ORDERS = frozenset({7})
+OWNED_LIVE_STATUSES = frozenset({"WRITTEN", "UPDATED"})
+
+
 class LegacyQaWriter:
     def __init__(self, *, payload_repository, legacy_repository, ownership_repository,
                  mode: str = DRY_RUN, writer_version: str = WRITER_VERSION,
                  renderer_version: str = "legacy_qa_v8_renderer_v1",
                  allow_update_existing: bool = False, lecture_ids=None,
                  confirmed: bool = False, perfect_planner=None,
-                 occurrence_guard=None):
+                 occurrence_guard=None, update_policy=None):
         # An unknown mode is refused before anything is read.
         self.mode = validate_mode(mode)
         # Phase 3C2 defence in depth: the same guard the CLI applies, enforced
@@ -117,6 +131,14 @@ class LegacyQaWriter:
         # F-02. Always on: there is no configuration of this writer that finds
         # its target by exact session_id alone. Injectable for tests only.
         self.occurrence_guard = occurrence_guard or LegacyOccurrenceGuard()
+        # None: an operator's writer, as before. DETERMINISTIC_REFRESH_ONLY:
+        # the automated sync's writer, which refuses every update that is not
+        # proven to be a deterministic refresh of its own published answer -
+        # so the scheduler's gate is re-checked here, by the writer, at write
+        # time, and the writer keeps the last word.
+        if update_policy not in (None, DETERMINISTIC_REFRESH_ONLY):
+            raise WriterModeError(f"unknown update policy: {update_policy}")
+        self.update_policy = update_policy
         self.log = logging.getLogger(__name__)
 
     @property
@@ -256,11 +278,24 @@ class LegacyQaWriter:
 
         if existing_session is not None:
             field_diff = diff_session(proposed_session, existing_session)
+            raw_checklist_diff = diff_checklist(proposed_items, existing_items)
             result["field_diff"] = {
                 column: _classify(column) for column in sorted(field_diff)}
             result["identical_field_count"] = len(SESSION_COLUMNS) - len(field_diff)
-            result["checklist_diff"] = _summarise_checklist_diff(
-                diff_checklist(proposed_items, existing_items))
+            result["checklist_diff"] = _summarise_checklist_diff(raw_checklist_diff)
+            if decision == WOULD_UPDATE:
+                update = self._deterministic_refresh_update(
+                    connection, rendered, ownership, session_id, field_diff,
+                    raw_checklist_diff)
+                result["deterministic_refresh_update"] = update
+                if (self.update_policy == DETERMINISTIC_REFRESH_ONLY
+                        and not update["eligible"]):
+                    # The automated writer does not rewrite a published row
+                    # for any other reason. A human decides those.
+                    counters[decision.lower()] -= 1
+                    decision = REVIEW_REQUIRED
+                    counters[decision.lower()] = counters.get(decision.lower(), 0) + 1
+                    result["decision"] = decision
         else:
             result["field_diff"] = {}
             result["identical_field_count"] = 0
@@ -280,6 +315,52 @@ class LegacyQaWriter:
             result["perfect_lecture"] = self.perfect_planner.plan_one(
                 connection, rendered, items, counters)
         return result
+
+    def _deterministic_refresh_update(self, connection, rendered, ownership, session_id,
+                                      field_diff, checklist_diff) -> dict:
+        """
+        Is this update ONLY the late-attendance refresh of our own row?
+
+        Every condition must hold, and each failure is named:
+
+          * the row is coded-owned, live, for THIS lecture and THIS session id;
+          * the new evaluation is a deterministic refresh (a different
+            evaluation, stamped as such) reusing the published evaluation's
+            stored model answer - same lecture, same provider question,
+            identical output;
+          * the session columns that change are the engagement numbers and
+            the counts, and nothing else;
+          * the only checklist row that changes is Item 7.
+
+        Foreign-owned columns are not part of the comparison because this
+        writer can never touch them: its upsert lists only its own columns.
+        """
+        reasons = []
+        if ownership is None or ownership.get("write_status") not in OWNED_LIVE_STATUSES:
+            reasons.append("ROW_NOT_LIVE_CODED_OWNED")
+        elif str(ownership.get("lecture_id")) != str(rendered["lecture_id"]):
+            reasons.append("ROW_OWNED_FOR_ANOTHER_LECTURE")
+        elif str(ownership.get("legacy_session_id") or session_id) != str(session_id):
+            reasons.append("ROW_OWNED_UNDER_ANOTHER_SESSION_ID")
+        changed_columns = sorted(field_diff)
+        if set(changed_columns) - DETERMINISTIC_SESSION_COLUMNS:
+            reasons.append("NON_DETERMINISTIC_SESSION_COLUMNS_CHANGED")
+        changed_orders = sorted(set(checklist_diff["status_difference_orders"])
+                                | set(checklist_diff["evidence_difference_orders"])
+                                | set(checklist_diff["missing_orders"]))
+        if set(changed_orders) - DETERMINISTIC_CHECKLIST_ORDERS:
+            reasons.append("NON_DETERMINISTIC_CHECKLIST_ROWS_CHANGED")
+        same_answer = False
+        checker = getattr(self.payload_repository, "is_deterministic_refresh_of", None)
+        if ownership is not None and ownership.get("evaluation_id") and checker:
+            same_answer = checker(connection, ownership["evaluation_id"],
+                                  rendered["evaluation_id"])
+        if not same_answer:
+            reasons.append("MODEL_ANSWER_NOT_PROVEN_UNCHANGED")
+        return {"policy_version": DETERMINISTIC_REFRESH_UPDATE_POLICY,
+                "eligible": not reasons, "refusal_reasons": reasons,
+                "changed_session_columns": changed_columns,
+                "changed_checklist_orders": changed_orders}
 
     def _write_one(self, connection, rendered, proposed_session, proposed_items,
                    decision, pre_digest, ownership, counters) -> dict:

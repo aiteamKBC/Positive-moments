@@ -374,7 +374,9 @@ def test_F_the_cli_refuses_v1_with_a_write_mode_before_opening_a_connection(isol
 
 
 # ---------------------------------------------------------------------------
-# G/H. shadow QA against real inputs: SOURCE_MISSING waits, authoritative works
+# G/H. shadow QA against real inputs. Attendance-optional QA (2026-09-24):
+# non-authoritative attendance no longer blocks QA, but no attendance-derived
+# value it cannot support ever reaches the evaluation. Authoritative works.
 # ---------------------------------------------------------------------------
 
 class StubProvider:
@@ -416,19 +418,23 @@ def _evaluations(db, lecture):
     (dict(source_rows=0, present_rows=0, members=0, any_status=3), "SOURCE_PARTIAL_OR_INVALID"),
     (dict(source_rows=4, present_rows=4, members=0), "SOURCE_PARTIAL_OR_INVALID"),
 ])
-def test_G_non_authoritative_attendance_buys_nothing_and_persists_nothing(db, counts, status):
+def test_G_non_authoritative_attendance_runs_qa_and_publishes_no_attendance_value(
+        db, counts, status):
     lecture = seed_qa_inputs(db, **counts)
     provider = StubProvider()
     summary = qa_service(provider, lecture).run_day(db, DAY, execute=True)
     [result] = summary["lectures"]
     assert result["attendance_coverage_status"] == status      # the SQL carried the counts
     assert not is_authoritative(status)
-    assert result["qa_status"] == WAITING_FOR_ATTENDANCE_SOURCE
-    assert result["persisted"] is False
-    assert provider.calls == 0                                  # no model call
-    assert _evaluations(db, lecture) == []                      # no evaluation row at all
-    assert db.execute("SELECT count(*) FROM public.lecture_qa_generation_attempts "
-                      " WHERE lecture_id = %s", (lecture["lecture_id"],)).fetchone()[0] == 0
+    assert result["qa_status"] == "COMPLETED"
+    assert result["attendance_flag"] == "PENDING_ATTENDANCE"
+    assert provider.calls == 1                                  # the transcript is the evidence
+    assert _evaluations(db, lecture) == [("COMPLETED",)]
+    row = db.execute("SELECT attended_count, spoke_count, engagement_percentage,"
+                     "       engagement_score, item7_override_applied"
+                     "  FROM public.lecture_qa_evaluations WHERE lecture_id = %s",
+                     (lecture["lecture_id"],)).fetchone()
+    assert row == (None, None, None, None, False)               # UNKNOWN != ZERO
 
 
 def test_H_authoritative_attendance_still_evaluates_and_persists_normally(db):

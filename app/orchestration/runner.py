@@ -125,7 +125,7 @@ from app.qa.provider import (
     OpenAIChatProvider,
     ProviderError,
 )
-from app.qa.service import ShadowQaService
+from app.qa.service import NO_REUSABLE_MODEL_OUTPUT, ShadowQaService
 from app.rendering.evidence import RENDERER_VERSION
 from app.rendering.service import QaRenderingService
 from app.transcripts.document_service import CanonicalTranscriptService
@@ -137,7 +137,7 @@ from app.orchestration.sync_safety import classify_plan
 from app.writer.modes import DRY_RUN, PRODUCTION_NEW_ONLY
 from app.writer.mapping import WRITER_VERSION
 from app.writer.perfect_service import PerfectLecturePlanner, plan_perfect_for_day
-from app.writer.service import LegacyQaWriter
+from app.writer.service import DETERMINISTIC_REFRESH_ONLY, LegacyQaWriter
 
 
 DAY_SCOPE = "DAY"
@@ -333,6 +333,11 @@ class StageRunner:
         # generation is not a deterministic refresh.
         outcome = self._qa_service(provider=None).refresh_deterministic(
             connection, lecture_id, persist=self.persist)
+        if outcome.get("refresh_status") == NO_REUSABLE_MODEL_OUTPUT:
+            # Fail closed, and say so. The only other way forward is a paid
+            # generation, which a refresh must never buy; reporting this as a
+            # quiet no-op would leave the lecture asking again every cycle.
+            raise ManualReviewRequired(NO_REUSABLE_MODEL_OUTPUT)
         return _outcome(outcome)
 
     def _revalidate_evidence(self, connection, lecture_id, session_date) -> dict:
@@ -435,7 +440,8 @@ class StageRunner:
 
         written = self._writer(
             lecture_id, mode=PRODUCTION_NEW_ONLY, confirmed=True,
-            include_perfect=verdict["include_perfect_planner"]).plan_day(
+            include_perfect=verdict["include_perfect_planner"],
+            update_policy=DETERMINISTIC_REFRESH_ONLY).plan_day(
                 connection, session_date)
         result = self._only_lecture(written, lecture_id)
         if result.get("write_status") == "WRITE_VERIFICATION_FAILED":
@@ -470,7 +476,7 @@ class StageRunner:
         return rows[0]
 
     def _writer(self, lecture_id, *, mode, confirmed: bool = False,
-                include_perfect: bool = True):
+                include_perfect: bool = True, update_policy=None):
         """
         The existing guarded writer, scoped to ONE lecture.
 
@@ -496,7 +502,8 @@ class StageRunner:
             mode=mode, writer_version=WRITER_VERSION,
             renderer_version=RENDERER_VERSION,
             allow_update_existing=False, lecture_ids=[str(lecture_id)],
-            confirmed=confirmed, perfect_planner=planner)
+            confirmed=confirmed, perfect_planner=planner,
+            update_policy=update_policy)
 
     # -- service construction -----------------------------------------------
 
