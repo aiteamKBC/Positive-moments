@@ -66,6 +66,12 @@ SELECT l.lecture_id, l.subject, l.module, l.meeting_id,
   ) tr ON true
  WHERE l.session_date = %s
    AND d.parser_version = %s
+   -- Document lineage. A reselection rewrites the lecture's selection and
+   -- combined row IN PLACE (their ids are derived from the lecture), so a
+   -- document parsed from the SUPERSEDED combined bytes still joins on
+   -- combined_id. Only the document parsed from the bytes the combined row
+   -- holds NOW is a current QA input; the old one stays on record as history.
+   AND d.source_content_sha256 = cb.content_sha256
    AND sn.attendance_resolution_version = %s
    AND e.resolver_version = %s
    AND e.role_algorithm_version = %s

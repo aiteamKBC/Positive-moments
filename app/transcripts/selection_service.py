@@ -5,7 +5,6 @@ Entirely DB-backed. For a date whose evidence Phase 2A already stored, this
 service makes NO Microsoft Graph calls at all - the whole pipeline is replayable
 offline from PostgreSQL, which is the point of the Phase 2A raw registry.
 """
-import hashlib
 import logging
 import time
 import uuid
@@ -17,6 +16,7 @@ from app.transcripts.combine import combine_transcript_parts
 from app.transcripts.selection import (
     SELECTED,
     SELECTION_VERSION,
+    combined_source_fingerprint,
     select_transcript_parts,
 )
 
@@ -186,10 +186,8 @@ class TranscriptSelectionService:
                 result = combine_transcript_parts(usable)
                 offsets = result.part_offsets_ms
                 digest = content_sha256(result.text.encode("utf-8"))
-                fingerprint = hashlib.sha256(
-                    "\0".join([self.selection_version]
-                              + [sha or "" for _p, _r, sha, _a in sources]).encode("utf-8")
-                ).hexdigest()
+                fingerprint = combined_source_fingerprint(
+                    self.selection_version, [sha for _p, _r, sha, _a in sources])
                 combined = {
                     "text": result.text, "content_sha256": digest,
                     "content_bytes": len(result.text.encode("utf-8")),

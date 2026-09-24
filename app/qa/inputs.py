@@ -77,6 +77,15 @@ def qa_source_fingerprint(*, package: dict, model: str,
         f"snapshot:{package['attendance_snapshot_id']}",
         f"engagement:{package['engagement_id']}:{package['engagement_source_fingerprint']}",
     ]
+    delivery = package.get("delivery")
+    if delivery is not None and delivery.departs_from_legacy:
+        # Appended ONLY when the versioned delivery policy decides differently
+        # from the legacy duration gate. Every evaluation the legacy gate would
+        # produce keeps its exact fingerprint, so nothing already paid for is
+        # orphaned into buying itself again - while a reclassified lecture gets
+        # NEW provenance beside its old answer instead of overwriting it.
+        lines.append(f"delivery:{delivery.diagnostics['delivery_policy_version']}"
+                     f":{delivery.classification}")
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
@@ -140,6 +149,8 @@ def preview(package: dict) -> dict:
         "meeting_id": package["meeting_id"],
         "duration_minutes": package["duration_minutes"],
         "delivery_status": package["delivery_status"],
+        "delivery_classification_reason": (package["delivery"].reason
+                                           if package.get("delivery") else None),
         "transcript_bytes": package["combined_content_bytes"],
         "transcript_cue_count": package["cue_count"],
         "start_difference_minutes": package["start_difference_minutes"],

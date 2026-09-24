@@ -387,6 +387,136 @@ class LegacyQaWriter:
                 "legacy_session_id": legacy_session_id}
 
 
+    # -- withdrawing a verdict the canonical platform no longer holds --------
+
+    def withdraw_contradicted_session(self, connection, lecture_id) -> dict:
+        """
+        Withdraw ONE coded-owned legacy QA row that states a verdict the
+        canonical platform has replaced with "review required".
+
+        WHY WITHDRAW RATHER THAN REWRITE
+        qa_doctors_sessions has no truthful encoding of "the lecture ran, but
+        the transcript cannot support QA": its contract is a verdict - eleven
+        checklist rows each Met, Partially Met or Not Met (NOT NULL), counts,
+        scores and a cancelled flag. Writing any of those would be a QA result
+        that was never produced. Removing the coded platform's own false row is
+        the only representation that states nothing untrue; the canonical
+        REVIEW_REQUIRED evaluation remains the record of what is known.
+
+        REFUSES unless ALL of these hold, and says which one failed:
+          * the current evaluation is REVIEW_REQUIRED /
+            TRANSCRIPT_COVERAGE_INCOMPLETE - the one contradiction this path
+            is authorised for;
+          * exactly one live coded-owned row exists, and it was written from a
+            DIFFERENT (superseded) evaluation - ownership is proven by this
+            writer's own ledger, so a legacy/n8n row is unreachable;
+          * every column of that row the coded writer does not own is still
+            empty - no Positive Clips, recording or media data of another
+            system would go with it;
+          * no coded Perfect Lecture row was published from it.
+
+        The ownership record is kept, marked ROLLED_BACK with the reason and
+        the pre-withdrawal digest, so the withdrawal is fully auditable. The
+        superseded evaluation and its render are never touched.
+        """
+        from app.qa.delivery import TRANSCRIPT_COVERAGE_INCOMPLETE
+
+        lecture_id = str(lecture_id)
+        if self.lecture_ids != {lecture_id}:
+            raise WriterModeError("withdrawal is scoped to exactly one named lecture")
+        plan = {"lecture_id": lecture_id, "mode": self.mode, "withdrawn": False,
+                "legacy_rows_deleted": 0, "provider_calls": 0, "graph_calls": 0}
+
+        current = self.legacy_repository.current_evaluation(connection, lecture_id)
+        plan["current_evaluation"] = current
+        if not current or current.get("ambiguous") \
+                or current["qa_status"] != "REVIEW_REQUIRED" \
+                or current["review_reason"] != TRANSCRIPT_COVERAGE_INCOMPLETE:
+            return {**plan, "decision": WITHDRAW_REFUSED_NOT_CONTRADICTED}
+
+        live = self.ownership_repository.live_writes_for_lecture(
+            connection, lecture_id, self.writer_version)
+        if not live:
+            return {**plan, "decision": NOTHING_TO_WITHDRAW}
+        if len(live) != 1:
+            return {**plan, "decision": WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP,
+                    "live_coded_rows": len(live)}
+        owned = live[0]
+        session_id = owned["legacy_session_id"]
+        plan["legacy_session_id"] = session_id
+        plan["withdrawn_evaluation_id"] = owned["evaluation_id"]
+        if owned["evaluation_id"] == current["evaluation_id"]:
+            return {**plan, "decision": WITHDRAW_REFUSED_NOT_CONTRADICTED}
+
+        existing = self.legacy_repository.load_session(connection, session_id)
+        if existing is None:
+            return {**plan, "decision": NOTHING_TO_WITHDRAW}
+        foreign = self.legacy_repository.load_foreign_columns(connection, session_id) or {}
+        occupied = sorted(name for name, value in foreign.items()
+                          if not _foreign_column_is_empty(name, value))
+        plan["foreign_columns_checked"] = len(foreign)
+        plan["foreign_columns_occupied"] = occupied
+        if occupied:
+            return {**plan, "decision": WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT}
+        if self.legacy_repository.coded_perfect_writes(connection, lecture_id):
+            return {**plan, "decision": WITHDRAW_REFUSED_PERFECT_PUBLISHED}
+
+        items = self.legacy_repository.load_checklist(connection, session_id)
+        pre_digest = digest(existing, items)
+        plan.update({"decision": WOULD_WITHDRAW, "checklist_rows": len(items),
+                     "pre_withdraw_digest_prefix": pre_digest[:16]})
+        if not self.writes_enabled:
+            return plan
+
+        with connection.transaction():
+            self.legacy_repository.delete_owned_session(connection, session_id,
+                                                        allow_write=True)
+            self.ownership_repository.mark_status(
+                connection, owned["write_id"], "ROLLED_BACK", {
+                    "rolled_back_session": session_id,
+                    "reason": "WITHDRAWN_CONTRADICTED_BY_CURRENT_EVALUATION",
+                    "review_reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+                    "current_evaluation_id": current["evaluation_id"],
+                    "withdrawn_evaluation_id": owned["evaluation_id"],
+                    "pre_withdraw_digest": pre_digest,
+                    "checklist_rows_removed": len(items),
+                })
+            if self.legacy_repository.load_session(connection, session_id) is not None:
+                raise WriteVerificationError("legacy row still present after withdrawal")
+        return {**plan, "withdrawn": True, "legacy_rows_deleted": 1,
+                "decision": WITHDRAWN}
+
+
+WOULD_WITHDRAW = "WOULD_WITHDRAW"
+WITHDRAWN = "WITHDRAWN"
+NOTHING_TO_WITHDRAW = "NOTHING_TO_WITHDRAW"
+WITHDRAW_REFUSED_NOT_CONTRADICTED = "WITHDRAW_REFUSED_NOT_CONTRADICTED"
+WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP = "WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP"
+WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT = "WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT"
+WITHDRAW_REFUSED_PERFECT_PUBLISHED = "WITHDRAW_REFUSED_PERFECT_PUBLISHED"
+
+# What an untouched column of another system looks like: its table default,
+# or nothing at all. Anything else is data somebody else owns.
+FOREIGN_COLUMN_EMPTY_VALUES = {
+    "positive_clips": ([], None),
+    "positive_clips_count": (0, None),
+    "clips_status": ("pending", None),
+    "clips_review_count": (0, None),
+    "has_positive_clips": (False, None),
+}
+
+
+# Row bookkeeping, not data: a timestamp records when the row changed, and no
+# system's content lives in it.
+ROW_BOOKKEEPING_COLUMNS = frozenset({"created_at", "updated_at"})
+
+
+def _foreign_column_is_empty(name, value) -> bool:
+    if name in ROW_BOOKKEEPING_COLUMNS:
+        return True
+    return value in FOREIGN_COLUMN_EMPTY_VALUES.get(name, (None,))
+
+
 def _classify(column: str) -> str:
     if column in AI_FIELDS:
         return DIFFERENT_EXPECTED_AI

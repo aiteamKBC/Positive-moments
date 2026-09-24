@@ -119,7 +119,12 @@ from app.orchestration.stages import (
     SYNC_PERFECT,
 )
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION
-from app.qa.provider import OpenAIChatProvider
+from app.common.errors import PlatformError
+from app.qa.provider import (
+    PROVIDER_CONFIGURATION_ERROR_CODE,
+    OpenAIChatProvider,
+    ProviderError,
+)
 from app.qa.service import ShadowQaService
 from app.rendering.evidence import RENDERER_VERSION
 from app.rendering.service import QaRenderingService
@@ -299,16 +304,29 @@ class StageRunner:
         return _outcome(outcome)
 
     def _run_qa(self, connection, lecture_id, session_date) -> dict:
-        self.settings.require_qa_model()
-        provider = OpenAIChatProvider(
-            api_key=self.settings.qa_model_api_key,
-            model=self.settings.qa_model_name,
-            base_url=self.settings.qa_model_base_url,
-            **({"response_contract": self.provider_contract_version}
-               if self.provider_contract_version else {}))
+        try:
+            self.settings.require_qa_model()
+            provider = OpenAIChatProvider(
+                api_key=self.settings.qa_model_api_key,
+                model=self.settings.qa_model_name,
+                base_url=self.settings.qa_model_base_url,
+                **({"response_contract": self.provider_contract_version}
+                   if self.provider_contract_version else {}))
+        except (ValueError, ProviderError) as exc:
+            # No usable key or model name: the same for every lecture of the
+            # cycle, and no call was made. The orchestrator opens its circuit
+            # on this code exactly as it does on a refused credential.
+            raise PlatformError(PROVIDER_CONFIGURATION_ERROR_CODE,
+                                "QA model provider is not configured") from exc
         service = self._qa_service(provider=provider, lecture_ids=[str(lecture_id)])
         outcome = service.run_day(connection, session_date, execute=self.persist)
-        return _outcome(outcome, provider_calls=outcome.get("provider_calls", 0))
+        result = _outcome(outcome, provider_calls=outcome.get("provider_calls", 0))
+        circuit = outcome.get("provider_circuit") or {}
+        if circuit.get("state") == "OPEN":
+            # The provider refused the credential for this lecture. Raised to
+            # the cycle so no other lecture is sent the same call.
+            result["provider_configuration_failure"] = circuit.get("opened_by")
+        return result
 
     def _refresh_deterministic_qa(self, connection, lecture_id, session_date) -> dict:
         # No provider at all: a deterministic refresh that could buy a

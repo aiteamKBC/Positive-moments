@@ -100,7 +100,13 @@ from app.db.repositories.qa_writer import (
     WriterOwnershipRepository,
 )
 from app.db.repositories.qa_writer import GenerationAttemptRepository
-from app.writer.modes import CANARY_NEW_ONLY, DRY_RUN, WRITE_ENABLED_MODES, WRITE_MODES
+from app.writer.modes import (
+    CANARY_NEW_ONLY,
+    DRY_RUN,
+    EXPLICIT_BACKFILL,
+    WRITE_ENABLED_MODES,
+    WRITE_MODES,
+)
 from app.qa.perfect import may_publish
 from app.rendering.evidence import RENDERER_VERSION
 from app.writer.perfect_service import PerfectLecturePlanner, plan_perfect_for_day
@@ -409,6 +415,14 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the single lecture to reparse from its selected parts")
     seam.add_argument("--dry-run", action="store_true")
     seam.add_argument("--json", action="store_true")
+    withdraw = commands.add_parser(
+        "withdraw-legacy-qa",
+        help="withdraw ONE coded-owned legacy QA row contradicted by a coverage review")
+    withdraw.add_argument("--lecture-id", required=True,
+                          help="the single lecture whose coded-owned row is withdrawn")
+    withdraw.add_argument("--confirm-write", action="store_true",
+                          help="actually delete; without it the run only plans")
+    withdraw.add_argument("--json", action="store_true")
     select = commands.add_parser("select-lecture")
     select.add_argument("--date", required=True, type=parse_date)
     select.add_argument("--subject", required=True)
@@ -581,6 +595,22 @@ def main(argv: list[str] | None = None) -> int:
             with database_connection(settings.database_url) as connection:
                 summary = service.render_day(connection, args.date)
                 if args.dry_run:
+                    connection.rollback()
+        elif args.command == "withdraw-legacy-qa":
+            # Plans by default. Only an explicit confirmation reaches a
+            # write-enabled mode, and the writer still refuses unless its own
+            # ownership ledger, the current evaluation and the other systems'
+            # columns all agree the row may go.
+            settings.require_database()
+            writer = LegacyQaWriter(
+                payload_repository=RenderedPayloadRepository(),
+                legacy_repository=LegacyQaTargetRepository(),
+                ownership_repository=WriterOwnershipRepository(),
+                mode=EXPLICIT_BACKFILL if args.confirm_write else DRY_RUN,
+                lecture_ids=[args.lecture_id], confirmed=args.confirm_write)
+            with database_connection(settings.database_url) as connection:
+                summary = writer.withdraw_contradicted_session(connection, args.lecture_id)
+                if not writer.writes_enabled:
                     connection.rollback()
         elif args.command == "rebuild-seam-document":
             # Phase 3C2.3B: reparse ONE lecture from its Phase 2B selected parts

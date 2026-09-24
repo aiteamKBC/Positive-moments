@@ -18,6 +18,7 @@ import uuid
 from psycopg import sql
 
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.qa.generation_budget import attempt_row, generation_budget
 from app.writer.mapping import (
     CHECKLIST_COLUMNS,
     LEGACY_CHECKLIST_KEY,
@@ -40,6 +41,17 @@ SELECT rs.rendered_session_id, rs.lecture_id, rs.evaluation_id, rs.render_status
   JOIN public.lecture_qa_evaluations e ON e.evaluation_id = rs.evaluation_id
   JOIN public.lecture_sessions l ON l.lecture_id = rs.lecture_id
  WHERE l.session_date = %s AND rs.renderer_version = %s
+   -- A render of a SUPERSEDED answer is history, not a payload: once a
+   -- strictly newer evaluation exists for the lecture - a NON_DELIVERED later
+   -- replaced by a coverage review, say - it must never be written or judged
+   -- for Perfect again. Strictly newer, deliberately: two evaluations with the
+   -- same timestamp are indistinguishable, and guessing between them on a
+   -- uuid would be worse than the behaviour this refines.
+   AND NOT EXISTS (
+         SELECT 1
+           FROM public.lecture_qa_evaluations e2
+          WHERE e2.lecture_id = rs.lecture_id
+            AND e2.updated_at > e.updated_at)
  ORDER BY l.scheduled_start, l.subject
 """
 
@@ -124,6 +136,55 @@ class LegacyQaTargetRepository:
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "legacy session read failed") from exc
         return dict(zip(SESSION_COLUMNS, row)) if row else None
+
+    def load_foreign_columns(self, connection, session_id) -> dict | None:
+        """
+        Every column of the legacy row the coded writer does NOT own.
+
+        Read generically (`to_jsonb`) rather than from a list, so a column
+        another system adds tomorrow is covered by the same check without
+        anyone remembering to add it here.
+        """
+        try:
+            row = connection.execute(
+                "SELECT to_jsonb(s) FROM public.qa_doctors_sessions s "
+                " WHERE s.session_id = %s", (session_id,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "legacy session read failed") from exc
+        if row is None:
+            return None
+        return {name: value for name, value in row[0].items()
+                if name not in SESSION_COLUMNS}
+
+    def current_evaluation(self, connection, lecture_id) -> dict | None:
+        """The lecture's CURRENT evaluation, by the recovery_state rule."""
+        try:
+            rows = connection.execute("""
+            SELECT e.evaluation_id, e.qa_status, e.review_reason, e.updated_at
+              FROM public.lecture_qa_evaluations e
+             WHERE e.lecture_id = %s
+             ORDER BY e.updated_at DESC, e.evaluation_id DESC
+             LIMIT 2
+            """, (lecture_id,)).fetchall()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "current evaluation read failed") from exc
+        if not rows:
+            return None
+        row = rows[0]
+        return {"evaluation_id": str(row[0]), "qa_status": row[1], "review_reason": row[2],
+                # Two evaluations with the same timestamp: which is current is
+                # not knowable, and a deletion must never rest on a coin toss.
+                "ambiguous": len(rows) > 1 and rows[1][3] == row[3]}
+
+    def coded_perfect_writes(self, connection, lecture_id) -> int:
+        try:
+            row = connection.execute("""
+            SELECT count(*) FROM public.lecture_perfect_lecture_legacy_writes p
+             WHERE p.lecture_id = %s AND p.write_status IN ('WRITTEN', 'UPDATED')
+            """, (lecture_id,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "perfect ownership read failed") from exc
+        return int(row[0])
 
     def load_checklist(self, connection, session_id) -> list[dict]:
         columns = sql.SQL(", ").join(sql.Identifier(name) for name in CHECKLIST_COLUMNS)
@@ -261,6 +322,23 @@ class WriterOwnershipRepository:
             raise PlatformError(DATABASE_ERROR, "writer ownership write failed") from exc
         return {"write_id": row[0], "created": bool(row[1])}
 
+    def live_writes_for_lecture(self, connection, lecture_id, writer_version) -> list[dict]:
+        """This lecture's coded-owned legacy rows that are still published."""
+        try:
+            rows = connection.execute("""
+            SELECT write_id, legacy_session_id, evaluation_id, write_status,
+                   post_write_digest
+              FROM public.lecture_qa_legacy_writes
+             WHERE lecture_id = %s AND writer_version = %s
+               AND write_status IN ('WRITTEN', 'UPDATED')
+             ORDER BY written_at DESC, write_id DESC
+            """, (lecture_id, writer_version)).fetchall()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "writer ownership lookup failed") from exc
+        return [{"write_id": row[0], "legacy_session_id": row[1],
+                 "evaluation_id": str(row[2]), "write_status": row[3],
+                 "post_write_digest": row[4]} for row in rows]
+
     def mark_status(self, connection, write_id, status, metadata=None) -> None:
         try:
             connection.execute("""
@@ -277,12 +355,39 @@ class GenerationAttemptRepository:
     """Append-only model-generation attempts, for the bounded retry policy."""
 
     def count(self, connection, source_fingerprint) -> int:
+        """Attempt RECORDS for the fingerprint - the ledger's numbering, not the budget."""
         try:
             return connection.execute(
                 "SELECT count(*) FROM public.lecture_qa_generation_attempts "
                 " WHERE source_fingerprint = %s", (source_fingerprint,)).fetchone()[0]
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "generation attempt count failed") from exc
+
+    def budget(self, connection, source_fingerprint, *, max_generations: int) -> dict:
+        """
+        The generation budget spent on this fingerprint, under the shared
+        policy in `app.qa.generation_budget`. Reads only.
+        """
+        try:
+            rows = connection.execute("""
+            SELECT a.outcome, a.error_code, a.metadata ->> 'consumes_generation_budget',
+                   a.metadata ->> 'generation_budget_used'
+              FROM public.lecture_qa_generation_attempts a
+             WHERE a.source_fingerprint = %s
+             ORDER BY a.generation_number
+            """, (source_fingerprint,)).fetchall()
+            evaluation = connection.execute("""
+            SELECT q.error_code, q.metadata ->> 'http_status', q.ai_raw_output IS NOT NULL
+              FROM public.lecture_qa_evaluations AS q
+             WHERE q.source_fingerprint = %s
+            """, (source_fingerprint,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "generation budget read failed") from exc
+        return generation_budget(
+            [attempt_row(*row) for row in rows],
+            ({"error_code": evaluation[0], "http_status": evaluation[1],
+              "has_model_output": evaluation[2]} if evaluation else None),
+            max_generations=max_generations)
 
     def record(self, connection, entry: dict) -> int:
         """Append one attempt and return its generation number."""

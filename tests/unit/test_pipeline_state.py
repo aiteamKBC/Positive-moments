@@ -89,7 +89,12 @@ from app.qa.perfect import (
     PENDING_ATTENDANCE_DATA,
 )
 from app.rendering.evidence import RENDERER_VERSION
-from app.transcripts.selection import SELECTION_VERSION
+from app.transcripts.selection import (
+    SELECTION_VERSION,
+    CandidateArtifact,
+    combined_source_fingerprint,
+    relevant_candidates,
+)
 from app.transcripts.speakers import SPEAKER_INVENTORY_VERSION
 from app.transcripts.webvtt import PARSER_VERSION
 from app.writer.mapping import WRITER_VERSION
@@ -112,8 +117,59 @@ NOW = datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc)
 SESSION_DATE = date(2026, 9, 17)
 
 
+# The occurrence the selector judges: 2026-09-17 08:00-10:00 UTC, i.e.
+# 11:00-13:00 Cairo, on the fixture's meeting.
+SCHEDULED_START = datetime(2026, 9, 17, 8, 0, tzinfo=timezone.utc)
+SCHEDULED_END = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+
+
+def candidate_row(transcript_id, start, end, *, sha, call_id="call-1",
+                  meeting_id="meeting-1", artifact_id=None, first_seen=None):
+    """One row of the selector's own candidate query, in column order."""
+    return (artifact_id or f"artifact-{transcript_id}", transcript_id, start, end,
+            call_id, meeting_id, sha, 1000, first_seen or NOW - timedelta(days=1))
+
+
+# Two parts of one call, both inside the occurrence window.
+CANDIDATES = [
+    candidate_row("transcript-1", SCHEDULED_START, SCHEDULED_START + timedelta(hours=1),
+                  sha="1" * 64),
+    candidate_row("transcript-2", SCHEDULED_START + timedelta(minutes=65),
+                  SCHEDULED_END, sha="2" * 64),
+]
+
+
+def input_fingerprint(rows) -> str:
+    """What the selector would have stamped on a selection made from `rows`."""
+    candidates = [CandidateArtifact(
+        artifact_id=row[0], provider_transcript_id=row[1],
+        provider_created_at=row[2], provider_end_at=row[3],
+        provider_call_id=row[4], meeting_id=row[5],
+        content_sha256=row[6], content_bytes=row[7]) for row in rows]
+    return relevant_candidates(candidates, scheduled_start=SCHEDULED_START,
+                               scheduled_end=SCHEDULED_END,
+                               target_date=SESSION_DATE,
+                               meeting_id="meeting-1").fingerprint
+
+
+COMBINED_FINGERPRINT = combined_source_fingerprint(SELECTION_VERSION, ["1" * 64, "2" * 64])
+
+
+def selection_row(*, fingerprint=None, combined=COMBINED_FINGERPRINT, status="SELECTED",
+                  duration_minutes=120, actual_start=SCHEDULED_START,
+                  actual_end=SCHEDULED_END, updated_at=None):
+    """The resolver's selection row. `fingerprint=None` means 'as selected'."""
+    return (SELECTION_ID, status, 2, "b" * 64, updated_at or NOW - timedelta(hours=3),
+            input_fingerprint(CANDIDATES) if fingerprint is None else fingerprint,
+            actual_start, actual_end, combined, duration_minutes,
+            None if duration_minutes is None else duration_minutes * 60.0)
+
+
 # Fragments unique to each statement, most specific first.
 ROUTES = (
+    ("occurrence", "SELECT l.scheduled_start, l.scheduled_end"),
+    ("selection_candidates", "a.first_seen_at"),
+    ("selected_parts", "FROM public.lecture_transcript_selection_parts p"),
     ("keys", "SELECT r.legacy_lecture_key"),
     ("perfect_results", "SELECT r.eligibility_version"),
     ("perfect_writes_state", "p.result_id"),
@@ -237,8 +293,12 @@ def complete_rows(**overrides) -> dict:
         "lecture_day": [(LECTURE_ID,)],
         "coverage": [(SNAPSHOT_ID, 12, 12, 12, ATTENDANCE_RESOLUTION_VERSION, 12)],
         "artifacts": [(2, 2, 0, NOW - timedelta(hours=4))],
-        "selection": [(SELECTION_ID, "SELECTED", 2, "b" * 64, NOW - timedelta(hours=3))],
-        "documents": [(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW)],
+        "occurrence": [(SCHEDULED_START, SCHEDULED_END, SESSION_DATE, "meeting-1")],
+        "selection_candidates": list(CANDIDATES),
+        "selected_parts": [("transcript-1",), ("transcript-2",)],
+        "selection": [selection_row()],
+        "documents": [(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW,
+                       "b" * 64)],
         "speakers": [(9,)],
         "engagement_lineage": [(ENGAGEMENT_ID, DOCUMENT_ID, SNAPSHOT_ID,
                                 "CALCULATED", 12, 9, True, 4, "CALCULATED",
@@ -251,7 +311,7 @@ def complete_rows(**overrides) -> dict:
                          "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
                          SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
                          DEFAULT_EVIDENCE_POLICY)],
-        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [])],
+        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [""], [""], [""], None)],
         "rendered": [(RENDER_ID, "RENDERED", RENDERER_VERSION, FINGERPRINT,
                       11, 0, 0, EVALUATION_ID, LEGACY_SESSION_ID)],
         "qa_writes": [(WRITE_ID, "WRITTEN", WRITER_VERSION, LEGACY_SESSION_ID)],
@@ -326,12 +386,20 @@ def test_a_missing_selection_asks_for_the_selection():
 
 
 def test_transcript_content_arriving_after_the_selection_makes_it_stale():
-    """A choice is not wrong because evidence arrived late - it is UNINFORMED."""
-    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1))])
+    """
+    A choice is not wrong because evidence arrived late - it is UNINFORMED.
+
+    Since selection_input_fingerprint_v1 "arrived" means a relevant transcript
+    the selector has not seen, not a fetch timestamp: a newer fetch of the
+    same bytes is the false staleness this used to report.
+    """
+    late = candidate_row("transcript-3", SCHEDULED_START + timedelta(minutes=125),
+                         SCHEDULED_END + timedelta(minutes=30), sha="3" * 64)
+    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1))],
+                         selection_candidates=CANDIDATES + [late])
     result = resolve(rows)
     assert result["stages"][SELECTION]["state"] == STALE
-    assert result["stages"][SELECTION]["reason"] == \
-        "TRANSCRIPT_CONTENT_NEWER_THAN_SELECTION"
+    assert result["stages"][SELECTION]["reason"] == "SELECTION_INPUTS_CHANGED"
     assert result["next_action"] == SELECT_TRANSCRIPT
 
 
@@ -343,7 +411,7 @@ def test_missing_canonical_cues_ask_for_the_parse():
 
 def test_a_document_parsed_from_a_different_selection_is_a_lineage_break():
     rows = complete_rows(documents=[(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400,
-                                     "other-selection", NOW)])
+                                     "other-selection", NOW, "b" * 64)])
     result = resolve(rows)
     assert result["stages"][CANONICAL_CUES]["state"] == STALE
     assert result["next_action"] == BUILD_CANONICAL_CUES
@@ -583,8 +651,8 @@ def test_two_engagement_rows_on_one_snapshot_do_not_make_a_lecture_stale():
 def test_the_evaluation_decides_which_canonical_document_is_current():
     rows = complete_rows(documents=[
         ("newer-v2-document", "webvtt_canonical_v2_seam_dedup", "PARSED", 410,
-         SELECTION_ID, NOW + timedelta(hours=1)),
-        (DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW)])
+         SELECTION_ID, NOW + timedelta(hours=1), "b" * 64),
+        (DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW, "b" * 64)])
     result = resolve(rows)
     assert result["stages"][CANONICAL_CUES]["document_id"] == DOCUMENT_ID
     assert result["next_action"] == NOTHING_TO_DO
@@ -665,7 +733,8 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
                       DEFAULT_EVIDENCE_POLICY)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
-                   ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3)])
+                   ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3,
+                   [""] * 3, [""] * 3, None)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["attempts_remaining"] == 0
     assert result["stages"][QA_EVALUATION]["reason"] == \
@@ -930,7 +999,8 @@ def test_the_report_counts_recording_and_excel_without_blocking_on_them():
 
 def test_bucket_is_severity_first_while_the_resume_rule_is_earliest_first():
     failed = resolve(complete_rows(documents=[(
-        DOCUMENT_ID, PARSER_VERSION, "INVALID_WEBVTT", 0, SELECTION_ID, NOW)]))
+        DOCUMENT_ID, PARSER_VERSION, "INVALID_WEBVTT", 0, SELECTION_ID, NOW,
+        "b" * 64)]))
     assert bucket_for(failed) == "failed"
     assert failed["blocking_stage"] == CANONICAL_CUES
 
@@ -1065,7 +1135,7 @@ def test_an_exhausted_budget_still_wins_over_a_superseded_policy():
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
                       EVIDENCE_POLICY_V1)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
-                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3)])
+                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3, [""] * 3, [""] * 3, None)])
     result = resolve(rows)
     assert result["next_action"] == MANUAL_REVIEW_REQUIRED
 

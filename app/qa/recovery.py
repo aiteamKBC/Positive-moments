@@ -28,7 +28,13 @@ from app.qa.perfect import (
     DEFAULT_PERFECT_ELIGIBILITY_VERSION,
     PENDING_ATTENDANCE_DATA,
 )
+from app.qa.delivery import TRANSCRIPT_COVERAGE_INCOMPLETE
 from app.qa.evidence_policy import EVIDENCE_POLICY_V1
+from app.qa.generation_budget import (
+    GENERATION_BUDGET_POLICY_VERSION,
+    attempt_row,
+    generation_budget,
+)
 from app.qa.service import MAX_MODEL_GENERATIONS
 
 
@@ -91,7 +97,16 @@ ATTEMPTS = """
 SELECT a.source_fingerprint, count(*)::int, max(a.generation_number),
        min(a.created_at), max(a.created_at),
        array_agg(a.outcome ORDER BY a.generation_number),
-       array_agg(coalesce(a.error_code, '') ORDER BY a.generation_number)
+       array_agg(coalesce(a.error_code, '') ORDER BY a.generation_number),
+       array_agg(coalesce(a.metadata ->> 'consumes_generation_budget', '')
+                 ORDER BY a.generation_number),
+       array_agg(coalesce(a.metadata ->> 'generation_budget_used', '')
+                 ORDER BY a.generation_number),
+       (SELECT jsonb_build_object('error_code', q.error_code,
+                                  'http_status', q.metadata ->> 'http_status',
+                                  'has_model_output', q.ai_raw_output IS NOT NULL)
+          FROM public.lecture_qa_evaluations AS q
+         WHERE q.source_fingerprint = a.source_fingerprint)
   FROM public.lecture_qa_generation_attempts a
  WHERE a.lecture_id = %s
  GROUP BY a.source_fingerprint
@@ -183,18 +198,32 @@ def recovery_state(connection, lecture_id, *,
 
     # Attempts are authoritative and are keyed on the generation contract's
     # fingerprint, so they are indexed that way rather than summed.
-    attempts_by_fingerprint = {
-        row[0]: {"attempts_used": row[1], "highest_generation_number": row[2],
-                 "first_attempt_at": str(row[3]), "last_attempt_at": str(row[4]),
-                 "outcomes": list(row[5]),
-                 "error_codes": [code for code in row[6] if code]}
-        for row in _rows(connection, ATTEMPTS, lecture_id)}
+    # The BUDGET is the shared policy's answer, not the row count: a call the
+    # provider refused on the credential is on record but bought nothing.
+    attempts_by_fingerprint = {}
+    for row in _rows(connection, ATTEMPTS, lecture_id):
+        budget = generation_budget(
+            [attempt_row(*values) for values in zip(row[5], row[6], row[7], row[8])],
+            row[9], max_generations=max_model_generations)
+        attempts_by_fingerprint[row[0]] = {
+            "attempt_records": row[1],
+            "attempts_used": budget["generation_budget_used"],
+            "configuration_failures": budget["configuration_failures"],
+            "last_attempt_configuration_failure":
+                budget["last_attempt_configuration_failure"],
+            "legacy_configuration_failures_inferred":
+                budget["legacy_configuration_failures_inferred"],
+            "highest_generation_number": row[2],
+            "first_attempt_at": str(row[3]), "last_attempt_at": str(row[4]),
+            "outcomes": list(row[5]),
+            "error_codes": [code for code in row[6] if code]}
 
     evaluations = []
     for row in _rows(connection, EVALUATIONS, lecture_id):
         fingerprint = row[1]
         attempts = attempts_by_fingerprint.get(fingerprint, {})
         used = attempts.get("attempts_used", 0)
+        records = attempts.get("attempt_records", 0)
         evaluations.append({
             "evaluation_id": str(row[0]),
             "source_fingerprint": fingerprint,
@@ -220,11 +249,18 @@ def recovery_state(connection, lecture_id, *,
             "evidence_policy_version": row[17] or EVIDENCE_POLICY_V1,
             # The stored aggregate and the authoritative count, side by side:
             # a disagreement is a defect, not something to average.
+            # `provider_attempts` counts every recorded call; the budget below
+            # is what those calls actually spent.
             "provider_attempts_stored": row[4],
+            "attempt_records": records,
             "attempts_used": used,
-            "attempts_aggregate_agrees": row[4] == used,
+            "configuration_failures": attempts.get("configuration_failures", 0),
+            "last_attempt_configuration_failure": attempts.get(
+                "last_attempt_configuration_failure", False),
+            "attempts_aggregate_agrees": row[4] == records,
             "max_model_generations": max_model_generations,
             "attempts_remaining": max(max_model_generations - used, 0),
+            "generation_budget_policy_version": GENERATION_BUDGET_POLICY_VERSION,
             "attempt_outcomes": attempts.get("outcomes", []),
             "attempt_error_codes": attempts.get("error_codes", []),
         })
@@ -318,6 +354,10 @@ def _next_action(state) -> str:
     # 3. no usable QA result yet.
     if current is None:
         return RUN_PHASE_3A
+    if (current["qa_status"] == "REVIEW_REQUIRED"
+            and current.get("review_reason") == TRANSCRIPT_COVERAGE_INCOMPLETE):
+        # The same inputs give the same answer; no amount of re-running helps.
+        return REVIEW_REQUIRED_MANUAL
     if current["qa_status"] not in ("COMPLETED", "NON_DELIVERED"):
         return (RUN_PHASE_3A if current["attempts_remaining"] > 0
                 else REVIEW_REQUIRED_MANUAL)

@@ -37,6 +37,7 @@ from datetime import date as _date
 from app.attendance.coverage import is_authoritative
 from app.attendance.roster import ATTENDANCE_RESOLUTION_VERSION
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.db.repositories.transcript_selections import TranscriptSelectionRepository
 from app.lectures.duplicate_service import DuplicateResolutionService
 from app.lectures.duplicates import (
     CASE_NOT_DUPLICATE,
@@ -96,12 +97,22 @@ from app.orchestration.stages import (
     WAIT_FOR_RECORDING,
     WAITING,
 )
+from app.qa.delivery import TRANSCRIPT_COVERAGE_INCOMPLETE, classify_delivery
+from app.qa.deterministic import NON_DELIVERED
 from app.qa.evidence_policy import DEFAULT_EVIDENCE_POLICY
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION, PENDING_ATTENDANCE_DATA
 from app.qa.recovery import recovery_state
+from app.qa.provider import PROVIDER_CONFIGURATION_ERROR
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
-from app.transcripts.selection import SELECTION_VERSION
+from app.transcripts.identity import canonical_key
+from app.transcripts.selection import (
+    SELECTED,
+    SELECTION_VERSION,
+    combined_source_fingerprint,
+    relevant_candidates,
+    select_transcript_parts,
+)
 from app.transcripts.speakers import SPEAKER_INVENTORY_VERSION
 from app.transcripts.webvtt import PARSER_VERSION
 from app.writer.legacy_identity import (
@@ -179,16 +190,36 @@ SELECT count(*)::int AS total,
  WHERE c.lecture_id = %s
 """
 
+# The schedule the selector judged this occurrence against. Separate from
+# LECTURE so the selection-relevance question reads exactly the fields the
+# selector itself is given.
+OCCURRENCE = """
+SELECT l.scheduled_start, l.scheduled_end, l.session_date, l.meeting_id
+  FROM public.lecture_sessions l
+ WHERE l.lecture_id = %s
+"""
+
 SELECTION_ROW = """
 SELECT s.selection_id, s.selection_status, s.selected_part_count,
-       s.combined_content_sha256, s.updated_at
+       s.combined_content_sha256, s.updated_at,
+       s.metadata ->> 'selection_input_fingerprint',
+       s.actual_start, s.actual_end,
+       cb.source_fingerprint, cb.duration_minutes, cb.duration_seconds
   FROM public.lecture_transcript_selections s
+  LEFT JOIN public.lecture_combined_transcripts cb ON cb.selection_id = s.selection_id
  WHERE s.lecture_id = %s AND s.selection_version = %s
+"""
+
+SELECTED_PART_IDS = """
+SELECT p.provider_transcript_id
+  FROM public.lecture_transcript_selection_parts p
+ WHERE p.selection_id = %s
+ ORDER BY p.part_index
 """
 
 DOCUMENTS = """
 SELECT d.document_id, d.parser_version, d.parse_status, d.cue_count,
-       d.selection_id, d.updated_at
+       d.selection_id, d.updated_at, d.source_content_sha256
   FROM public.lecture_transcript_documents d
  WHERE d.lecture_id = %s AND d.parser_version = ANY(%s)
  ORDER BY d.updated_at DESC, d.document_id DESC
@@ -241,6 +272,11 @@ SELECT r.legacy_lecture_key, r.legacy_session_id, r.is_perfect
 """
 
 
+def _is_coverage_review(evaluation) -> bool:
+    return bool(evaluation and evaluation.get("qa_status") == "REVIEW_REQUIRED"
+                and evaluation.get("review_reason") == TRANSCRIPT_COVERAGE_INCOMPLETE)
+
+
 def _fetch(connection, sql, params):
     try:
         return connection.execute(sql, params).fetchall()
@@ -276,7 +312,8 @@ class PipelineStateResolver:
                  evidence_policy_version: str = DEFAULT_EVIDENCE_POLICY,
                  legacy_observations=None,
                  attendance_probe=None,
-                 duplicate_service=None):
+                 duplicate_service=None,
+                 selection_repository=None):
         self.selection_version = selection_version
         self.parser_versions = list(parser_versions)
         self.speaker_inventory_version = speaker_inventory_version
@@ -292,6 +329,10 @@ class PipelineStateResolver:
         # suppression is the runner's job, through the same action dispatch as
         # every other stage.
         self.duplicate_service = duplicate_service or DuplicateResolutionService()
+        # The SAME candidate loader the selector uses, collapse of re-serialized
+        # transcript ids included. Freshness is judged on the evidence the
+        # selector would actually see, never on a second reading of it.
+        self.selection_repository = selection_repository or TranscriptSelectionRepository()
 
     # -- entry points -------------------------------------------------------
 
@@ -330,6 +371,8 @@ class PipelineStateResolver:
             return self._suppressed_state(lecture)
 
         duplicate = self._duplicate(connection, lecture)
+        occurrence = _fetch(connection, OCCURRENCE, (lecture_id,))
+        lecture["_occurrence"] = occurrence[0] if occurrence else None
 
         # Phase 3C3D/3C3E already answers attendance onwards for one lecture,
         # attempt budget and all. Re-deriving any of it here would be a second
@@ -353,7 +396,8 @@ class PipelineStateResolver:
             connection, lecture, downstream, document)
         stages[ENGAGEMENT] = engagement_stage
         stages[QA_EVALUATION] = self._qa_evaluation(lecture, downstream,
-                                                    engagement_row)
+                                                    engagement_row, document,
+                                                    selection_row)
         stages[QA_RENDER] = self._qa_render(lecture, downstream)
         legacy_sync, legacy_session_id = self._legacy_qa_sync(
             connection, lecture, downstream)
@@ -373,6 +417,7 @@ class PipelineStateResolver:
                       if executable_stage is None
                       or executable_stage in OBSERVED_ONLY_STAGES
                       else executable_action)
+        lecture.pop("_occurrence", None)
         return {
             **lecture,
             "orchestration_version": ORCHESTRATION_VERSION,
@@ -568,19 +613,74 @@ class PipelineStateResolver:
         selection = {"selection_id": str(row[0]), "selection_status": row[1],
                      "selected_part_count": row[2],
                      "selection_version": self.selection_version}
+        # Carried to the later stages, never reported as stage detail.
+        lineage = {**selection, "combined_content_sha256": row[3],
+                   "actual_start": row[6], "actual_end": row[7],
+                   "combined_duration_minutes": row[9],
+                   "combined_duration_seconds": row[10]}
         if row[1] != "SELECTED":
             # A real, recorded answer of "nothing to select". Re-running is
             # free (pure DB) and is exactly what makes a late transcript
             # recoverable, so this is MISSING rather than FAILED.
-            return _stage(MISSING, action=SELECT_TRANSCRIPT, **selection), selection
-        newest = artifacts["newest_content_at"]
-        if newest is not None and row[4] is not None and newest > row[4]:
-            # Transcript content arrived AFTER we chose. The choice may still
-            # be right, but it was not made in light of this evidence.
-            return _stage(STALE, action=SELECT_TRANSCRIPT,
-                          reason="TRANSCRIPT_CONTENT_NEWER_THAN_SELECTION",
-                          **selection), selection
-        return _stage(COMPLETE, **selection), selection
+            return _stage(MISSING, action=SELECT_TRANSCRIPT, **selection), lineage
+        freshness = self._selection_freshness(connection, lecture, row)
+        if freshness.pop("stale"):
+            # The evidence the selector would read NOW differs from what it
+            # read when it chose. Re-running is pure DB and cheap.
+            return _stage(STALE, action=SELECT_TRANSCRIPT, **freshness,
+                          **selection), lineage
+        return _stage(COMPLETE, **freshness, **selection), lineage
+
+    def _selection_freshness(self, connection, lecture, row) -> dict:
+        """
+        Is this selection still the answer for the evidence we hold?
+
+        Judged on MEANINGFUL INPUTS, through the selector's own definition of
+        which candidates are relevant to this occurrence. It used to compare
+        the newest `content_fetched_at` across every candidate linked to the
+        lecture - which, for a Teams series meeting, is every occurrence's
+        transcript - against the selection's `updated_at`. A 09-11 transcript,
+        or a Graph re-fetch of identical bytes, made 09-04 STALE.
+
+        Selections written since `selection_input_fingerprint_v1` carry the
+        fingerprint of their relevant candidates, and this recomputes it. Older
+        rows carry none, so for them the question is answered directly: would
+        re-running the selector pick different parts, or recombine different
+        bytes? Either way nothing here depends on when anything was fetched.
+        """
+        occurrence = lecture.get("_occurrence") or _fetch(
+            connection, OCCURRENCE, (lecture["lecture_id"],))[0]
+        schedule = {"scheduled_start": occurrence[0], "scheduled_end": occurrence[1],
+                    "target_date": occurrence[2], "meeting_id": occurrence[3]}
+        candidates = self.selection_repository.load_candidates(
+            connection, lecture["lecture_id"])
+        relevance = relevant_candidates(candidates, **schedule)
+        detail = {"relevant_candidate_count": len(relevance.candidates),
+                  "selection_input_fingerprint_prefix": relevance.fingerprint[:16]}
+        stored = row[5]
+        if stored:
+            if stored != relevance.fingerprint:
+                return {"stale": True, "reason": "SELECTION_INPUTS_CHANGED",
+                        "freshness_basis": "SELECTION_INPUT_FINGERPRINT", **detail}
+            return {"stale": False, "freshness_basis": "SELECTION_INPUT_FINGERPRINT",
+                    **detail}
+
+        basis = {"freshness_basis": "LEGACY_SELECTION_EQUIVALENCE", **detail}
+        outcome = select_transcript_parts(candidates, **schedule)
+        if outcome.status != SELECTED:
+            return {"stale": True, "reason": "SELECTION_OUTCOME_CHANGED", **basis}
+        persisted = [canonical_key(item[0]) for item in
+                     _fetch(connection, SELECTED_PART_IDS, (row[0],))]
+        chosen = [canonical_key(part.candidate.provider_transcript_id)
+                  for part in outcome.parts]
+        if persisted != chosen:
+            return {"stale": True, "reason": "SELECTED_PARTS_CHANGED", **basis}
+        recombined = combined_source_fingerprint(
+            self.selection_version,
+            [part.candidate.content_sha256 for part in outcome.parts])
+        if row[8] is None or recombined != row[8]:
+            return {"stale": True, "reason": "SELECTED_CONTENT_CHANGED", **basis}
+        return {"stale": False, **basis}
 
     def _canonical_cues(self, connection, lecture, selection, current_evaluation):
         """
@@ -601,8 +701,14 @@ class PipelineStateResolver:
             return _stage(MISSING, action=BUILD_CANONICAL_CUES,
                           parser_versions=self.parser_versions), None
         if selection is not None:
+            # Same selection AND parsed from the bytes it holds now. A
+            # reselection rewrites the selection and combined rows in place,
+            # so selection_id alone would keep a document parsed from the
+            # superseded content looking current.
             matching = [item for item in rows
-                        if str(item[4]) == str(selection["selection_id"])]
+                        if str(item[4]) == str(selection["selection_id"])
+                        and (selection.get("combined_content_sha256") is None
+                             or item[6] == selection["combined_content_sha256"])]
         else:
             matching = []
         declared = (current_evaluation or {}).get("document_id")
@@ -707,7 +813,8 @@ class PipelineStateResolver:
         row = current[0]
         return _stage(COMPLETE, is_current_snapshot=True, **row), row
 
-    def _qa_evaluation(self, lecture, downstream, engagement) -> dict:
+    def _qa_evaluation(self, lecture, downstream, engagement, document=None,
+                       selection=None) -> dict:
         current = downstream.get("current_evaluation")
         if current is None:
             return _stage(MISSING, action=RUN_QA)
@@ -715,7 +822,29 @@ class PipelineStateResolver:
             "evaluation_id", "qa_status", "review_reason", "met_count",
             "partial_count", "not_met_count", "provider_contract_version",
             "attempts_used", "attempts_remaining", "model_output_reusable",
-            "evidence_policy_version", "source_fingerprint_prefix")}
+            "evidence_policy_version", "source_fingerprint_prefix",
+            "attempt_records", "configuration_failures")}
+        if (document is not None and current.get("document_id")
+                and str(current["document_id"]) != str(document["document_id"])):
+            # The answer was built from a DIFFERENT transcript document. The
+            # model was asked about other words, so its answer - and a
+            # NON_DELIVERED verdict drawn from the old document's length - is
+            # not an answer for this one. A real re-evaluation, never a
+            # deterministic refresh: the refresh reuses the frozen model
+            # output, which is exactly what must not survive a new transcript.
+            return _stage(STALE, action=RUN_QA,
+                          reason="EVALUATION_DOCUMENT_SUPERSEDED",
+                          evaluation_document_id=str(current["document_id"]),
+                          current_document_id=str(document["document_id"]),
+                          **detail)
+        if (current["qa_status"] == "REVIEW_REQUIRED"
+                and current.get("review_reason") == TRANSCRIPT_COVERAGE_INCOMPLETE):
+            # The lecture ran; its transcript cannot support QA. Re-running
+            # the same inputs gives the same answer, so this is a human's
+            # decision, not scheduler work. A better transcript arrives as a
+            # new document and is caught by the lineage rule above.
+            return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                          reason=TRANSCRIPT_COVERAGE_INCOMPLETE, **detail)
         if current["qa_status"] not in TERMINAL_QA_STATUSES:
             # Phase 4B: an answer rejected by an OLDER evidence rule can be
             # re-judged under the current one for nothing. Trying that before
@@ -731,9 +860,25 @@ class PipelineStateResolver:
             # exhausted its attempts must never be handed back to the
             # scheduler as ordinary retryable work.
             if current["attempts_remaining"] > 0:
+                if current.get("last_attempt_configuration_failure"):
+                    # The provider refused the credential; the lecture itself
+                    # is untouched and its budget unspent. Retried as soon as
+                    # a cycle finds the credential working.
+                    return _stage(REVIEW_REQUIRED, action=RUN_QA,
+                                  reason=PROVIDER_CONFIGURATION_ERROR, **detail)
                 return _stage(REVIEW_REQUIRED, action=RUN_QA, **detail)
             return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
                           reason="GENERATION_BUDGET_EXHAUSTED", **detail)
+        if current["qa_status"] == NON_DELIVERED:
+            decision = self._delivery_decision(lecture, selection)
+            if decision is not None and decision.classification != NON_DELIVERED:
+                # Same document, but the versioned delivery policy no longer
+                # calls this lecture undelivered. Re-running QA re-classifies
+                # it; the old answer stays on record under its own fingerprint.
+                return _stage(STALE, action=RUN_QA,
+                              reason="DELIVERY_POLICY_RECLASSIFIES_NON_DELIVERED",
+                              delivery_classification=decision.classification,
+                              delivery=decision.diagnostics, **detail)
         engagement = engagement or {}
         if (engagement.get("engagement_id") and current.get("engagement_id")
                 and engagement["engagement_id"] != current["engagement_id"]):
@@ -744,9 +889,29 @@ class PipelineStateResolver:
                           reason="EVALUATION_PREDATES_CURRENT_ENGAGEMENT", **detail)
         return _stage(COMPLETE, **detail)
 
+    def _delivery_decision(self, lecture, selection):
+        """The QA service's own delivery policy, asked of the persisted inputs."""
+        if not selection or selection.get("combined_duration_minutes") is None:
+            return None
+        occurrence = lecture.get("_occurrence")
+        if occurrence is None:
+            return None
+        seconds = selection.get("combined_duration_seconds")
+        return classify_delivery(
+            duration_minutes=selection["combined_duration_minutes"],
+            scheduled_start=occurrence[0], scheduled_end=occurrence[1],
+            call_start=selection.get("actual_start"),
+            call_end=selection.get("actual_end"),
+            transcript_span_seconds=float(seconds) if seconds is not None else None)
+
     def _qa_render(self, lecture, downstream) -> dict:
         rendered = downstream.get("rendered")
         current = downstream.get("current_evaluation")
+        if _is_coverage_review(current):
+            # Nothing to render: there is no verdict, and the renderer would
+            # refuse one. Not MISSING - there is no work that could fill it.
+            return _stage(NOT_APPLICABLE, reason=TRANSCRIPT_COVERAGE_INCOMPLETE,
+                          evaluation_id=current.get("evaluation_id"))
         if current is None or current["qa_status"] not in TERMINAL_QA_STATUSES:
             return _stage(MISSING, action=RUN_QA, reason="NO_TERMINAL_EVALUATION")
         if rendered is None:
@@ -783,6 +948,24 @@ class PipelineStateResolver:
         rows = _fetch(connection, LEGACY_WRITES,
                       (lecture["lecture_id"], self.writer_version))
         written = [item for item in rows if item[3] in OWNED_WRITE_STATUSES]
+        current = downstream.get("current_evaluation")
+        if _is_coverage_review(current):
+            # The canonical answer is "the lecture ran; QA cannot be trusted".
+            # qa_doctors_sessions has no truthful encoding of that, so the only
+            # correct legacy state is NO coded verdict at all. A coded-owned
+            # row written from a superseded evaluation contradicts it and is
+            # withdrawn by an operator (`withdraw-legacy-qa`); a foreign row
+            # stays untouched by every path, exactly as before.
+            if written:
+                row = written[0]
+                return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                              reason="LEGACY_ROW_CONTRADICTS_CURRENT_EVALUATION",
+                              write_id=str(row[0]), write_status=row[3],
+                              legacy_session_id=row[5], coded_owned=True,
+                              written_from_evaluation_id=str(row[2]),
+                              current_evaluation_id=current.get("evaluation_id")), None
+            return _stage(NOT_APPLICABLE, reason="NO_PUBLISHABLE_QA_RESULT",
+                          review_reason=TRANSCRIPT_COVERAGE_INCOMPLETE), None
         if written:
             row = written[0]
             detail = {"write_id": str(row[0]), "write_status": row[3],
@@ -840,6 +1023,12 @@ class PipelineStateResolver:
                       legacy_session_id=target, coded_owned=False), None
 
     def _perfect_eligibility(self, lecture, downstream):
+        if _is_coverage_review(downstream.get("current_evaluation")):
+            # Perfect is judged from a verdict, and there is none. Any older
+            # result was computed from a superseded evaluation and must not be
+            # offered as this lecture's answer.
+            return _stage(NOT_APPLICABLE, reason="QA_REVIEW_REQUIRED",
+                          review_reason=TRANSCRIPT_COVERAGE_INCOMPLETE), None
         results = [item for item in downstream["perfect_results"]
                    if item["eligibility_version"] == self.perfect_eligibility_version]
         if not results:

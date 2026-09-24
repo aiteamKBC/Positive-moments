@@ -36,6 +36,13 @@ recorded and stepped over. Two exceptions, both deliberate:
   * a SHARED-INFRASTRUCTURE failure - Graph auth, the database itself - stops
     the run too, because the next lecture will fail the same way and a hundred
     identical failures in the audit log is noise, not information.
+
+A refused QA-model credential is shared too, but it only concerns ONE stage,
+so it does not stop the cycle: it opens the cycle's provider circuit. Every
+later RUN_QA in the same cycle is BLOCKED without a call and without spending
+budget, while transcripts, attendance, rendering and the rest carry on. The
+circuit lives and dies with the cycle, so the next one tries the credential
+again and a repaired key is used at once.
 """
 import logging
 import time
@@ -54,7 +61,7 @@ from app.orchestration.locks import (
     NullLockManager,
     SchedulerCycleBusy,
 )
-from app.orchestration.runner import ManualReviewRequired
+from app.orchestration.runner import PROVIDER_ACTIONS, ManualReviewRequired
 from app.orchestration.n8n_preflight import (
     LEGACY_QA_DISABLED,
     PRECHECK_SKIPPED,
@@ -87,6 +94,12 @@ from app.orchestration.stages import (
     RUN_TYPE_MANUAL,
     WAIT_FOR_ATTENDANCE_SOURCE,
 )
+from app.qa.provider import (
+    PROVIDER_CONFIGURATION_BLOCKED,
+    PROVIDER_CONFIGURATION_ERROR,
+    PROVIDER_CONFIGURATION_ERROR_CODE,
+    ProviderCircuit,
+)
 
 
 # A refusal from the writer guard is never "this lecture"; it is "the rules
@@ -113,6 +126,8 @@ class PipelineOrchestrator:
         self.discovery_service = discovery_service
         self.max_passes = max_passes
         self.orchestration_version = orchestration_version
+        # Replaced at the start of every cycle (see `_run_window`).
+        self._provider_circuit = ProviderCircuit()
         self.log = logging.getLogger(__name__)
 
     # -- entry point --------------------------------------------------------
@@ -167,6 +182,8 @@ class PipelineOrchestrator:
         window_start = target_date - timedelta(days=max(lookback_days, 0))
         window = [window_start + timedelta(days=offset)
                   for offset in range((target_date - window_start).days + 1)]
+        # Cycle-local by construction: a new cycle is a new, closed circuit.
+        self._provider_circuit = ProviderCircuit()
 
         summary = {
             "run_id": None,
@@ -244,6 +261,16 @@ class PipelineOrchestrator:
                                       "error": stop.message,
                                       "stopped_run": True})
 
+        summary["provider_circuit"] = self._provider_circuit.report(blocked=[
+            item["lecture_id"] for item in outcomes.values()
+            if item.get("error_code") == PROVIDER_CONFIGURATION_BLOCKED])
+        if self._provider_circuit.is_open:
+            summary["errors"].append({
+                "error_code": PROVIDER_CONFIGURATION_ERROR, "stage": "QA_EVALUATION",
+                "stopped_run": False,
+                "error": "the QA model provider refused the configured credential; "
+                         "no further provider calls were made this cycle"})
+
         # -- 7. reconcile the day again --------------------------------------
         final = self._resolve_window(connection, window, lecture_ids)
         summary["final"] = _snapshot(final)
@@ -291,7 +318,8 @@ class PipelineOrchestrator:
                 legacy_rows_written=summary["legacy_rows_written"],
                 metadata={"passes": summary["passes"],
                           "idempotent": summary["idempotent"],
-                          "day_stages": summary["day_stages"]})
+                          "day_stages": summary["day_stages"],
+                          "provider_circuit": summary["provider_circuit"]})
         return summary
 
     # -- the pass loop ------------------------------------------------------
@@ -396,6 +424,17 @@ class PipelineOrchestrator:
             outcome["error_code"] = "DRY_RUN"
             return False
 
+        if action in PROVIDER_ACTIONS and self._provider_circuit.is_open:
+            # The credential was refused earlier in this cycle. No call, no
+            # attempt row, no budget: the lecture is left exactly where it
+            # was, for the next cycle.
+            outcome["status"] = ITEM_BLOCKED
+            outcome["error_code"] = PROVIDER_CONFIGURATION_BLOCKED
+            outcome["error_message"] = ("the QA model provider refused the credential "
+                                        "earlier in this cycle; no call was made")
+            outcome["retryable"] = True
+            return False
+
         session_date = _date.fromisoformat(state["session_date"])
         scope = self.runner.scope_of(action)
         if scope == "DAY":
@@ -444,6 +483,11 @@ class PipelineOrchestrator:
             return False
         except PlatformError as exc:
             self._record_failure(outcome, exc.code, str(exc))
+            if exc.code == PROVIDER_CONFIGURATION_ERROR_CODE:
+                # No usable key at all. Same answer for every lecture.
+                self._provider_circuit.open(
+                    lecture_id=lecture_id, failure_class=PROVIDER_CONFIGURATION_ERROR,
+                    http_status=None, provider_error_code=exc.code)
             if exc.code in WRITER_INTEGRITY_CODES:
                 raise _RunStopped(RUN_BLOCKED_WRITER_INTEGRITY, exc.code,
                                   str(exc)) from exc
@@ -454,6 +498,16 @@ class PipelineOrchestrator:
             self._record_failure(outcome, type(exc).__name__, str(exc))
             return False
 
+        failure = result.get("provider_configuration_failure")
+        if failure:
+            # Recorded on this lecture (its attempt row is written, and spends
+            # nothing); every other lecture of the cycle is spared the call.
+            self._provider_circuit.open(**{"lecture_id": lecture_id, **failure})
+            outcome["error_code"] = PROVIDER_CONFIGURATION_ERROR
+            outcome["error_message"] = (
+                "the QA model provider refused the credential "
+                f"(HTTP {failure.get('http_status')})")
+            outcome["retryable"] = True
         outcome["actions"].append(action)
         outcome["graph_calls"] += result.get("graph_calls", 0)
         outcome["provider_calls"] += result.get("provider_calls", 0)

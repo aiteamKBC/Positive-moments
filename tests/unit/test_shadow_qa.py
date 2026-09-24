@@ -350,7 +350,13 @@ def test_missing_duration_is_not_delivered():
 def test_short_session_never_calls_the_model():
     provider = StubProvider(good_output())
     evaluations = StubEvaluations()
-    summary = service([package(duration_minutes=13)], provider, evaluations).run_day(
+    # A genuinely short session: the CALL is short too. (A 13 minute transcript
+    # on a call spanning the whole schedule is a different case since
+    # delivery_coverage_guard_v1 - see tests/unit/test_delivery_coverage_guard.py.)
+    short = package(duration_minutes=13, duration_seconds=780,
+                    actual_end=datetime(2026, 9, 4, 9, 13, tzinfo=timezone.utc),
+                    last_cue_end_ms=780_000)
+    summary = service([short], provider, evaluations).run_day(
         None, TARGET, execute=True)
     assert provider.calls == 0
     assert summary["provider_calls"] == 0

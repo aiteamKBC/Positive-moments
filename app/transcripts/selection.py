@@ -12,14 +12,22 @@ trailing `Z`, and compensated for that. The new platform reads canonical
 NOT recreated. Every comparison below is on timezone-aware instants; only the
 business-date filter uses Africa/Cairo.
 """
+import hashlib
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.common.time import CAIRO
+from app.transcripts.identity import canonical_key
 
 
 SELECTION_VERSION = "legacy_qa_v8_overlap_cluster_v1"
+
+# Versions the definition of "the evidence this selection was made from". It is
+# NOT the selection algorithm: the parts chosen are exactly what they were. It
+# is what lets freshness be judged on the inputs that can change the answer
+# rather than on when Graph last happened to be asked for them.
+SELECTION_INPUT_FINGERPRINT_VERSION = "selection_input_fingerprint_v1"
 
 # Occurrence window, exactly as the legacy export defines it.
 WINDOW_BEFORE = timedelta(hours=2)
@@ -102,6 +110,108 @@ def _prepare(candidate: CandidateArtifact) -> RankedCandidate | None:
     )
 
 
+@dataclass(frozen=True)
+class RelevantCandidates:
+    """The part of the candidate pool that can influence ONE occurrence."""
+
+    candidates: list[CandidateArtifact]
+    same_day_count: int
+    fingerprint: str
+
+
+def relevant_candidates(
+    candidates: list[CandidateArtifact],
+    *,
+    scheduled_start: datetime,
+    scheduled_end: datetime,
+    target_date: date,
+    meeting_id: str | None = None,
+) -> RelevantCandidates:
+    """
+    Steps 1 and 2 of Select Transcript Parts V3, and nothing else.
+
+    This is the ONE definition of "transcript evidence relevant to this lecture
+    occurrence". The selector draws its parts from it and the pipeline state
+    resolver judges freshness by it, so the two cannot disagree about what a
+    selection was made from.
+
+    It exists because a Teams series meeting lists the transcripts of every
+    occurrence: Phase 2A links all of them to each lecture of the series. The
+    09-11 and 09-18 transcripts of a weekly class are candidates of the 09-04
+    lecture, and they can never be selected for it - the Cairo date filter
+    rejects them first. Letting them decide whether 09-04 is stale was the bug.
+    """
+    same_day: list[CandidateArtifact] = []
+    for candidate in candidates:
+        if candidate.provider_created_at is None:
+            continue
+        if meeting_id and candidate.meeting_id and candidate.meeting_id != meeting_id:
+            continue
+        if cairo_date_of(candidate.provider_created_at) != target_date:
+            continue
+        same_day.append(candidate)
+
+    window_start = scheduled_start - WINDOW_BEFORE
+    window_end = scheduled_end + WINDOW_AFTER
+    relevant: list[CandidateArtifact] = []
+    for candidate in same_day:
+        item = _prepare(candidate)
+        if item is None:
+            continue
+        if item.end >= window_start and item.start <= window_end:
+            relevant.append(candidate)
+    return RelevantCandidates(candidates=relevant, same_day_count=len(same_day),
+                              fingerprint=selection_input_fingerprint(relevant))
+
+
+def selection_input_fingerprint(candidates: list[CandidateArtifact]) -> str:
+    """
+    SHA-256 over exactly what can change a selection, for the relevant set.
+
+    Per candidate: the CANONICAL transcript identity (so a Graph
+    re-serialization of the same transcript is the same input), the provider
+    timing the selector ranks and clusters on, the call id it attaches parts
+    by, and the current content hash. Sorted, so candidate order is not an
+    input. Deliberately absent: artifact ids, fetch and first/last-seen times.
+    Re-fetching identical bytes changes none of these, so it cannot make a
+    selection stale; a new relevant transcript or revised content always does.
+    """
+    lines = sorted(
+        "|".join((
+            canonical_key(candidate.provider_transcript_id),
+            _instant(candidate.provider_created_at),
+            _instant(candidate.provider_end_at),
+            candidate.provider_call_id or "",
+            candidate.content_sha256 or "",
+        ))
+        for candidate in candidates
+    )
+    digest = hashlib.sha256()
+    digest.update(f"version:{SELECTION_INPUT_FINGERPRINT_VERSION}\n".encode())
+    digest.update(f"selection:{SELECTION_VERSION}\n".encode())
+    for line in lines:
+        digest.update(f"candidate:{line}\n".encode())
+    return digest.hexdigest()
+
+
+def combined_source_fingerprint(selection_version: str, part_content_sha256s) -> str:
+    """
+    The Phase 2B combined transcript's `source_fingerprint`: the selection
+    version plus each selected part's content hash, in part order. Defined once
+    so the state resolver can ask "would recombining produce different bytes?"
+    of a selection persisted before input fingerprints existed.
+    """
+    return hashlib.sha256(
+        "\0".join([selection_version] + [sha or "" for sha in part_content_sha256s])
+        .encode("utf-8")).hexdigest()
+
+
+def _instant(value: datetime | None) -> str:
+    # Normalised to UTC so the same instant always hashes the same, whatever
+    # session time zone the driver happened to hand it back in.
+    return "" if value is None else value.astimezone(timezone.utc).isoformat()
+
+
 def select_transcript_parts(
     candidates: list[CandidateArtifact],
     *,
@@ -127,35 +237,23 @@ def select_transcript_parts(
         "occurrence_window_candidate_count": 0,
     }
     if not candidates:
+        diagnostics["selection_input_fingerprint"] = selection_input_fingerprint([])
+        diagnostics["selection_input_fingerprint_version"] = SELECTION_INPUT_FINGERPRINT_VERSION
         return SelectionResult(NO_CANDIDATES, diagnostics=diagnostics)
 
-    # --- Step 1: same meeting (when both sides carry it) + same Cairo date ---
-    same_day: list[CandidateArtifact] = []
-    for candidate in candidates:
-        if candidate.provider_created_at is None:
-            continue
-        if meeting_id and candidate.meeting_id and candidate.meeting_id != meeting_id:
-            continue
-        if cairo_date_of(candidate.provider_created_at) != target_date:
-            continue
-        same_day.append(candidate)
-    diagnostics["same_day_candidate_count"] = len(same_day)
-    if not same_day:
+    # --- Steps 1-2: the candidates relevant to THIS occurrence --------------
+    relevance = relevant_candidates(
+        candidates, scheduled_start=scheduled_start, scheduled_end=scheduled_end,
+        target_date=target_date, meeting_id=meeting_id)
+    diagnostics["same_day_candidate_count"] = relevance.same_day_count
+    diagnostics["occurrence_window_candidate_count"] = len(relevance.candidates)
+    diagnostics["selection_input_fingerprint"] = relevance.fingerprint
+    diagnostics["selection_input_fingerprint_version"] = SELECTION_INPUT_FINGERPRINT_VERSION
+    if not relevance.same_day_count:
         return SelectionResult(NO_SAME_DAY_CANDIDATES, diagnostics=diagnostics)
-
-    # --- Step 2: occurrence window, 2h before start .. 3h after end ---------
-    window_start = scheduled_start - WINDOW_BEFORE
-    window_end = scheduled_end + WINDOW_AFTER
-    prepared: list[RankedCandidate] = []
-    for candidate in same_day:
-        item = _prepare(candidate)
-        if item is None:
-            continue
-        if item.end >= window_start and item.start <= window_end:
-            prepared.append(item)
-    diagnostics["occurrence_window_candidate_count"] = len(prepared)
-    if not prepared:
+    if not relevance.candidates:
         return SelectionResult(NO_WINDOW_CANDIDATES, diagnostics=diagnostics)
+    prepared = [_prepare(candidate) for candidate in relevance.candidates]
 
     # Chronological order first, exactly as the legacy node does before ranking.
     prepared.sort(key=lambda item: item.start)
