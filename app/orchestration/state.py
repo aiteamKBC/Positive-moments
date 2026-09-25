@@ -33,6 +33,8 @@ Nothing in this module writes, calls Graph, calls a provider, or reads
 and it is injected, never constructed here - see `attendance_probe`.
 """
 from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 
 from app.attendance.coverage import is_authoritative
 from app.attendance.roster import ATTENDANCE_RESOLUTION_VERSION
@@ -61,6 +63,7 @@ from app.orchestration.stages import (
     EXCEL_SYNC,
     FAILED,
     LEGACY_QA_SYNC,
+    LINK_RECORDING,
     MANUAL_REVIEW_REQUIRED,
     MEETING,
     MISSING,
@@ -106,6 +109,7 @@ from app.qa.recovery import recovery_state
 from app.qa.inputs import attendance_flag
 from app.qa.structured_output import DEFAULT_PROVIDER_CONTRACT
 from app.qa.provider import PROVIDER_CONFIGURATION_ERROR
+from app.recordings.models import NO_RECORDING_EXPECTED_CANCELLED
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
 from app.transcripts.identity import canonical_key
@@ -316,7 +320,10 @@ class PipelineStateResolver:
                  legacy_observations=None,
                  attendance_probe=None,
                  duplicate_service=None,
-                 selection_repository=None):
+                 selection_repository=None,
+                 recording_link_mode: str = "observe",
+                 recording_links=None,
+                 clock=None):
         self.selection_version = selection_version
         self.parser_versions = list(parser_versions)
         self.speaker_inventory_version = speaker_inventory_version
@@ -336,6 +343,15 @@ class PipelineStateResolver:
         # transcript ids included. Freshness is judged on the evidence the
         # selector would actually see, never on a second reading of it.
         self.selection_repository = selection_repository or TranscriptSelectionRepository()
+        # RECORDING_LINK. "observe" never reads lecture_recording_links.
+        self.recording_link_mode = recording_link_mode
+        # Until the stage is armed it is observed exactly as in Phase 4A: its
+        # wait is reported, and never becomes the lecture's executable action.
+        self.observed_only_stages = (
+            OBSERVED_ONLY_STAGES if recording_link_mode == "write"
+            else OBSERVED_ONLY_STAGES | {RECORDING_LINK})
+        self.recording_links = recording_links
+        self.clock = clock
 
     # -- entry points -------------------------------------------------------
 
@@ -410,7 +426,8 @@ class PipelineStateResolver:
         perfect_sync, perfect_key = self._perfect_sync(
             connection, lecture, perfect_result)
         stages[PERFECT_SYNC] = perfect_sync
-        stages[RECORDING_LINK] = self._recording_link(connection, legacy_session_id)
+        stages[RECORDING_LINK] = self._recording_link(connection, lecture,
+                                                      legacy_session_id)
         stages[EXCEL_SYNC] = self._excel_sync(connection, perfect_result, perfect_key)
 
         headline, runnable, operator_actions = self._next_action(stages)
@@ -418,7 +435,7 @@ class PipelineStateResolver:
         executable_action, executable_stage = runnable
         executable = (NOTHING_TO_DO
                       if executable_stage is None
-                      or executable_stage in OBSERVED_ONLY_STAGES
+                      or executable_stage in self.observed_only_stages
                       else executable_action)
         lecture.pop("_occurrence", None)
         return {
@@ -1096,7 +1113,22 @@ class PipelineStateResolver:
         return _stage(MISSING, action=SYNC_PERFECT, legacy_lecture_key=key,
                       coded_owned=False), key
 
-    def _recording_link(self, connection, legacy_session_id) -> dict:
+    def _recording_link(self, connection, lecture, legacy_session_id) -> dict:
+        """
+        The recording link carried by this lecture's legacy QA row.
+
+        Present -> COMPLETE, whoever wrote it; it is never re-evaluated.
+        Cancelled / non-delivered -> NOT_APPLICABLE: no recording is expected,
+        so a missing one is not a defect and is never retried.
+
+        Otherwise it depends on RECORDING_LINK_MODE. In "observe" mode this is
+        exactly the Phase 4A answer - MISSING / WAIT_FOR_RECORDING, owned by the
+        n8n branch - and `lecture_recording_links` is not even read, so the
+        code is safe to deploy before migration 021. In "write" mode the
+        stage's own durable state decides: nothing yet, or a retry that is
+        due -> LINK_RECORDING; a retry not yet due -> WAITING; a terminal
+        outcome -> REVIEW_REQUIRED until an operator acts.
+        """
         if legacy_session_id is None or self.legacy_observations is None:
             return _stage(NOT_APPLICABLE, reason="NO_LEGACY_QA_ROW")
         observed = self.legacy_observations.recording_link(
@@ -1104,14 +1136,52 @@ class PipelineStateResolver:
         if observed is None:
             return _stage(NOT_APPLICABLE, reason="LEGACY_ROW_NOT_FOUND",
                           legacy_session_id=legacy_session_id)
-        if observed.get("recording_url"):
-            return _stage(COMPLETE, legacy_session_id=legacy_session_id,
+        writable = self.recording_link_mode == "write"
+        attempt = (self._recording_links().attempt(connection, lecture["lecture_id"])
+                   if writable else None)
+        if str(observed.get("recording_url") or "").strip():
+            owner = ("CODED_RECORDING_LINK"
+                     if attempt and attempt.get("recording_url_written")
+                     else "LEGACY_RECORDING_BRANCH")
+            return _stage(COMPLETE, legacy_session_id=legacy_session_id, owner=owner)
+        legacy_cancelled = str(observed.get("cancelled_session") or "").strip().lower() == "true"
+        if lecture.get("is_cancelled") or legacy_cancelled:
+            return _stage(NOT_APPLICABLE, reason=NO_RECORDING_EXPECTED_CANCELLED,
+                          legacy_session_id=legacy_session_id,
+                          cancelled_source=("LECTURE_CANCELLED" if lecture.get("is_cancelled")
+                                            else "LEGACY_ROW_CANCELLED_SESSION"))
+        if not writable:
+            # Observed only: the n8n recording branch still owns the write.
+            return _stage(MISSING, action=WAIT_FOR_RECORDING,
+                          legacy_session_id=legacy_session_id,
                           owner="LEGACY_RECORDING_BRANCH")
-        # Observed only. The recording branch of QA Master Daily v8 owns this
-        # and is live; the coded platform reports the gap and triggers nothing.
-        return _stage(MISSING, action=WAIT_FOR_RECORDING,
-                      legacy_session_id=legacy_session_id,
-                      owner="LEGACY_RECORDING_BRANCH")
+        detail = {"legacy_session_id": legacy_session_id, "owner": "CODED_RECORDING_LINK"}
+        if attempt is None or attempt.get("legacy_session_id") != legacy_session_id:
+            return _stage(MISSING, action=LINK_RECORDING, **detail)
+        last = {"last_status": attempt["status"], "attempt_count": attempt["attempt_count"]}
+        if attempt.get("recording_url_written"):
+            # We wrote a link and it is gone. Re-linking automatically would
+            # overrule whoever cleared it.
+            return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                          reason="RECORDING_URL_CLEARED_AFTER_CODED_WRITE", **detail, **last)
+        if attempt["stage_state"] == REVIEW_REQUIRED:
+            return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
+                          reason=attempt["status"], review_detail=attempt.get("reason"),
+                          **detail, **last)
+        due = attempt.get("next_attempt_after")
+        if attempt["stage_state"] == WAITING and due is not None and due > self._now():
+            return _stage(WAITING, action=WAIT_FOR_RECORDING,
+                          next_attempt_after=due.isoformat(), **detail, **last)
+        return _stage(MISSING, action=LINK_RECORDING, **detail, **last)
+
+    def _recording_links(self):
+        if self.recording_links is None:
+            from app.db.repositories.recording_links import RecordingLinkRepository
+            self.recording_links = RecordingLinkRepository()
+        return self.recording_links
+
+    def _now(self):
+        return self.clock() if self.clock else _datetime.now(_timezone.utc)
 
     def _excel_sync(self, connection, perfect_result, perfect_key) -> dict:
         if perfect_result is None or not perfect_result["is_perfect"]:

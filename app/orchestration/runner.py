@@ -106,6 +106,8 @@ from app.orchestration.stages import (
     BUILD_CANONICAL_CUES,
     CALCULATE_ENGAGEMENT,
     EVALUATE_PERFECT,
+    LINK_RECORDING,
+    RECORDING_LINK,
     RECOVER_ATTENDANCE,
     REFRESH_DETERMINISTIC_QA,
     RENDER_QA,
@@ -163,17 +165,20 @@ ACTION_SCOPE = {
     # actions in this table that touch a legacy production row.
     SYNC_LEGACY_QA: LECTURE_SCOPE,
     SYNC_PERFECT: LECTURE_SCOPE,
+    # Lecture-scoped: one organizer Graph lookup, DriveItem discovery, and at
+    # most one guarded write of the recording-owned columns.
+    LINK_RECORDING: LECTURE_SCOPE,
 }
 
 # Actions that would cost a Graph call or a paid generation. Listed explicitly
 # so the gates are auditable rather than implied by which service is built.
-GRAPH_ACTIONS = frozenset({ACQUIRE_TRANSCRIPT})
+GRAPH_ACTIONS = frozenset({ACQUIRE_TRANSCRIPT, LINK_RECORDING})
 PROVIDER_ACTIONS = frozenset({RUN_QA})
 # Actions that can write a legacy production row. Gated separately from
 # Graph and the provider because the risk is different in kind: money is
 # recoverable, a corrupted production row shared with a live n8n pipeline
 # is not.
-LEGACY_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT})
+LEGACY_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT, LINK_RECORDING})
 
 
 class StageNotAutomatable(RuntimeError):
@@ -222,7 +227,12 @@ class StageRunner:
                 self.allow_legacy_writes and self.persist):
             # A dry run can never reach a legacy table, whatever it is asked.
             return False
+        if action == LINK_RECORDING and not self._recording_links_armed():
+            return False
         return True
+
+    def _recording_links_armed(self) -> bool:
+        return bool(getattr(self.settings, "recording_links_writable", False))
 
     def refusal_reason(self, action: str) -> str:
         if action not in ACTION_SCOPE:
@@ -234,6 +244,8 @@ class StageRunner:
         if action in LEGACY_WRITE_ACTIONS and not (
                 self.allow_legacy_writes and self.persist):
             return "LEGACY_WRITES_DISABLED_FOR_THIS_RUN"
+        if action == LINK_RECORDING and not self._recording_links_armed():
+            return "RECORDING_LINK_MODE_IS_NOT_WRITE"
         return "ACTION_NOT_AUTOMATED"
 
     # -- dispatch -----------------------------------------------------------
@@ -466,6 +478,37 @@ class StageRunner:
         if written["verification_failures"]:
             raise ManualReviewRequired("WRITE_VERIFICATION_FAILED")
         return _outcome(outcome)
+
+    # -- RECORDING_LINK ---------------------------------------------------------
+
+    def _link_recording(self, connection, lecture_id, session_date) -> dict:
+        """
+        Link ONE lecture's recording through app/recordings.
+
+        The stage is re-derived here from the same resolver the orchestrator
+        used, so the legacy row this writes to is the resolver's own answer
+        (coded-owned or foreign-same-occurrence), never a second derivation.
+        If the resolver no longer offers LINK_RECORDING, nothing happens.
+        """
+        from app.db.repositories.pipeline_observations import LegacyObservationRepository
+        from app.orchestration.state import PipelineStateResolver
+
+        state = PipelineStateResolver(
+            legacy_observations=LegacyObservationRepository(),
+            perfect_eligibility_version=self.perfect_eligibility_version,
+            recording_link_mode="write").for_lecture(connection, lecture_id)
+        stage = state["stages"][RECORDING_LINK]
+        if stage.get("action") != LINK_RECORDING:
+            return _outcome({"status": "NOOP", "reason": stage.get("reason"),
+                             "stage_state": stage["state"]})
+        service = self._recording_link_service()
+        outcome = service.link(connection, lecture_id, stage["legacy_session_id"],
+                               write=self.persist, persist=self.persist)
+        return _outcome(outcome, graph_calls=outcome.get("graph_calls", 0))
+
+    def _recording_link_service(self):
+        from app.recordings.factory import build_recording_link_service
+        return build_recording_link_service(self.settings)
 
     def _only_lecture(self, plan: dict, lecture_id) -> dict:
         rows = [row for row in plan.get("lectures", [])

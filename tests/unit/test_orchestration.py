@@ -559,7 +559,7 @@ def test_an_unsafe_writer_decision_reaches_a_human_rather_than_a_write():
 
 
 def test_both_legacy_write_actions_are_automatable_but_still_production_writes():
-    assert PRODUCTION_WRITE_ACTIONS == {SYNC_LEGACY_QA, SYNC_PERFECT}
+    assert PRODUCTION_WRITE_ACTIONS == {SYNC_LEGACY_QA, SYNC_PERFECT, "LINK_RECORDING"}
     assert PRODUCTION_WRITE_ACTIONS <= AUTOMATABLE_ACTIONS
     # Nothing is operator-only any more, and the concept is kept so re-gating
     # an action later is one line rather than a rewrite.
@@ -856,9 +856,10 @@ def test_legacy_writes_can_be_switched_off_for_a_real_run_too():
     assert runner.can_run(CALCULATE_ENGAGEMENT) is True
 
 
-def test_only_one_action_costs_a_generation_and_only_one_costs_graph():
+def test_only_one_action_costs_a_generation_and_only_two_cost_graph():
     assert PROVIDER_ACTIONS == {RUN_QA}
-    assert GRAPH_ACTIONS == {ACQUIRE_TRANSCRIPT}
+    # LINK_RECORDING: one organizer recordings lookup plus DriveItem discovery.
+    assert GRAPH_ACTIONS == {ACQUIRE_TRANSCRIPT, "LINK_RECORDING"}
 
 
 def test_force_reprocess_is_defined_but_unreachable_from_the_scheduler():

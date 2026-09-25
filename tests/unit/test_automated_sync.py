@@ -246,7 +246,9 @@ def test_no_date_wide_legacy_writer_exists_anywhere_in_orchestration():
 # --- the action model ------------------------------------------------------------
 
 def test_the_two_syncs_are_automatable_and_still_flagged_as_production_writes():
-    assert PRODUCTION_WRITE_ACTIONS == {SYNC_LEGACY_QA, SYNC_PERFECT}
+    # LINK_RECORDING joined when the coded RECORDING_LINK stage replaced the
+    # n8n recording branch; it is a legacy write and is flagged as one.
+    assert PRODUCTION_WRITE_ACTIONS == {SYNC_LEGACY_QA, SYNC_PERFECT, "LINK_RECORDING"}
     assert PRODUCTION_WRITE_ACTIONS <= AUTOMATABLE_ACTIONS
     assert PRODUCTION_WRITE_ACTIONS == LEGACY_WRITE_ACTIONS
     assert OPERATOR_ONLY_ACTIONS == frozenset()

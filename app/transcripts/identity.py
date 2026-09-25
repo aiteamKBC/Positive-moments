@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 import struct
 from dataclasses import dataclass
 
@@ -120,6 +121,28 @@ def canonical_key(raw_id) -> str:
 def same_transcript(left, right) -> bool:
     """Whether two raw ids denote the same transcript."""
     return canonical_key(left) == canonical_key(right)
+
+
+# A Teams transcript id names its call: `<call id>-<sequence>-TranscriptV2`.
+_TRANSCRIPT_CALL_ID = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-\d+-TranscriptV2",
+    re.IGNORECASE)
+
+
+def teams_call_id(raw_id) -> str | None:
+    """
+    The Teams call id a raw Graph transcript id belongs to, or None.
+
+    Derived only from a completely decoded identity - the same decoder, and
+    the same refusal to guess, as `canonical_key`. An id that keeps a RAW
+    identity, or whose transcript field is not a `…-TranscriptV2` id, has no
+    call id: callers must treat that as unknown, never as a match.
+    """
+    identity = canonical_transcript_identity(raw_id)
+    if not identity.decoded:
+        return None
+    match = _TRANSCRIPT_CALL_ID.fullmatch(identity.transcript_id or "")
+    return match.group(1).lower() if match else None
 
 
 # ---------------------------------------------------------------------------

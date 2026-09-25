@@ -68,11 +68,16 @@ STAGE_ORDER = (
     LEGACY_QA_SYNC, PERFECT_SYNC, RECORDING_LINK, EXCEL_SYNC,
 )
 
-# Phase 4A OBSERVES these two; it never runs them. The recording branch of QA
-# Master Daily v8 still owns recording links, and "QA Perfect Lectures - Excel
-# Sync" still owns the Perfect export. Both are live and both are correct, so
-# the coded platform reports their state and stays out of their way.
-OBSERVED_ONLY_STAGES = frozenset({RECORDING_LINK, EXCEL_SYNC})
+# Phase 4A OBSERVES these; it never runs them. "QA Perfect Lectures - Excel
+# Sync" still owns the Perfect export, so the coded platform reports its state
+# and stays out of its way.
+#
+# RECORDING_LINK left this set when the coded stage replaced the recording
+# branch of QA Master Daily v8 (app/recordings). Whether it may WRITE is a
+# separate, default-off switch (RECORDING_LINK_MODE): in "observe" mode the
+# resolver still answers WAIT_FOR_RECORDING exactly as before, so enabling the
+# code changes nothing until an operator arms it.
+OBSERVED_ONLY_STAGES = frozenset({EXCEL_SYNC})
 
 # The stages the orchestrator may itself execute.
 EXECUTABLE_STAGES = tuple(stage for stage in STAGE_ORDER
@@ -133,6 +138,10 @@ RECOVER_ATTENDANCE = "RECOVER_ATTENDANCE"
 EVALUATE_PERFECT = "EVALUATE_PERFECT"
 SYNC_PERFECT = "SYNC_PERFECT"
 WAIT_FOR_RECORDING = "WAIT_FOR_RECORDING"
+# Evaluate ONE lecture's recording (organizer Graph lookup, DriveItem
+# discovery, exact matching) and, for an exact match, write the six
+# recording-owned columns through the guarded writer in app/recordings.
+LINK_RECORDING = "LINK_RECORDING"
 WAIT_FOR_EXCEL_SYNC = "WAIT_FOR_EXCEL_SYNC"
 NOTHING_TO_DO = "NOTHING_TO_DO"
 MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
@@ -143,8 +152,8 @@ NEXT_ACTIONS = (
     CALCULATE_ENGAGEMENT, RUN_QA, REFRESH_DETERMINISTIC_QA, REVALIDATE_EVIDENCE,
     RENDER_QA, SUPPRESS_DUPLICATE_EVENT, SYNC_LEGACY_QA,
     WAIT_FOR_ATTENDANCE_SOURCE, RECOVER_ATTENDANCE,
-    EVALUATE_PERFECT, SYNC_PERFECT, WAIT_FOR_RECORDING, WAIT_FOR_EXCEL_SYNC,
-    NOTHING_TO_DO, MANUAL_REVIEW_REQUIRED,
+    EVALUATE_PERFECT, SYNC_PERFECT, WAIT_FOR_RECORDING, LINK_RECORDING,
+    WAIT_FOR_EXCEL_SYNC, NOTHING_TO_DO, MANUAL_REVIEW_REQUIRED,
 )
 
 # Actions the scheduler is allowed to perform without an operator. Everything
@@ -160,6 +169,9 @@ AUTOMATABLE_ACTIONS = frozenset({
     # planner has produced that decision under DRY_RUN. Anything else becomes
     # MANUAL_REVIEW_REQUIRED with the writer's own reason code.
     SYNC_LEGACY_QA, SYNC_PERFECT,
+    # Only ever offered when RECORDING_LINK_MODE=write, and the write itself
+    # happens only for an exact, unique, organizer-verified match.
+    LINK_RECORDING,
 })
 
 # Actions that mean "nothing for anyone to do right now". They are successful
@@ -173,7 +185,7 @@ IDLE_ACTIONS = frozenset({
 # ownership-aware, still routed through the existing guarded writers - and
 # since Phase 4B, performable by the scheduler when the writer's own planner
 # says the decision is a clean insert or a true no-op.
-PRODUCTION_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT})
+PRODUCTION_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT, LINK_RECORDING})
 
 # Actions no automated path may ever take. Empty since Phase 4B, and kept
 # because the concept is load-bearing: the executable search consults it, so

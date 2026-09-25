@@ -33,7 +33,8 @@ from app.orchestration.scheduler import SchedulerConfig, SchedulerService
 from app.orchestration.state import PipelineStateResolver
 
 
-def build_resolver(*, probe: bool = False, perfect_eligibility_version=None):
+def build_resolver(*, probe: bool = False, perfect_eligibility_version=None,
+                   recording_link_mode: str = "observe"):
     """
     The state resolver, optionally able to notice that attendance has arrived.
 
@@ -50,7 +51,13 @@ def build_resolver(*, probe: bool = False, perfect_eligibility_version=None):
              if perfect_eligibility_version else {})
     return PipelineStateResolver(
         legacy_observations=LegacyObservationRepository(),
-        attendance_probe=attendance_probe, **extra)
+        attendance_probe=attendance_probe,
+        recording_link_mode=recording_link_mode, **extra)
+
+
+def _recording_link_mode(settings) -> str:
+    """The scheduler, backfill and CLI all read the one switch the same way."""
+    return getattr(settings, "recording_link_mode", "observe") or "observe"
 
 
 def build_discovery_service(settings):
@@ -87,7 +94,8 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
     if probe_attendance is None:
         probe_attendance = dry_run
     resolver = build_resolver(probe=probe_attendance,
-                              perfect_eligibility_version=perfect_eligibility_version)
+                              perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=_recording_link_mode(settings))
     runner = StageRunner(
         settings=settings, allow_graph=allow_graph and not dry_run,
         allow_provider=allow_provider and not dry_run,
@@ -118,8 +126,10 @@ def build_scheduler(settings, *, config: SchedulerConfig | None = None,
     return SchedulerService(orchestrator=orchestrator, config=config)
 
 
-def build_operations(*, perfect_eligibility_version=None) -> OperationsService:
-    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version)
+def build_operations(*, perfect_eligibility_version=None,
+                     recording_link_mode: str = "observe") -> OperationsService:
+    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=recording_link_mode)
     return OperationsService(
         resolver=resolver, run_repository=PipelineRunRepository(),
         reconciliation=DayReconciliation(resolver=resolver),
@@ -138,7 +148,8 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
     instance would mean the attendance button inherited whatever gates the
     retry button happened to need.
     """
-    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version)
+    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=_recording_link_mode(settings))
 
     def orchestrator_factory(*, allow_provider: bool = True):
         return build_orchestrator(
@@ -151,7 +162,8 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
     return GuardedActionService(
         resolver=resolver,
         operations=build_operations(
-            perfect_eligibility_version=perfect_eligibility_version),
+            perfect_eligibility_version=perfect_eligibility_version,
+            recording_link_mode=_recording_link_mode(settings)),
         orchestrator_factory=orchestrator_factory)
 
 
@@ -176,7 +188,8 @@ def build_backfill_preview(settings, *, discover: bool = True,
 
     return BackfillPreviewService(
         resolver=build_resolver(
-            probe=True, perfect_eligibility_version=perfect_eligibility_version),
+            probe=True, perfect_eligibility_version=perfect_eligibility_version,
+            recording_link_mode=_recording_link_mode(settings)),
         discovery_service=build_discovery_service(settings) if discover else None,
         preflight=LegacyQaPreflight(
             gateway=N8nReadOnlyGateway.from_environment(), required=False))

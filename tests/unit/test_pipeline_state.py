@@ -911,7 +911,13 @@ def test_a_pending_excel_sync_is_reported_and_owned_by_the_legacy_workflow():
 
 
 def test_the_observed_stages_are_exactly_the_two_legacy_workflows_own():
-    assert OBSERVED_ONLY_STAGES == {RECORDING_LINK, EXCEL_SYNC}
+    # Statically only Excel Sync. RECORDING_LINK is observed-only until
+    # RECORDING_LINK_MODE=write arms the coded stage - the default resolver
+    # still treats it exactly as Phase 4A did.
+    assert OBSERVED_ONLY_STAGES == {EXCEL_SYNC}
+    assert PipelineStateResolver().observed_only_stages == {RECORDING_LINK, EXCEL_SYNC}
+    assert PipelineStateResolver(
+        recording_link_mode="write").observed_only_stages == {EXCEL_SYNC}
 
 
 # --- the resume rule itself --------------------------------------------------

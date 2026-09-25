@@ -1,3 +1,4 @@
+import json
 import urllib.request
 
 from app.graph.transport import GraphAppClient, GraphError, GraphResponse
@@ -5,6 +6,25 @@ from app.graph.transport import GraphAppClient, GraphError, GraphResponse
 
 class Phase1GraphClient(GraphAppClient):
     """Graph client extension supporting safe request headers for discovery."""
+
+    def post_json(self, path: str, body: dict) -> dict:
+        """
+        POST a JSON body under MICROSOFT_GRAPH_BASE_URL and return the JSON reply.
+
+        Used by recording links for `/search/query` (read-only despite the verb)
+        and `createLink`. Same token handling, same base-URL guard, same
+        sanitized errors as every GET.
+        """
+        if path.startswith(("http://", "https://")):
+            raise ValueError("post_json takes a Graph path, not an absolute URL")
+        request = urllib.request.Request(
+            self.base_url + "/" + path.lstrip("/"),
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Authorization": "Bearer " + self._access_token(),
+                     "Accept": "application/json",
+                     "Content-Type": "application/json"},
+            method="POST")
+        return self._open(request, "Microsoft Graph").json()
 
     def request(self, method: str, path_or_url: str, *, accept: str = "application/json", headers=None) -> GraphResponse:
         if path_or_url.startswith(("http://", "https://")):
