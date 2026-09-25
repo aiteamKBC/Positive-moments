@@ -55,4 +55,8 @@ urlpatterns = [
          name="operations-backfill-detail"),
     path("backfills/<uuid:run_id>/cancel/", backfill_views.backfill_cancel_view,
          name="operations-backfill-cancel"),
+    # Recording Links: lecture-level outcomes for one run. Read-only.
+    path("backfills/<uuid:run_id>/recording-links/",
+         backfill_views.backfill_recording_links_view,
+         name="operations-backfill-recording-links"),
 ]

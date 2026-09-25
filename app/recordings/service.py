@@ -181,7 +181,8 @@ class RecordingLinkService:
         outcome["status"], outcome["reason"] = decision.status, decision.reason
         outcome["stage_state"] = decision.stage_state
         if persist:
-            outcome["state"] = self.repository.record(connection, decision,
-                                                      written=outcome["written"])
+            outcome["state"] = self.repository.record(
+                connection, decision, written=outcome["written"],
+                perfect_rows_written=outcome["perfect_rows_written"])
         outcome["graph_calls"] = self.graph_calls
         return outcome

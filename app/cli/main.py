@@ -460,36 +460,18 @@ def _recording_links_preview(settings, args) -> dict:
     writes stage state); a service without a publisher, so no sharing link can
     be created; and nothing is persisted.
     """
-    from app.db.repositories.recording_links import RecordingLinkRepository
-    from app.recordings.factory import build_discovery
-    from app.recordings.graph_lookup import RecordingMetadataGateway
-    from app.recordings.preview import (
-        LiveThenOfflineDiscovery,
-        LiveThenOfflineMetadata,
-        OfflineMetadataGateway,
-        RecordingLinkPreview,
-    )
+    from app.recordings.preview import build_preview
 
     settings.require_database()
-    offline_meta, offline_items = None, None
+    evidence = None
     if args.offline_evidence:
         with open(args.offline_evidence, encoding="utf-8") as handle:
             evidence = json.load(handle)
-        offline_meta = OfflineMetadataGateway(evidence.get("recordings_by_meeting") or {})
-        offline_items = evidence.get("drive_items") or []
-    live_meta = live_discovery = None
-    if args.live_graph:
-        graph = build_graph_client(settings)
-        live_meta = RecordingMetadataGateway(graph)
-        live_discovery = build_discovery(
-            graph, search_region=settings.recording_link_search_region)
-    metadata = LiveThenOfflineMetadata(
-        live_meta, offline_meta or (None if live_meta else OfflineMetadataGateway({})))
-    preview = RecordingLinkPreview(
-        resolver=build_resolver(recording_link_mode="observe"),
-        repository=RecordingLinkRepository(), metadata_gateway=metadata,
-        discovery=LiveThenOfflineDiscovery(live_discovery, offline_items),
-        metadata_evidence=("LIVE" if live_meta else "OFFLINE" if offline_meta else "NONE"))
+    preview = build_preview(
+        settings, resolver=build_resolver(recording_link_mode="observe"),
+        live_graph=bool(args.live_graph),
+        graph=build_graph_client(settings) if args.live_graph else None,
+        offline_evidence=evidence)
     with readonly_database_connection(settings.database_url) as connection:
         connection.prepare_threshold = None
         read_only = connection.execute("SHOW transaction_read_only").fetchone()[0]

@@ -160,6 +160,7 @@ export interface LectureDetail {
   retry_eligibility: RetryEligibility
   force_reprocess_eligibility: ForceReprocessEligibility
   run_history: RunHistoryItem[]
+  recording_link?: RecordingLinkDetail
 }
 
 export interface PipelineRun {
@@ -392,6 +393,8 @@ export interface BackfillDay {
   error_code: string | null
   error_message: string | null
   duration_ms: number | null
+  /** Set when the day's Recording Links evaluation failed; the day itself did not. */
+  recording_error_code?: string | null
 }
 
 export interface BackfillListResponse {
@@ -402,6 +405,126 @@ export interface BackfillListResponse {
 export interface BackfillDetailResponse {
   backfill_run: BackfillRun
   days: BackfillDay[]
+  recording_links?: RecordingLinksSummary
+}
+
+/* ---------------------------------------------------------------------------
+ * Recording Links.
+ *
+ * Every count is made by `app.recordings.coverage.summarize` over rows the
+ * backfill runner stored. `outcome` is that module's one-word partition;
+ * `recording_status` is the stage's own exact status, shown beside it.
+ * ------------------------------------------------------------------------- */
+
+export type RecordingOutcome =
+  | 'ALREADY_LINKED' | 'WRITTEN' | 'EXACT_MATCH' | 'AMBIGUOUS'
+  | 'BLOCKED_BY_EARLIER_STAGE' | 'REVIEW_REQUIRED' | 'NOT_APPLICABLE' | 'NOT_FOUND'
+  | 'GRAPH_LOOKUP_FAILED' | 'DISCOVERY_FAILED' | 'NO_CODED_LECTURE'
+  | 'NO_LEGACY_TARGET' | 'WAITING' | 'NOT_EVALUATED' | 'OTHER'
+
+export interface RecordingCoverage {
+  total: number
+  not_applicable: number
+  eligible: number
+  already_linked: number
+  missing_before: number
+  exact_matched: number
+  would_write: number
+  written: number
+  perfect_rows_updated: number
+  perfect_rows_would_update: number
+  ambiguous: number
+  blocked_by_earlier_stage: number
+  review_required: number
+  not_found: number
+  graph_lookup_failed: number
+  discovery_failed: number
+  no_coded_lecture: number
+  no_legacy_target: number
+  waiting: number
+  not_evaluated: number
+  other: number
+  still_missing_after: number
+  projected_missing_after_write: number
+  coverage_percent_before: number | null
+  coverage_percent_after: number | null
+  projected_coverage_percent: number | null
+  by_outcome: Partial<Record<RecordingOutcome, number>>
+  reconciles: boolean
+  recording_link_modes: string[]
+}
+
+export interface RecordingLinksSummary {
+  coverage: RecordingCoverage
+  evaluation: 'LIVE_PREVIEW' | 'EXECUTE'
+  days_evaluated: number
+  days_with_recording_errors: string[]
+  recording_error_codes: string[]
+  database_writes: number | null
+  sharing_links_created: number | null
+  provider_calls: number
+}
+
+export interface RecordingLinkItem {
+  business_date: string
+  item_key: string
+  lecture_id: string | null
+  subject: string | null
+  population: 'CODED_LECTURE' | 'LEGACY_ROW_ONLY'
+  recording_link_mode: string
+  evaluation: 'LIVE_PREVIEW' | 'EXECUTE'
+  outcome: RecordingOutcome
+  recording_stage_state: StageState | null
+  recording_status: string | null
+  reason: string | null
+  earlier_stage: string | null
+  earlier_action: string | null
+  would_write: boolean
+  written: boolean
+  perfect_row_updated: boolean
+  perfect_row_would_update: boolean
+  /** A folder NAME ("channel_recordings", "onedrive_recordings"), never a location. */
+  source: string | null
+  timestamp_difference_seconds: number | null
+  candidate_file_count: number | null
+  exact_candidate_count: number | null
+  graph_lookup_status: string | null
+  graph_http_status: number | null
+  verification: string | null
+  legacy_cancelled: boolean
+  attempt_count: number | null
+  next_attempt_after: string | null
+  last_attempted_at: string | null
+}
+
+export interface BackfillRecordingLinksResponse {
+  backfill_run_id: string
+  mode: BackfillMode
+  recording_links: RecordingLinksSummary
+  items: RecordingLinkItem[]
+}
+
+/** The lecture detail's Recording Link block. No URL: availability is a yes/no. */
+export interface RecordingLinkDetail {
+  recording_link_mode: string
+  state: StageState | null
+  action: string | null
+  reason: string | null
+  owner: string | null
+  recording_available: boolean
+  last_status: string | null
+  last_reason: string | null
+  last_checked_at: string | null
+  first_checked_at: string | null
+  attempt_count: number | null
+  next_attempt_after: string | null
+  written_by_platform: boolean
+  written_at: string | null
+  source: string | null
+  timestamp_difference_seconds: number | null
+  candidate_file_count: number | null
+  exact_candidate_count: number | null
+  refused_to_guess: boolean
 }
 
 export interface BackfillCreatedResponse {

@@ -71,6 +71,16 @@ SELECT status, stage_state, reason, attempt_count, next_attempt_after,
  WHERE lecture_id = %s
 """
 
+DETAILS = """
+SELECT lecture_id, legacy_session_id, status, stage_state, reason, attempt_count,
+       first_attempted_at, last_attempted_at, next_attempt_after,
+       recording_url_written, written_at, graph_lookup_status, graph_http_status,
+       candidate_file_count, exact_candidate_count, timestamp_difference_seconds,
+       metadata ->> 'source', (metadata ->> 'perfect_rows_written')::int
+  FROM public.lecture_recording_links
+ WHERE lecture_id = ANY(%s::uuid[])
+"""
+
 UPSERT_ATTEMPT = """
 INSERT INTO public.lecture_recording_links (
     lecture_id, legacy_session_id, link_version, status, stage_state, reason,
@@ -230,10 +240,42 @@ class RecordingLinkRepository:
                 "last_attempted_at")
         return dict(zip(keys, row))
 
+    def details(self, connection, lecture_ids) -> dict[str, dict]:
+        """
+        The stage's last evaluation for each lecture, for the Operations console.
+
+        Only what an operator needs to understand the outcome: statuses, counts,
+        timings and the source NAME. No URL, item or drive id, file name or
+        Graph payload leaves this method.
+        """
+        ids = [str(value) for value in lecture_ids if value]
+        if not ids:
+            return {}
+        try:
+            rows = connection.execute(DETAILS, (ids,)).fetchall()
+        except Exception as exc:
+            raise _db("recording link detail read failed") from exc
+        keys = ("lecture_id", "legacy_session_id", "status", "stage_state", "reason",
+                "attempt_count", "first_attempted_at", "last_attempted_at",
+                "next_attempt_after", "recording_url_written", "written_at",
+                "graph_lookup_status", "graph_http_status", "candidate_file_count",
+                "exact_candidate_count", "timestamp_difference_seconds", "source",
+                "perfect_rows_written")
+        found = {}
+        for row in rows:
+            item = dict(zip(keys, row))
+            item["lecture_id"] = str(item["lecture_id"])
+            if item["timestamp_difference_seconds"] is not None:
+                item["timestamp_difference_seconds"] = float(
+                    item["timestamp_difference_seconds"])
+            item["perfect_rows_written"] = int(item["perfect_rows_written"] or 0)
+            found[item["lecture_id"]] = item
+        return found
+
     # -- the stage's own memory ---------------------------------------------
 
     def record(self, connection, decision, *, now: datetime | None = None,
-               written: bool = False) -> dict:
+               written: bool = False, perfect_rows_written: int = 0) -> dict:
         now = now or datetime.now(timezone.utc)
         previous = self.attempt(connection, decision.lecture_id)
         attempts = (previous["attempt_count"] if previous else 0) + 1
@@ -267,7 +309,8 @@ class RecordingLinkRepository:
             "recording_url_written": written, "now": now,
             "next_attempt_after": next_after,
             "written_at": now if written else None,
-            "metadata": Jsonb(decision.attempt_detail()),
+            "metadata": Jsonb({**decision.attempt_detail(),
+                               "perfect_rows_written": int(perfect_rows_written or 0)}),
         }
         try:
             connection.execute(UPSERT_ATTEMPT, params)

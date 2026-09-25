@@ -43,6 +43,10 @@ OFFLINE_VERIFIED = "OFFLINE_VERIFIED"
 NOT_YET_VERIFIED = "NOT_YET_VERIFIED"
 NOT_EVALUATED = "NOT_EVALUATED_GRAPH_DISABLED"
 
+CODED_LECTURE = "CODED_LECTURE"
+LEGACY_ROW_ONLY = "LEGACY_ROW_ONLY"
+NO_CODED_LECTURE = "NO_CODED_LECTURE"
+
 LEGACY_ROWS_IN_RANGE = """
 SELECT q.session_id, q.date, q.subject, q.meeting_id,
        NULLIF(BTRIM(q.recording_url), '') IS NOT NULL, q.cancelled_session
@@ -156,6 +160,81 @@ class LiveThenOfflineDiscovery:
 
 # -- the preview -----------------------------------------------------------------
 
+def legacy_session_ref(session_id) -> str | None:
+    """A short, non-reversible handle for a legacy session id."""
+    return hashlib.sha256(session_id.encode()).hexdigest()[:10] if session_id else None
+
+
+def legacy_only_rows(legacy, owned) -> list[dict]:
+    """
+    Legacy QA rows in range that no coded lecture owns.
+
+    The coded stage cannot act on them until discovery/backfill registers the
+    lecture, and the report says so instead of silently dropping them.
+    """
+    rows = []
+    for session_id, day, subject, meeting_id, has_url, cancelled in legacy:
+        if session_id in owned:
+            continue
+        rows.append({
+            "lecture_id": None, "date": day.isoformat(), "subject": subject,
+            "meeting_id_present": bool(meeting_id),
+            "organizer_lookup_id_present": None, "call_id_resolved": None,
+            "graph_lookup_status": None, "graph_http_status": None,
+            "graph_recording_count": None, "candidate_file_count": None,
+            "exact_candidate_count": None, "timestamp_difference_seconds": None,
+            "recording_source": None,
+            "recording_match_status": ("RECORDING_ALREADY_LINKED" if has_url
+                                       else NO_CODED_LECTURE),
+            "stage_state": None, "would_write": False,
+            "would_update_perfect": False,
+            "reason": ("recording_url present" if has_url else
+                       "legacy row has no coded lecture; register it through "
+                       "discovery/backfill before the coded stage can act"),
+            "verification": LIVE_VERIFIED, "population": LEGACY_ROW_ONLY,
+            "legacy_cancelled": str(cancelled or "").lower() == "true",
+            "legacy_session_ref": legacy_session_ref(session_id),
+        })
+    return rows
+
+
+def build_preview(settings, *, resolver, live_graph: bool = True, graph=None,
+                  offline_evidence: dict | None = None) -> "RecordingLinkPreview":
+    """
+    THE way to assemble a read-only recording preview.
+
+    Used by `recording-links-preview` and by the Historical Backfill worker, so
+    the console and the terminal cannot disagree about a lecture. The service
+    is built WITHOUT a publisher: no code path here can create a sharing link.
+    Graph, when asked for, is the platform's one app-only client and is only
+    ever read.
+    """
+    from app.recordings.factory import build_discovery
+    from app.recordings.graph_lookup import RecordingMetadataGateway as _Live
+
+    offline_meta, offline_items = None, None
+    if offline_evidence is not None:
+        offline_meta = OfflineMetadataGateway(
+            offline_evidence.get("recordings_by_meeting") or {})
+        offline_items = offline_evidence.get("drive_items") or []
+    live_meta = live_discovery = None
+    if live_graph:
+        if graph is None:
+            from app.graph.auth import build_graph_client
+            graph = build_graph_client(settings)
+        live_meta = _Live(graph)
+        live_discovery = build_discovery(
+            graph, search_region=settings.recording_link_search_region)
+    from app.db.repositories.recording_links import RecordingLinkRepository
+    metadata = LiveThenOfflineMetadata(
+        live_meta, offline_meta or (None if live_meta else OfflineMetadataGateway({})))
+    return RecordingLinkPreview(
+        resolver=resolver, repository=RecordingLinkRepository(),
+        metadata_gateway=metadata,
+        discovery=LiveThenOfflineDiscovery(live_discovery, offline_items),
+        metadata_evidence=("LIVE" if live_meta else "OFFLINE" if offline_meta else "NONE"))
+
+
 def verification_of(decision: RecordingLinkDecision) -> str:
     graph, status = decision.graph, decision.status
     if graph is None:
@@ -179,6 +258,11 @@ class RecordingLinkPreview:
                                             discovery=discovery, publisher=None)
 
     def run(self, connection, date_from, date_to) -> dict:
+        rows, legacy = self.rows(connection, date_from, date_to)
+        return self.summarize(rows, legacy, date_from, date_to)
+
+    def rows(self, connection, date_from, date_to) -> tuple[list[dict], list]:
+        """One row per coded lecture, then one per legacy row no lecture owns."""
         legacy = connection.execute(LEGACY_ROWS_IN_RANGE, (date_from, date_to)).fetchall()
         lecture_ids = [str(row[0]) for row in
                        connection.execute(LECTURES_IN_RANGE, (date_from, date_to)).fetchall()]
@@ -195,42 +279,27 @@ class RecordingLinkPreview:
             if session_id:
                 owned.add(session_id)
             row = decision.preview_row()
-            row["population"] = "CODED_LECTURE"
+            row["population"] = CODED_LECTURE
             row["resolver_stage_state"] = stage["state"]
+            row["resolver_stage_reason"] = stage.get("reason")
+            # The stage the pipeline would act on first. When it precedes
+            # RECORDING_LINK, the recording cannot be linked until it settles.
+            row["executable_stage"] = state.get("executable_stage")
+            row["next_executable_action"] = state.get("next_executable_action")
             row["discovery_evidence"] = decision.extra.get("discovery_evidence")
             row["live_discovery_failures"] = decision.extra.get("live_discovery_failures")
-            row["legacy_session_ref"] = (hashlib.sha256(session_id.encode()).hexdigest()[:10]
-                                         if session_id else None)
+            row["legacy_session_ref"] = legacy_session_ref(session_id)
             row["live_source_counts"] = decision.extra.get("live_source_counts")
             # What the limited Perfect update WOULD touch if this match were live.
             row["perfect_row_would_update_if_live"] = bool(
                 decision.status == EXACT_RECORDING_FILE_MATCHED and target.lecture_key
                 and target.perfect_recording_url_empty)
             rows.append(row)
-        for session_id, day, subject, meeting_id, has_url, cancelled in legacy:
-            if session_id in owned:
-                continue
-            rows.append({
-                "lecture_id": None, "date": day.isoformat(), "subject": subject,
-                "meeting_id_present": bool(meeting_id),
-                "organizer_lookup_id_present": None, "call_id_resolved": None,
-                "graph_lookup_status": None, "graph_http_status": None,
-                "graph_recording_count": None, "candidate_file_count": None,
-                "exact_candidate_count": None, "timestamp_difference_seconds": None,
-                "recording_match_status": ("RECORDING_ALREADY_LINKED" if has_url
-                                           else "NO_CODED_LECTURE"),
-                "stage_state": None, "would_write": False,
-                "would_update_perfect": False,
-                "reason": ("recording_url present" if has_url else
-                           "legacy row has no coded lecture; register it through "
-                           "discovery/backfill before the coded stage can act"),
-                "verification": LIVE_VERIFIED, "population": "LEGACY_ROW_ONLY",
-                "legacy_cancelled": str(cancelled or "").lower() == "true",
-            })
-        return self.summarize(rows, legacy, date_from, date_to)
+        rows.extend(legacy_only_rows(legacy, owned))
+        return rows, legacy
 
     def summarize(self, rows, legacy, date_from, date_to) -> dict:
-        coded = [r for r in rows if r["population"] == "CODED_LECTURE"]
+        coded = [r for r in rows if r["population"] == CODED_LECTURE]
         with_url = sum(1 for row in legacy if row[4])
         return {
             "date_from": str(date_from), "date_to": str(date_to),

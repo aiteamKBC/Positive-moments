@@ -36,7 +36,7 @@ Microsoft Graph, which is a read, and it touches no table.
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import date as _date, timedelta
+from datetime import date as _date, datetime, timedelta, timezone
 
 from app.common.errors import PlatformError
 from app.db.repositories.backfill import (
@@ -324,8 +324,14 @@ class BackfillRunner:
     def __init__(self, *, orchestrator, connection_factory,
                  aptem_connection_factory=None, repository=None,
                  preview_service=None, readonly_connection_factory=None,
+                 recording_report=None,
                  runner_version: str = BACKFILL_RUNNER_VERSION, now=None):
         self.orchestrator = orchestrator
+        # Recording Links (app/recordings/coverage.py). A PREVIEW day asks it
+        # for a live, read-only verdict per lecture; an EXECUTE day asks it
+        # what the orchestrator's RECORDING_LINK stage left behind. Either
+        # way it only reads, and its answer is stored beside the day row.
+        self.recording_report = recording_report
         # PREVIEW runs never touch the orchestrator. They use the read-only
         # preview service and a read-only connection, so a preview cannot
         # write even if a shared component changed underneath it.
@@ -448,6 +454,8 @@ class BackfillRunner:
             return {"status": "FAILED", "counts": {}}
 
         found = preview.days[0] if preview.days else DayPreview(business_date=day)
+        recordings = self._recordings(
+            day, lambda connection: self.recording_report.preview_day(connection, day))
         day_counts = {
             "calendar_events_considered": found.calendar_events_considered,
             "matched_lectures": found.matched_lectures,
@@ -463,8 +471,9 @@ class BackfillRunner:
             "suppressed": found.suppressed,
         }
         self._record(run_id, day, DAY_COMPLETED, None, {}, started,
-                     graph_calls=1 if found.matched_lectures else 1,
+                     graph_calls=1 + recordings["graph_calls"],
                      day_counts=day_counts)
+        self._store_recordings(run_id, day, recordings)
         return {"status": "COMPLETED", "counts": {
             "discovered": found.newly_discoverable,
             "matched": found.matched_lectures,
@@ -482,6 +491,10 @@ class BackfillRunner:
 
     def _process_day(self, run_id: str, day: _date) -> dict:
         started = time.monotonic()
+        # Anything the RECORDING_LINK stage writes during this day carries a
+        # `written_at` at or after this instant; that is how the snapshot
+        # tells "written by this run" from "already linked".
+        written_since = datetime.now(timezone.utc)
         counts = {}
         try:
             with self.connection_factory() as connection:
@@ -542,10 +555,50 @@ class BackfillRunner:
                     "error": "BLOCKED_LEGACY_QA_ACTIVE"}
 
         counts = self._counts_from(summary)
+        recordings = self._recordings(
+            day, lambda connection: (self.recording_report.execute_day(
+                connection, day, written_since=written_since), 0))
         self._record(run_id, day, DAY_COMPLETED, summary.get("run_id"), counts,
                      started, graph_calls=summary.get("graph_calls", 0),
                      provider_calls=summary.get("provider_calls", 0))
+        self._store_recordings(run_id, day, recordings)
         return {"status": "COMPLETED", "counts": counts}
+
+    # -- Recording Links, per day --------------------------------------------
+
+    def _recordings(self, day: _date, evaluate) -> dict:
+        """
+        Ask the recording report about one day, on a READ-ONLY connection.
+
+        A failure here is recorded on the day and never fails it: the day's
+        pipeline work is already committed, and a Graph refusal during a
+        preview is information for the operator, not a reason to stop.
+        """
+        if self.recording_report is None:
+            return {"items": None, "graph_calls": 0, "error_code": None}
+        try:
+            with self.readonly_connection_factory() as connection:
+                # The production database sits behind a connection pooler;
+                # never leave a prepared statement on a pooled backend.
+                if hasattr(connection, "prepare_threshold"):
+                    connection.prepare_threshold = None
+                items, graph_calls = evaluate(connection)
+        except PlatformError as exc:
+            return {"items": [], "graph_calls": 0, "error_code": exc.code}
+        except Exception as exc:                                # noqa: BLE001
+            self.log.exception("backfill recording evaluation failed", extra={
+                "fields": {"business_date": day.isoformat()}})
+            return {"items": [], "graph_calls": 0, "error_code": type(exc).__name__}
+        return {"items": items, "graph_calls": graph_calls, "error_code": None}
+
+    def _store_recordings(self, run_id: str, day: _date, recordings: dict) -> None:
+        if recordings["items"] is None:
+            return
+        with self.connection_factory() as connection:
+            self.repository.replace_recording_items(
+                connection, run_id, business_date=day, items=recordings["items"],
+                error_code=recordings["error_code"])
+            connection.commit()
 
     @staticmethod
     def _is_global(exc: PlatformError) -> bool:

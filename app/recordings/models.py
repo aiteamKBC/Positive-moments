@@ -221,6 +221,9 @@ class RecordingLinkDecision:
             "nearest_same_subject_lead_seconds": (
                 match.nearest_same_subject_lead_seconds if match else None),
             "graph_created_at": graph.created_at if graph else None,
+            # Which folder the exact file came from - a source name, never a URL.
+            "recording_source": (match.candidate.source
+                                 if match and match.candidate else None),
             "recording_match_status": self.status,
             "stage_state": self.stage_state,
             "would_write": self.would_write,
@@ -242,4 +245,5 @@ class RecordingLinkDecision:
                 match.nearest_same_subject_lead_seconds if match else None),
             "ambiguous_filenames": list(match.ambiguous_filenames) if match else [],
             "discovery_sources_failed": list(self.discovery_sources_failed),
+            "source": match.candidate.source if match and match.candidate else None,
         }

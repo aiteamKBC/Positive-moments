@@ -142,7 +142,8 @@ class StubRepository:
         self.writes.append(kwargs)
         return self.write_result
 
-    def record(self, connection, decision, *, written=False, now=None):
+    def record(self, connection, decision, *, written=False, now=None,
+               perfect_rows_written=0):
         self.recorded.append((decision.status, written))
         return {"stage_state": decision.stage_state}
 

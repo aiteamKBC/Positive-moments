@@ -38,6 +38,7 @@ from app.orchestration.backfill import (
     business_days,
     validate_range,
 )
+from app.recordings.coverage import summarize
 
 from .platform import reading, writing
 from .views import _BadRequest
@@ -178,8 +179,55 @@ def backfill_detail_view(request, run_id):
                              "detail": "no such backfill run"},
                             status=status.HTTP_404_NOT_FOUND)
         days = _repository().days(connection, run_id)
+        items = _repository().recording_items(connection, run_id)
     return Response({"backfill_run": _shape(run),
-                     "days": [_shape(day) for day in days]})
+                     "days": [_shape(day) for day in days],
+                     "recording_links": _recording_summary(run, days, items)})
+
+
+@api_view(["GET"])
+@_handle
+def backfill_recording_links_view(request, run_id):
+    """
+    Lecture-level Recording Links outcomes for one run.
+
+    A PREVIEW run's rows are live, read-only Graph verdicts; an EXECUTE run's
+    rows are what the shared orchestrator's RECORDING_LINK stage did. Every
+    field comes from the run's stored snapshot - statuses, counts, timings and
+    a source NAME. No recording URL, Graph id, file name or token is stored,
+    so none can be returned.
+    """
+    with reading() as connection:
+        run = _repository().get(connection, run_id)
+        if run is None:
+            return Response({"code": "not_found",
+                             "detail": "no such backfill run"},
+                            status=status.HTTP_404_NOT_FOUND)
+        days = _repository().days(connection, run_id)
+        items = _repository().recording_items(connection, run_id)
+    return Response({"backfill_run_id": str(run_id), "mode": run.get("mode"),
+                     "recording_links": _recording_summary(run, days, items),
+                     "items": [_shape(item) for item in items]})
+
+
+def _recording_summary(run: dict, days: list[dict], items: list[dict]) -> dict:
+    """The platform's own totals over the stored rows. The console counts nothing."""
+    evaluated_days = sum(1 for day in days if day.get("status") == "COMPLETED")
+    failed_days = sorted({str(getattr(day["business_date"], "isoformat",
+                                      lambda: day["business_date"])())
+                          for day in days if day.get("recording_error_code")})
+    return {
+        "coverage": summarize(items),
+        "evaluation": ("LIVE_PREVIEW" if run.get("mode") == MODE_PREVIEW else "EXECUTE"),
+        "days_evaluated": evaluated_days,
+        "days_with_recording_errors": failed_days,
+        "recording_error_codes": sorted({day["recording_error_code"] for day in days
+                                         if day.get("recording_error_code")}),
+        # Preview guarantees, stated as data rather than implied.
+        "database_writes": 0 if run.get("mode") == MODE_PREVIEW else None,
+        "sharing_links_created": 0 if run.get("mode") == MODE_PREVIEW else None,
+        "provider_calls": 0,
+    }
 
 
 # --- cancel -----------------------------------------------------------------

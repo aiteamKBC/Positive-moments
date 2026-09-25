@@ -70,5 +70,11 @@ def writing():
 
 
 def operations():
-    """The existing Operations facade. No caching: it holds no state worth reusing."""
-    return build_operations()
+    """
+    The existing Operations facade. No caching: it holds no state worth reusing.
+
+    Built in the configured RECORDING_LINK_MODE, the same switch the scheduler,
+    the backfill runner and the guarded actions read - so the console never
+    describes a recording stage the pipeline is not actually running.
+    """
+    return build_operations(recording_link_mode=settings().recording_link_mode)

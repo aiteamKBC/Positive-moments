@@ -39,7 +39,7 @@ import type { DirectoryEntry, LectureDetail } from '../types/operations'
 import { businessDate, businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
 import {
   actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
-  retryReason, stageLabel,
+  recordingOwner, recordingSource, retryReason, stageLabel, stageState,
 } from '../utils/labels'
 
 const route = useRoute()
@@ -85,6 +85,9 @@ const qa = computed(() => stages.value?.QA_EVALUATION ?? null)
 const perfect = computed(() => stages.value?.PERFECT_ELIGIBILITY ?? null)
 const attendanceStage = computed(() => stages.value?.ATTENDANCE ?? null)
 const recoverAvailable = computed(() => recoverPlan.value?.available === true)
+/** The platform's Recording Link answer for this lecture; never a URL. */
+const recording = computed(() => lecture.value?.recording_link ?? null)
+const codedRecordings = computed(() => recording.value?.recording_link_mode === 'write')
 const momentKey = computed(() => entry.value?.legacy_session_key ?? null)
 const momentCount = computed(() => entry.value?.positive_clips_count ?? 0)
 const analysed = computed(() => entry.value?.clips_analysis_completeness === 'positive_clips_v5_final')
@@ -327,7 +330,11 @@ async function confirmAction() {
                 <dt class="text-muted">QA sync to legacy</dt><dd><StageChip :state="stages!.LEGACY_QA_SYNC.state" /></dd>
               </div>
             </dl>
-            <p class="mt-3 text-xs leading-5 text-muted">
+            <p v-if="codedRecordings" class="mt-3 text-xs leading-5 text-muted">
+              The recording link is made by this platform's recording step, only for an exact, unique Teams
+              recording. The Excel stamp is still produced by the legacy workflow.
+            </p>
+            <p v-else class="mt-3 text-xs leading-5 text-muted">
               The recording link and the Excel stamp are produced by the live legacy workflows, not by this
               platform. Waiting on them does not hold the lecture open.
             </p>
@@ -351,6 +358,88 @@ async function confirmAction() {
           :stages="lecture.stages"
           :blocking-stage="lecture.blocking_stage"
         />
+
+        <SectionPanel
+          v-if="recording && !lecture.is_suppressed_duplicate"
+          title="Recording link"
+          :note="codedRecordings
+            ? 'Linked automatically by the pipeline, only for one exact recording.'
+            : 'Observed only: the legacy n8n recording workflow still makes this link.'"
+        >
+          <template #actions>
+            <StatusBadge
+              v-if="recording.state"
+              :label="stageState(recording.state).label"
+              :tone="stageState(recording.state).tone"
+            />
+          </template>
+
+          <p v-if="recording.refused_to_guess" class="notice-warn mb-4" role="note">
+            <AppIcon name="info" :size="16" class="mt-0.5" />
+            <span>
+              <strong class="font-semibold">The platform deliberately did not choose a recording.</strong>
+              More than one file (or no exactly matching file) fits this lecture, and linking the wrong
+              lecture's recording is worse than linking none. A person needs to decide.
+            </span>
+          </p>
+
+          <dl class="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Recording available</dt>
+              <dd class="font-semibold" :class="recording.recording_available ? 'text-emerald-700' : 'text-muted'">
+                {{ recording.recording_available ? 'Yes' : 'No' }}
+              </dd>
+            </div>
+            <div v-if="recording.owner" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Linked by</dt>
+              <dd>{{ recording.recording_available ? recordingOwner(recording.owner) : '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Next step</dt>
+              <dd>{{ actionLabel(recording.action ?? 'NOTHING_TO_DO') }}</dd>
+            </div>
+            <div v-if="recording.last_status" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Last result</dt>
+              <dd class="font-mono text-2xs" :title="recording.last_reason ?? undefined">{{ recording.last_status }}</dd>
+            </div>
+            <div v-if="recording.last_checked_at" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Last checked</dt>
+              <dd>{{ cairoDateTime(recording.last_checked_at) }}</dd>
+            </div>
+            <div v-if="recording.attempt_count" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Checks so far</dt>
+              <dd class="tabular-nums">{{ recording.attempt_count }}</dd>
+            </div>
+            <div v-if="recording.next_attempt_after" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Next automatic check</dt>
+              <dd>{{ cairoDateTime(recording.next_attempt_after) }}</dd>
+            </div>
+            <div v-if="recording.source" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Found in</dt>
+              <dd>
+                {{ recordingSource(recording.source) }}
+                <span v-if="recording.timestamp_difference_seconds !== null" class="text-2xs text-faint">
+                  · {{ recording.timestamp_difference_seconds.toFixed(1) }} s before Teams
+                </span>
+              </dd>
+            </div>
+          </dl>
+
+          <p
+            v-if="recording.last_reason || recording.reason"
+            class="mt-3 text-xs leading-5 text-muted"
+          >
+            {{ recording.last_reason ?? humanise(recording.reason) }}
+          </p>
+
+          <a
+            v-if="recording.recording_available && entry?.recording_url"
+            class="btn-secondary btn-sm mt-3"
+            :href="entry.recording_url"
+            target="_blank"
+            rel="noopener noreferrer"
+          ><AppIcon name="play" :size="14" /> Watch full lecture</a>
+        </SectionPanel>
 
         <SectionPanel title="Run history" flush>
           <EmptyState

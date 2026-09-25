@@ -130,11 +130,13 @@ def build_operations(*, perfect_eligibility_version=None,
                      recording_link_mode: str = "observe") -> OperationsService:
     resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
                               recording_link_mode=recording_link_mode)
+    from app.db.repositories.recording_links import RecordingLinkRepository
     return OperationsService(
         resolver=resolver, run_repository=PipelineRunRepository(),
         reconciliation=DayReconciliation(resolver=resolver),
         directory_repository=LectureDirectoryRepository(),
         media_repository=MediaStateRepository(),
+        recording_links=RecordingLinkRepository(),
         preflight=LegacyQaPreflight(gateway=N8nReadOnlyGateway.from_environment(),
                                     required=True))
 
@@ -195,6 +197,41 @@ def build_backfill_preview(settings, *, discover: bool = True,
             gateway=N8nReadOnlyGateway.from_environment(), required=False))
 
 
+def build_backfill_recording_report(settings, *, graph_factory=None,
+                                    perfect_eligibility_version=None):
+    """
+    Recording Links for Historical Backfill.
+
+    PREVIEW days use the SAME live preview the `recording-links-preview` CLI
+    builds (app/recordings/preview.build_preview): Graph reads through the
+    platform's one app-only client, no publisher, and a resolver in `write`
+    mode so it reports what the coded stage would do - including a retry not
+    yet due or an earlier stage still pending. EXECUTE days read back what the
+    orchestrator did through a resolver in the CONFIGURED mode.
+
+    The Graph client is built in the backfill runner's process, which already
+    owns MICROSOFT_GRAPH_* for discovery; nothing here needs the web process
+    to hold a Graph credential.
+    """
+    from app.recordings.coverage import BackfillRecordingReport
+    from app.recordings.preview import build_preview
+
+    extra = ({"perfect_eligibility_version": perfect_eligibility_version}
+             if perfect_eligibility_version else {})
+
+    def preview_factory():
+        graph = graph_factory() if graph_factory else None
+        return build_preview(settings, resolver=build_resolver(
+            recording_link_mode="write", **extra), live_graph=True, graph=graph)
+
+    def resolver_factory():
+        return build_resolver(recording_link_mode=_recording_link_mode(settings), **extra)
+
+    return BackfillRecordingReport(mode=_recording_link_mode(settings),
+                                   preview_factory=preview_factory,
+                                   resolver_factory=resolver_factory)
+
+
 def build_backfill_runner(settings, *, connection_factory,
                           aptem_connection_factory=None,
                           readonly_connection_factory=None,
@@ -219,4 +256,6 @@ def build_backfill_runner(settings, *, connection_factory,
         aptem_connection_factory=aptem_connection_factory,
         # The same runner handles PREVIEW runs, on a read-only connection.
         preview_service=build_backfill_preview(
+            settings, perfect_eligibility_version=perfect_eligibility_version),
+        recording_report=build_backfill_recording_report(
             settings, perfect_eligibility_version=perfect_eligibility_version))
