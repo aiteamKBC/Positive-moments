@@ -8,6 +8,7 @@ link, so a lecture that matched there normalizes identically here.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.recordings.models import DriveItemCandidate
@@ -47,14 +48,34 @@ def parse_recording_name(name) -> tuple[str, str, float] | None:
     return normalize_subject(match.group(1)), moment.date().isoformat(), moment.timestamp()
 
 
+def _positive_int(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _duration_seconds(item: dict) -> float | None:
+    """driveItem video.duration is milliseconds; absent until SharePoint indexes it."""
+    milliseconds = _positive_int((item.get("video") or {}).get("duration"))
+    return milliseconds / 1000.0 if milliseconds else None
+
+
 def candidate_from_drive_item(item: dict, source: str) -> DriveItemCandidate | None:
-    """A Graph driveItem (listing or search hit) as a candidate, or None."""
+    """
+    A Graph driveItem (listing or search hit) as a candidate, or None.
+
+    Keeps the media evidence Graph returns (size, video duration, timestamps,
+    parent, MIME type). Never keeps a download URL: `@microsoft.graph.
+    downloadUrl` is a pre-authenticated link and is deliberately not read.
+    """
     if not isinstance(item, dict):
         return None
     item_id = item.get("id")
     name = item.get("name")
-    drive_id = ((item.get("parentReference") or {}).get("driveId")
-                or item.get("driveId"))
+    parent = item.get("parentReference") or {}
+    drive_id = parent.get("driveId") or item.get("driveId")
     if not item_id or not name or not drive_id or not _MP4.search(str(name)):
         return None
     if "folder" in item and "file" not in item:
@@ -65,14 +86,41 @@ def candidate_from_drive_item(item: dict, source: str) -> DriveItemCandidate | N
         web_url=item.get("webUrl"), source=source,
         subject_key=parsed[0] if parsed else None,
         file_date=parsed[1] if parsed else None,
-        file_timestamp=parsed[2] if parsed else None)
+        file_timestamp=parsed[2] if parsed else None,
+        size_bytes=_positive_int(item.get("size")),
+        duration_seconds=_duration_seconds(item),
+        created_at=item.get("createdDateTime"),
+        modified_at=item.get("lastModifiedDateTime"),
+        parent_item_id=parent.get("id"),
+        mime_type=(item.get("file") or {}).get("mimeType") if isinstance(
+            item.get("file"), dict) else None,
+        sources=(source,))
+
+
+_EVIDENCE_FIELDS = ("web_url", "size_bytes", "duration_seconds", "created_at",
+                    "modified_at", "parent_item_id", "mime_type")
+
+
+def merge_evidence(primary: DriveItemCandidate, other: DriveItemCandidate
+                   ) -> DriveItemCandidate:
+    """The same physical file seen twice: one candidate, both provenances."""
+    filled = {name: getattr(other, name) for name in _EVIDENCE_FIELDS
+              if getattr(primary, name) is None and getattr(other, name) is not None}
+    sources = tuple(dict.fromkeys((primary.sources or (primary.source,))
+                                  + (other.sources or (other.source,))))
+    return replace(primary, sources=sources, **filled)
 
 
 def deduplicate(candidates) -> list[DriveItemCandidate]:
-    """One candidate per (drive, item): several sources can see the same file."""
+    """
+    One candidate per physical file (drive_id, item_id), whichever source saw
+    it. Tenant search, the organizer's OneDrive and the channel folder can all
+    return the SAME driveItem; that is one file, never two candidates.
+    """
     seen: dict[tuple[str, str], DriveItemCandidate] = {}
     for candidate in candidates:
         if candidate is None:
             continue
-        seen.setdefault((candidate.drive_id, candidate.item_id), candidate)
+        key = candidate.physical_id
+        seen[key] = merge_evidence(seen[key], candidate) if key in seen else candidate
     return list(seen.values())

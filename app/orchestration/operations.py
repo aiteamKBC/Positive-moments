@@ -40,13 +40,15 @@ from app.orchestration.stages import (
 from app.recordings.models import (
     AMBIGUOUS_RECORDING_FILES,
     GRAPH_RECORDING_AMBIGUOUS,
+    MULTIPART_RECORDING,
     TIMESTAMP_MISMATCH,
 )
 
 # A recording outcome where more than one answer was possible (or none was
 # exact) and the stage refused to pick one.
 REFUSED_TO_GUESS_STATUSES = frozenset({
-    AMBIGUOUS_RECORDING_FILES, GRAPH_RECORDING_AMBIGUOUS, TIMESTAMP_MISMATCH})
+    AMBIGUOUS_RECORDING_FILES, GRAPH_RECORDING_AMBIGUOUS, MULTIPART_RECORDING,
+    TIMESTAMP_MISMATCH})
 
 
 def _iso(value):

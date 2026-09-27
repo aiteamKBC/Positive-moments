@@ -109,7 +109,11 @@ from app.qa.recovery import recovery_state
 from app.qa.inputs import attendance_flag
 from app.qa.structured_output import DEFAULT_PROVIDER_CONTRACT
 from app.qa.provider import PROVIDER_CONFIGURATION_ERROR
-from app.recordings.models import NO_RECORDING_EXPECTED_CANCELLED
+from app.recordings.models import (
+    NO_RECORDING_EXPECTED_CANCELLED,
+    REEVALUABLE_REVIEW_STATUSES,
+    RESOLUTION_POLICY_VERSION,
+)
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
 from app.transcripts.identity import canonical_key
@@ -1127,7 +1131,10 @@ class PipelineStateResolver:
         code is safe to deploy before migration 021. In "write" mode the
         stage's own durable state decides: nothing yet, or a retry that is
         due -> LINK_RECORDING; a retry not yet due -> WAITING; a terminal
-        outcome -> REVIEW_REQUIRED until an operator acts.
+        outcome -> REVIEW_REQUIRED until an operator acts - unless it is an
+        ambiguity outcome reached under an older RESOLUTION_POLICY_VERSION,
+        which a newer policy may resolve: that is offered LINK_RECORDING once,
+        automatically, and records the current policy whatever it concludes.
         """
         if legacy_session_id is None or self.legacy_observations is None:
             return _stage(NOT_APPLICABLE, reason="NO_LEGACY_QA_ROW")
@@ -1165,6 +1172,12 @@ class PipelineStateResolver:
             return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
                           reason="RECORDING_URL_CLEARED_AFTER_CODED_WRITE", **detail, **last)
         if attempt["stage_state"] == REVIEW_REQUIRED:
+            if (attempt["status"] in REEVALUABLE_REVIEW_STATUSES
+                    and attempt.get("resolution_policy") != RESOLUTION_POLICY_VERSION):
+                return _stage(MISSING, action=LINK_RECORDING,
+                              reason="RECORDING_RESOLUTION_POLICY_CHANGED",
+                              previous_resolution_policy=attempt.get("resolution_policy"),
+                              **detail, **last)
             return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
                           reason=attempt["status"], review_detail=attempt.get("reason"),
                           **detail, **last)

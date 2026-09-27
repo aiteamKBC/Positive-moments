@@ -25,15 +25,24 @@ link is written.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from urllib.parse import quote
 
 from app.graph.transport import GraphError
-from app.recordings.candidates import candidate_from_drive_item, deduplicate
+from app.recordings.candidates import candidate_from_drive_item, deduplicate, merge_evidence
 from app.recordings.models import DiscoveryResult, RecordingTarget
 
 
-ITEM_FIELDS = "id,name,webUrl,parentReference,createdDateTime,file,folder"
-SEARCH_FIELDS = ["id", "name", "webUrl", "createdDateTime", "parentReference", "file"]
+# Media evidence (size, video.duration) is selected so the resolution policy
+# can tell a short false start from the delivered lecture. Never
+# @microsoft.graph.downloadUrl: it is a pre-authenticated link.
+ITEM_FIELDS = ("id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,"
+               "file,folder,size,video")
+SEARCH_FIELDS = ["id", "name", "webUrl", "createdDateTime", "lastModifiedDateTime",
+                 "parentReference", "file", "size"]
+# One driveItem's metadata, for a final exact candidate only.
+EVIDENCE_FIELDS = ("id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,"
+                   "file,size,video")
 SEARCH_PAGE_SIZE = 500
 
 
@@ -203,17 +212,49 @@ class DriveItemDiscovery:
                 continue
             attempted.append(source.name)
             try:
-                raw = source.items(target)
+                items = source.items(target)
             except GraphError as error:
                 failed.append(_failure(source.name, error))
                 continue
-            found = [candidate_from_drive_item(item, source.name) for item in raw]
-            counts[source.name] = sum(1 for c in found if c is not None)
+            found = [c for c in (candidate_from_drive_item(item, source.name)
+                                 for item in items) if c is not None]
+            counts[source.name] = len(found)
             candidates.extend(found)
         return DiscoveryResult(candidates=tuple(deduplicate(candidates)),
                                sources_attempted=tuple(attempted),
                                sources_failed=tuple(failed),
-                               source_counts=tuple(sorted(counts.items())))
+                               source_counts=tuple(sorted(counts.items())),
+                               raw_candidate_count=len(candidates))
+
+
+class CandidateMetadataReader:
+    """
+    Media evidence for the FINAL exact candidates only (a handful per lecture).
+
+        GET /drives/{drive}/items/{item}?$select=...size,video
+
+    Search hits carry no video facet, and a folder listing may predate
+    SharePoint's media indexing, so when several files pass the identity rule
+    their size and measured duration are read here, server-side. The MP4 is
+    never downloaded, and no download URL is requested or kept.
+    """
+
+    def __init__(self, graph):
+        self.graph = graph
+        self.calls = 0
+
+    def enrich(self, candidate):
+        self.calls += 1
+        item = self.graph.get_json(
+            f"/drives/{quote(candidate.drive_id, safe='')}/items/"
+            f"{quote(candidate.item_id, safe='')}?$select={EVIDENCE_FIELDS}")
+        fresh = candidate_from_drive_item(item, candidate.source)
+        if fresh is None or fresh.physical_id != candidate.physical_id:
+            return candidate
+        # Fresh evidence first, what discovery already held second.
+        return merge_evidence(replace(fresh, sources=candidate.sources,
+                                      web_url=candidate.web_url or fresh.web_url),
+                              candidate)
 
 
 class RecordingLinkPublisher:

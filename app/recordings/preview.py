@@ -209,7 +209,8 @@ def build_preview(settings, *, resolver, live_graph: bool = True, graph=None,
     Graph, when asked for, is the platform's one app-only client and is only
     ever read.
     """
-    from app.recordings.factory import build_discovery
+    from app.recordings.drive_items import CandidateMetadataReader
+    from app.recordings.factory import build_discovery, resolution_policy
     from app.recordings.graph_lookup import RecordingMetadataGateway as _Live
 
     offline_meta, offline_items = None, None
@@ -217,7 +218,7 @@ def build_preview(settings, *, resolver, live_graph: bool = True, graph=None,
         offline_meta = OfflineMetadataGateway(
             offline_evidence.get("recordings_by_meeting") or {})
         offline_items = offline_evidence.get("drive_items") or []
-    live_meta = live_discovery = None
+    live_meta = live_discovery = evidence_reader = None
     if live_graph:
         if graph is None:
             from app.graph.auth import build_graph_client
@@ -225,6 +226,8 @@ def build_preview(settings, *, resolver, live_graph: bool = True, graph=None,
         live_meta = _Live(graph)
         live_discovery = build_discovery(
             graph, search_region=settings.recording_link_search_region)
+        # GET-only: the final exact candidates' size and video duration.
+        evidence_reader = CandidateMetadataReader(graph)
     from app.db.repositories.recording_links import RecordingLinkRepository
     metadata = LiveThenOfflineMetadata(
         live_meta, offline_meta or (None if live_meta else OfflineMetadataGateway({})))
@@ -232,7 +235,8 @@ def build_preview(settings, *, resolver, live_graph: bool = True, graph=None,
         resolver=resolver, repository=RecordingLinkRepository(),
         metadata_gateway=metadata,
         discovery=LiveThenOfflineDiscovery(live_discovery, offline_items),
-        metadata_evidence=("LIVE" if live_meta else "OFFLINE" if offline_meta else "NONE"))
+        metadata_evidence=("LIVE" if live_meta else "OFFLINE" if offline_meta else "NONE"),
+        evidence_reader=evidence_reader, policy=resolution_policy(settings))
 
 
 def verification_of(decision: RecordingLinkDecision) -> str:
@@ -249,13 +253,15 @@ def verification_of(decision: RecordingLinkDecision) -> str:
 class RecordingLinkPreview:
 
     def __init__(self, *, resolver, repository, metadata_gateway, discovery,
-                 metadata_evidence: str):
+                 metadata_evidence: str, evidence_reader=None, policy=None):
         self.resolver = resolver
         self.repository = repository
         self.metadata_evidence = metadata_evidence
         self.service = RecordingLinkService(repository=repository,
                                             metadata_gateway=metadata_gateway,
-                                            discovery=discovery, publisher=None)
+                                            discovery=discovery, publisher=None,
+                                            evidence_reader=evidence_reader,
+                                            policy=policy)
 
     def run(self, connection, date_from, date_to) -> dict:
         rows, legacy = self.rows(connection, date_from, date_to)

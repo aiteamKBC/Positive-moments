@@ -2,7 +2,9 @@
 The RECORDING_LINK decision, and the write that may follow it.
 
     target -> preconditions -> organizer Graph lookup -> DriveItem discovery
-           -> candidate matching -> decision -> (armed only) publish + write
+           -> candidate matching -> (several exact: media evidence for those
+              files only + full-recording resolution) -> decision
+           -> (armed only) publish + write
 
 `evaluate` never writes anything anywhere. `link` evaluates, and only for an
 EXACT_RECORDING_FILE_MATCHED decision publishes a URL and runs the guarded
@@ -16,12 +18,12 @@ no recording. That is NOT_APPLICABLE, not a missing recording.
 """
 from __future__ import annotations
 
+from app.graph.transport import GraphError
 from app.recordings.graph_lookup import RecordingMetadataGateway
 from app.recordings.matching import match_candidates
 from app.recordings.models import (
     DRIVE_ITEM_DISCOVERY_FAILED,
     EXACT_RECORDING_FILE_MATCHED,
-    GRAPH_RECORDING_FOUND,
     LECTURE_IDENTITY_MISMATCH,
     LINK_DRIVE_ITEM_WEB_URL,
     LINK_ORGANIZATION_VIEW,
@@ -35,22 +37,28 @@ from app.recordings.models import (
     WRITTEN,
     RecordingLinkDecision,
 )
+from app.recordings.resolution import DEFAULT_POLICY, MAX_EVIDENCE_CANDIDATES, RULE_SINGLE
 from app.transcripts.identity import teams_call_id
 
 
 class RecordingLinkService:
 
     def __init__(self, *, repository, metadata_gateway: RecordingMetadataGateway,
-                 discovery, publisher=None):
+                 discovery, publisher=None, evidence_reader=None, policy=None):
         self.repository = repository
         self.metadata = metadata_gateway
         self.discovery = discovery
         self.publisher = publisher
+        # Reads size / video duration for the final exact candidates only
+        # (drive_items.CandidateMetadataReader). None = use what discovery had.
+        self.evidence_reader = evidence_reader
+        self.policy = policy or DEFAULT_POLICY
 
     @property
     def graph_calls(self) -> int:
         return (self.metadata.calls + self.discovery.calls
-                + (self.publisher.calls if self.publisher else 0))
+                + (self.publisher.calls if self.publisher else 0)
+                + (self.evidence_reader.calls if self.evidence_reader else 0))
 
     # -- evaluation ------------------------------------------------------------
 
@@ -97,7 +105,9 @@ class RecordingLinkService:
             meeting_lookup_user_id=target.meeting_lookup_user_id,
             meeting_id=target.meeting_id, call_id=decision.call_id)
         decision.graph = graph
-        if graph.status != GRAPH_RECORDING_FOUND:
+        # Several recordings for the call are carried into resolution, which
+        # fails closed (GRAPH_RECORDING_AMBIGUOUS) when files cannot decide it.
+        if not graph.resolvable:
             detail = (f"HTTP {graph.http_status} {graph.error_code} "
                       f"{graph.diagnostic_reason or ''}".strip()
                       if graph.http_status or graph.error_code else
@@ -113,10 +123,25 @@ class RecordingLinkService:
         decision.extra["live_source_counts"] = dict(
             discovered.live_source_counts if discovered.evidence == "OFFLINE"
             else discovered.source_counts)
+        decision.extra["raw_candidate_count"] = discovered.raw_candidate_count
         if not discovered.sources_attempted:
             return done(DRIVE_ITEM_DISCOVERY_FAILED, "NO_APPLICABLE_DISCOVERY_SOURCE")
-        match = match_candidates(subject=target.subject, session_date=target.session_date,
-                                 graph=graph, candidates=discovered.candidates)
+        candidates = discovered.candidates
+        match = self._match(target, graph, candidates)
+        needs = [c for c in match.exact_candidates if c.needs_media_evidence]
+        several = match.exact_candidate_count > 1 or len(graph.logical_recordings) > 1
+        if (several and needs and self.evidence_reader is not None
+                and not discovered.sources_failed
+                and match.exact_candidate_count <= MAX_EVIDENCE_CANDIDATES):
+            try:
+                fresh = {c.physical_id: self.evidence_reader.enrich(c) for c in needs}
+            except GraphError as error:
+                decision.match = match
+                return done(DRIVE_ITEM_DISCOVERY_FAILED,
+                            f"candidate_metadata:{error.status}:{str(error.code or '')[:120]} "
+                            f"(partial result: {match.status})")
+            candidates = tuple(fresh.get(c.physical_id, c) for c in candidates)
+            match = self._match(target, graph, candidates)
         decision.match = match
         if discovered.sources_failed:
             # A source that could not be read may hold a second qualifying file,
@@ -125,15 +150,24 @@ class RecordingLinkService:
                                  for f in discovered.sources_failed)
             return done(DRIVE_ITEM_DISCOVERY_FAILED,
                         f"{failures} (partial result: {match.status})")
+        rule = (match.resolution or {}).get("rule")
         if match.status != EXACT_RECORDING_FILE_MATCHED:
             return done(match.status, f"{match.exact_candidate_count} exact of "
-                                      f"{match.candidate_file_count} candidates")
+                                      f"{match.candidate_file_count} candidates"
+                                      + (f"; {rule}" if rule else ""))
         # Only live evidence may authorize a write.
         decision.would_write = discovered.evidence == "LIVE" and graph.evidence == "LIVE"
         decision.would_update_perfect = decision.would_write and bool(
             target.lecture_key and target.perfect_recording_url_empty)
         return done(EXACT_RECORDING_FILE_MATCHED,
-                    f"lead {match.timestamp_difference_seconds}s via {match.candidate.source}")
+                    f"lead {match.timestamp_difference_seconds}s via {match.candidate.source}"
+                    + (f"; {rule}" if rule and rule != RULE_SINGLE else ""))
+
+    def _match(self, target, graph, candidates):
+        return match_candidates(subject=target.subject, session_date=target.session_date,
+                                graph=graph, candidates=candidates,
+                                expected_duration_seconds=target.expected_duration_seconds,
+                                policy=self.policy)
 
     # -- the stage action --------------------------------------------------------
 

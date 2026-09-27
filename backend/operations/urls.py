@@ -7,7 +7,7 @@ there is no route here that will perform an action named by the caller.
 """
 from django.urls import path
 
-from . import actions, backfill_views, views
+from . import actions, backfill_views, media_views, views
 
 urlpatterns = [
     path("day/", views.day_view, name="operations-day"),
@@ -55,6 +55,28 @@ urlpatterns = [
          name="operations-backfill-detail"),
     path("backfills/<uuid:run_id>/cancel/", backfill_views.backfill_cancel_view,
          name="operations-backfill-cancel"),
+    # --- Positive Moments Media ------------------------------------------
+    # Reads are read-only transactions; POSTs queue work for `media-runner`.
+    path("media/dashboard/", media_views.media_dashboard_view,
+         name="operations-media-dashboard"),
+    path("media/runs/", media_views.media_run_create_view,
+         name="operations-media-run-create"),
+    path("media/runs/<uuid:run_id>/", media_views.media_run_view,
+         name="operations-media-run"),
+    path("media/moments/<uuid:moment_id>/render/", media_views.moment_render_view,
+         name="operations-media-moment-render"),
+    path("media/moments/<uuid:moment_id>/retry/", media_views.moment_retry_view,
+         name="operations-media-moment-retry"),
+    path("media/assets/<uuid:asset_id>/open/", media_views.asset_open_view,
+         name="operations-media-asset-open"),
+    path("media/webhooks/creatomate/", media_views.creatomate_webhook_view,
+         name="operations-media-creatomate-webhook"),
+    path("lectures/<uuid:lecture_id>/positive-moments/",
+         media_views.lecture_positive_moments_view,
+         name="operations-lecture-positive-moments"),
+    path("lectures/<uuid:lecture_id>/recording/open/", media_views.recording_open_view,
+         name="operations-lecture-recording-open"),
+
     # Recording Links: lecture-level outcomes for one run. Read-only.
     path("backfills/<uuid:run_id>/recording-links/",
          backfill_views.backfill_recording_links_view,

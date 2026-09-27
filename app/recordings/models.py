@@ -11,10 +11,19 @@ branch reporting 43 access failures as absences is the defect this replaces.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 
 
 RECORDING_LINK_VERSION = "recording_link_v1"
+# The write guard's method name. It names the IDENTITY rule (exact call id,
+# subject, business date, file-name lead), which is unchanged; it is a SQL
+# guard in the legacy write and stays exactly what n8n v9 wrote.
 MATCH_METHOD = "exact_call_id_subject_timestamp_v9"
+# How several candidates that all pass the identity rule are resolved
+# (app/recordings/resolution.py). Persisted with every evaluation, so a review
+# outcome reached under an older policy is re-evaluated automatically once a
+# newer one is deployed (see REEVALUABLE_REVIEW_STATUSES).
+RESOLUTION_POLICY_VERSION = "recording_match_v2_full_recording_resolution"
 # The file name carries the moment recording started on the client, which the
 # 2026-09-25 audit measured 17-73 s BEFORE Graph's createdDateTime and never
 # after it. A constant, not a setting: widening it is a code review.
@@ -40,6 +49,9 @@ RECORDING_FILE_NOT_FOUND = "RECORDING_FILE_NOT_FOUND"
 TIMESTAMP_MISMATCH = "TIMESTAMP_MISMATCH"
 SUBJECT_MISMATCH = "SUBJECT_MISMATCH"
 AMBIGUOUS_RECORDING_FILES = "AMBIGUOUS_RECORDING_FILES"
+# Two or more SUBSTANTIAL recordings of one lecture (an interrupted, restarted
+# delivery). recording_url holds one URL, so no single file is the lecture.
+MULTIPART_RECORDING = "MULTIPART_RECORDING"
 EXACT_RECORDING_FILE_MATCHED = "EXACT_RECORDING_FILE_MATCHED"
 
 # -- the write -------------------------------------------------------------------
@@ -74,8 +86,15 @@ RETRYABLE_STATUSES = frozenset({
 # Terminal until an operator acts: retrying cannot change the answer and a
 # guess would be worse than no link.
 REVIEW_STATUSES = frozenset({
-    GRAPH_RECORDING_AMBIGUOUS, AMBIGUOUS_RECORDING_FILES, TIMESTAMP_MISMATCH,
-    ORGANIZER_LOOKUP_ID_MISSING, SESSION_CALL_ID_MISSING, LECTURE_IDENTITY_MISMATCH,
+    GRAPH_RECORDING_AMBIGUOUS, AMBIGUOUS_RECORDING_FILES, MULTIPART_RECORDING,
+    TIMESTAMP_MISMATCH, ORGANIZER_LOOKUP_ID_MISSING, SESSION_CALL_ID_MISSING,
+    LECTURE_IDENTITY_MISMATCH,
+})
+# Review outcomes that a newer RESOLUTION_POLICY_VERSION can change. A row in
+# review for one of these under an older (or no recorded) policy is offered
+# LINK_RECORDING again by the resolver; under the current policy it stays put.
+REEVALUABLE_REVIEW_STATUSES = frozenset({
+    GRAPH_RECORDING_AMBIGUOUS, AMBIGUOUS_RECORDING_FILES, MULTIPART_RECORDING,
 })
 
 # Backoff for RETRYABLE_STATUSES: 6 h, 12 h, 24 h, then daily, 8 attempts.
@@ -114,10 +133,41 @@ class RecordingTarget:
     lecture_key: str | None           # qa_perfect_lectures.lecture_key, if any
     perfect_recording_url_empty: bool | None
     thread_id: str | None = None      # the Teams thread the transcript names
+    scheduled_start: datetime | None = None
+    scheduled_end: datetime | None = None
 
     @property
     def meeting_id(self) -> str | None:
         return self.legacy_meeting_id or self.lecture_meeting_id
+
+    @property
+    def expected_duration_seconds(self) -> float | None:
+        """scheduled_end - scheduled_start: what a full delivery should last."""
+        if self.scheduled_start is None or self.scheduled_end is None:
+            return None
+        seconds = (self.scheduled_end - self.scheduled_start).total_seconds()
+        return seconds if seconds > 0 else None
+
+
+@dataclass(frozen=True)
+class GraphRecording:
+    """One Graph callRecording for the lecture's call id. Metadata only."""
+    recording_id: str | None
+    created_at: str                   # ISO 8601, as Graph returned it
+    end_at: str | None = None
+    content_correlation_id: str | None = None
+
+    @property
+    def duration_seconds(self) -> float | None:
+        from app.common.time import parse_graph_datetime
+        if not isinstance(self.end_at, str) or not isinstance(self.created_at, str):
+            return None
+        try:
+            seconds = (parse_graph_datetime(self.end_at)
+                       - parse_graph_datetime(self.created_at)).total_seconds()
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
 
 
 @dataclass(frozen=True)
@@ -133,6 +183,27 @@ class GraphRecordingLookup:
     created_at: str | None = None     # ISO 8601, as Graph returned it
     content_correlation_id: str | None = None
     evidence: str = "LIVE"            # "OFFLINE" = captured evidence, never write-authorizing
+    # Every recording Graph returned for the call id (identical duplicates
+    # collapsed). One for GRAPH_RECORDING_FOUND; several for
+    # GRAPH_RECORDING_AMBIGUOUS, which the resolution policy may still resolve.
+    recordings: tuple = ()
+    end_at: str | None = None
+
+    @property
+    def logical_recordings(self) -> tuple:
+        if self.recordings:
+            return self.recordings
+        if self.created_at:
+            return (GraphRecording(self.recording_id, self.created_at, self.end_at,
+                                   self.content_correlation_id),)
+        return ()
+
+    @property
+    def resolvable(self) -> bool:
+        """Exact enough to look for files: one recording, or several with timestamps."""
+        if self.status == GRAPH_RECORDING_FOUND:
+            return bool(self.created_at)
+        return self.status == GRAPH_RECORDING_AMBIGUOUS and bool(self.recordings)
 
 
 @dataclass(frozen=True)
@@ -145,6 +216,24 @@ class DriveItemCandidate:
     subject_key: str | None = None    # normalized subject parsed from the name
     file_date: str | None = None      # YYYY-MM-DD parsed from the name (UTC)
     file_timestamp: float | None = None  # epoch seconds parsed from the name
+    # Media evidence, where Graph exposes it. Never a download URL.
+    size_bytes: int | None = None
+    duration_seconds: float | None = None   # driveItem video.duration
+    created_at: str | None = None
+    modified_at: str | None = None
+    parent_item_id: str | None = None
+    mime_type: str | None = None
+    # Every discovery source that returned this physical file (drive, item).
+    sources: tuple = ()
+
+    @property
+    def physical_id(self) -> tuple[str, str]:
+        return (self.drive_id, self.item_id)
+
+    @property
+    def needs_media_evidence(self) -> bool:
+        """Duration decides; size is only read as the fallback when it is absent."""
+        return self.duration_seconds is None
 
 
 @dataclass(frozen=True)
@@ -159,6 +248,7 @@ class DiscoveryResult:
     live_failures: tuple = ()
     source_counts: tuple = ()         # ((source, mp4 items returned), ...)
     live_source_counts: tuple = ()
+    raw_candidate_count: int | None = None   # before physical (drive, item) dedupe
 
     @property
     def failed(self) -> bool:
@@ -176,6 +266,13 @@ class MatchResult:
     timestamp_difference_seconds: float | None = None
     nearest_same_subject_lead_seconds: float | None = None
     ambiguous_filenames: tuple = ()
+    # How several exact candidates were (or were not) resolved: policy version,
+    # thresholds, counts, the selected and rejected candidates' media evidence.
+    # Safe to persist: no URL, token or download link.
+    resolution: dict | None = None
+    # The exact candidates themselves, so the service can fetch media evidence
+    # for exactly these files. Not persisted.
+    exact_candidates: tuple = ()
 
 
 @dataclass
@@ -225,6 +322,10 @@ class RecordingLinkDecision:
             "recording_source": (match.candidate.source
                                  if match and match.candidate else None),
             "recording_match_status": self.status,
+            # How several exact candidates were resolved, when there were several.
+            "resolution_rule": ((match.resolution or {}).get("rule")
+                                if match else None),
+            "resolution_evidence": _resolution_evidence(match),
             "stage_state": self.stage_state,
             "would_write": self.would_write,
             "would_update_perfect": self.would_update_perfect,
@@ -246,4 +347,25 @@ class RecordingLinkDecision:
             "ambiguous_filenames": list(match.ambiguous_filenames) if match else [],
             "discovery_sources_failed": list(self.discovery_sources_failed),
             "source": match.candidate.source if match and match.candidate else None,
+            "sources": (list(match.candidate.sources or (match.candidate.source,))
+                        if match and match.candidate else None),
+            "resolution_policy": RESOLUTION_POLICY_VERSION,
+            "resolution": match.resolution if match else None,
+            "raw_candidate_count": self.extra.get("raw_candidate_count"),
         }
+
+
+def _resolution_evidence(match) -> dict | None:
+    """Durations and sizes behind a multi-candidate resolution. No name, no URL."""
+    resolution = (match.resolution if match else None) or {}
+    if resolution.get("rule") in (None, "single_exact_candidate"):
+        return None
+    compact = ("duration_seconds", "duration_source", "size_bytes", "classification")
+    selected = resolution.get("selected")
+    return {
+        "expected_duration_seconds": resolution.get("expected_duration_seconds"),
+        "selected": {k: selected.get(k) for k in compact} if selected else None,
+        "rejected": [{k: x.get(k) for k in compact} for x in resolution.get("rejected", [])],
+        "candidates": [{k: x.get(k) for k in compact}
+                       for x in resolution.get("candidates", [])],
+    }

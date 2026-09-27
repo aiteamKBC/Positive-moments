@@ -52,7 +52,7 @@ TARGET = """
 SELECT l.lecture_id, l.session_date, l.meeting_id, l.meeting_lookup_user_id,
        l.meeting_organizer_user_id, l.is_cancelled,
        q.session_id, q.meeting_id, q.subject, q.recording_url, q.cancelled_session,
-       p.lecture_key, p.recording_url
+       p.lecture_key, p.recording_url, l.scheduled_start, l.scheduled_end
   FROM public.lecture_sessions l
   LEFT JOIN public.qa_doctors_sessions q ON q.session_id = %(session_id)s
   LEFT JOIN LATERAL (
@@ -66,7 +66,8 @@ SELECT l.lecture_id, l.session_date, l.meeting_id, l.meeting_lookup_user_id,
 
 ATTEMPT = """
 SELECT status, stage_state, reason, attempt_count, next_attempt_after,
-       recording_url_written, legacy_session_id, last_attempted_at
+       recording_url_written, legacy_session_id, last_attempted_at,
+       metadata ->> 'resolution_policy'
   FROM public.lecture_recording_links
  WHERE lecture_id = %s
 """
@@ -76,7 +77,8 @@ SELECT lecture_id, legacy_session_id, status, stage_state, reason, attempt_count
        first_attempted_at, last_attempted_at, next_attempt_after,
        recording_url_written, written_at, graph_lookup_status, graph_http_status,
        candidate_file_count, exact_candidate_count, timestamp_difference_seconds,
-       metadata ->> 'source', (metadata ->> 'perfect_rows_written')::int
+       metadata ->> 'source', (metadata ->> 'perfect_rows_written')::int,
+       metadata -> 'resolution' ->> 'rule', metadata ->> 'resolution_policy'
   FROM public.lecture_recording_links
  WHERE lecture_id = ANY(%s::uuid[])
 """
@@ -210,7 +212,7 @@ class RecordingLinkRepository:
             return None
         (lecture_id_, session_date, lecture_meeting, lookup_user, organizer_user,
          is_cancelled, session_id, legacy_meeting, subject, recording_url,
-         cancelled_session, lecture_key, perfect_url) = row
+         cancelled_session, lecture_key, perfect_url, scheduled_start, scheduled_end) = row
         legacy_cancelled = str(cancelled_session or "").strip().lower() == "true"
         identity = canonical_transcript_identity(session_id) if session_id else None
         return RecordingTarget(
@@ -226,7 +228,8 @@ class RecordingLinkRepository:
             lecture_key=lecture_key,
             perfect_recording_url_empty=(None if lecture_key is None
                                          else not str(perfect_url or "").strip()),
-            thread_id=identity.thread_id if identity and identity.decoded else None)
+            thread_id=identity.thread_id if identity and identity.decoded else None,
+            scheduled_start=scheduled_start, scheduled_end=scheduled_end)
 
     def attempt(self, connection, lecture_id) -> dict | None:
         try:
@@ -237,7 +240,7 @@ class RecordingLinkRepository:
             return None
         keys = ("status", "stage_state", "reason", "attempt_count",
                 "next_attempt_after", "recording_url_written", "legacy_session_id",
-                "last_attempted_at")
+                "last_attempted_at", "resolution_policy")
         return dict(zip(keys, row))
 
     def details(self, connection, lecture_ids) -> dict[str, dict]:
@@ -260,7 +263,7 @@ class RecordingLinkRepository:
                 "next_attempt_after", "recording_url_written", "written_at",
                 "graph_lookup_status", "graph_http_status", "candidate_file_count",
                 "exact_candidate_count", "timestamp_difference_seconds", "source",
-                "perfect_rows_written")
+                "perfect_rows_written", "resolution_rule", "resolution_policy")
         found = {}
         for row in rows:
             item = dict(zip(keys, row))

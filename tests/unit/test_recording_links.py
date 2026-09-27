@@ -382,8 +382,8 @@ def test_cancelled_is_terminal_not_a_defect():
 @pytest.mark.parametrize("graph, status", [
     (FakeGraph(errors={"/users/": graph_error(403)}), m.GRAPH_LOOKUP_FAILED),
     (FakeGraph(collections={"/users/": []}), m.GRAPH_RECORDING_NOT_FOUND),
-    (FakeGraph(collections={"/users/": [recording(rid="a"), recording(rid="b")]}),
-     m.GRAPH_RECORDING_AMBIGUOUS),
+    (FakeGraph(collections={"/users/": [recording(created="not-a-time")]}),
+     m.GRAPH_LOOKUP_FAILED),
 ])
 def test_no_file_is_considered_without_an_exact_graph_recording(graph, status):
     discovery = StaticDiscovery([drive_item()])
@@ -596,11 +596,12 @@ def resolve(*, mode="write", attempt=None, recording_url=None, cancelled="false"
     return result, result["stages"][RECORDING_LINK], attempts
 
 
-def attempt(state, status, *, due=None, written=False):
+def attempt(state, status, *, due=None, written=False, policy=None):
     from test_pipeline_state import LEGACY_SESSION_ID
     return {"status": status, "stage_state": state, "reason": status, "attempt_count": 2,
             "next_attempt_after": due, "recording_url_written": written,
-            "legacy_session_id": LEGACY_SESSION_ID, "last_attempted_at": NOW}
+            "legacy_session_id": LEGACY_SESSION_ID, "last_attempted_at": NOW,
+            "resolution_policy": policy}
 
 
 def test_observe_mode_is_exactly_the_phase_4a_answer_and_reads_no_new_table():
@@ -641,7 +642,8 @@ def test_a_retry_not_yet_due_waits_and_a_due_one_runs():
 
 
 def test_a_review_outcome_stays_put_until_a_human_acts():
-    result, stage, _ = resolve(attempt=attempt(REVIEW_REQUIRED, m.AMBIGUOUS_RECORDING_FILES))
+    result, stage, _ = resolve(attempt=attempt(REVIEW_REQUIRED, m.AMBIGUOUS_RECORDING_FILES,
+                                               policy=m.RESOLUTION_POLICY_VERSION))
     assert (stage["state"], stage["action"], stage["reason"]) == (
         REVIEW_REQUIRED, MANUAL_REVIEW_REQUIRED, m.AMBIGUOUS_RECORDING_FILES)
     assert result["requires_review"] is True

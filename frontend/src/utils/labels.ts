@@ -315,3 +315,82 @@ export const BACKFILL_MODE: Record<string, string> = {
   PREVIEW: 'Preview',
   EXECUTE: 'Backfill',
 }
+
+// --- Positive Moments Media -------------------------------------------------
+
+export const MEDIA_STATUS: Record<string, { label: string; tone: Tone }> = {
+  PLANNED: { label: 'Planned', tone: 'neutral' },
+  WAITING_FOR_RECORDING: { label: 'Waiting for recording', tone: 'waiting' },
+  WAITING_FOR_ALIGNMENT: { label: 'Waiting for alignment', tone: 'waiting' },
+  REVIEW_REQUIRED_ALIGNMENT: { label: 'Alignment needs review', tone: 'review' },
+  READY_TO_RENDER: { label: 'Ready to render', tone: 'info' },
+  QUEUED: { label: 'Queued', tone: 'info' },
+  RENDERING: { label: 'Rendering', tone: 'info' },
+  RENDER_SUCCEEDED: { label: 'Rendered', tone: 'info' },
+  UPLOAD_PENDING: { label: 'Upload pending', tone: 'info' },
+  UPLOADING: { label: 'Uploading', tone: 'info' },
+  COMPLETED: { label: 'Ready', tone: 'ok' },
+  FAILED_RETRYABLE: { label: 'Failed — will retry', tone: 'waiting' },
+  FAILED_FINAL: { label: 'Failed', tone: 'error' },
+  NO_MEDIA: { label: 'No clips', tone: 'quiet' },
+  NEEDS_REVIEW: { label: 'Needs review', tone: 'review' },
+  FAILED: { label: 'Failed', tone: 'error' },
+}
+
+export function mediaStatus(value?: string | null) {
+  return (value && MEDIA_STATUS[value]) || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export const ANALYSIS_STATE: Record<string, { label: string; tone: Tone }> = {
+  NOT_ANALYZED: { label: 'Not analyzed', tone: 'neutral' },
+  ANALYZING: { label: 'Analyzing', tone: 'info' },
+  NO_POSITIVE_MOMENTS: { label: 'No positive moments', tone: 'quiet' },
+  MOMENTS_FOUND: { label: 'Moments found', tone: 'ok' },
+  REVIEW_REQUIRED: { label: 'Needs review', tone: 'review' },
+  STALE: { label: 'Out of date', tone: 'waiting' },
+  FAILED: { label: 'Analysis failed', tone: 'error' },
+}
+
+export function analysisState(value?: string | null) {
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return ANALYSIS_STATE[value] || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export function transcriptState(value?: string | null) {
+  if (value === 'READY') return { label: 'Ready', tone: 'ok' as Tone }
+  if (value === 'NOT_APPLICABLE') return { label: 'Not applicable', tone: 'quiet' as Tone }
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return { label: 'Not ready', tone: 'waiting' as Tone }
+}
+
+export function mediaRecordingState(value?: string | null) {
+  if (value === 'READY') return { label: 'Ready', tone: 'ok' as Tone }
+  if (value === 'NOT_APPLICABLE') return { label: 'Not applicable', tone: 'quiet' as Tone }
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return { label: 'Waiting', tone: 'waiting' as Tone }
+}
+
+export const MOMENT_CATEGORIES: Record<string, string> = {
+  trainer: 'Trainer',
+  teaching_method: 'Teaching method',
+  content: 'Content',
+  support: 'Support',
+  learning_experience: 'Learning experience',
+}
+
+export const RUN_MODE: Record<string, string> = {
+  PREVIEW: 'Preview',
+  ANALYZE: 'Analysis',
+  RENDER: 'Render',
+  RETRY_FAILED: 'Retry failed',
+}
+
+/** Seconds -> h:mm:ss (media positions) */
+export function clock(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '—'
+  const whole = Math.max(0, Math.round(seconds))
+  const h = Math.floor(whole / 3600)
+  const m = Math.floor((whole % 3600) / 60)
+  const s = whole % 60
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}

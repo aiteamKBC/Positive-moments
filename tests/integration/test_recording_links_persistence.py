@@ -387,3 +387,142 @@ def test_the_migration_created_the_stage_table_with_its_state_check(db):
             db.execute("INSERT INTO public.lecture_recording_links "
                        "(lecture_id, link_version, status, stage_state) "
                        "VALUES (%s, 'v', 's', 'INVENTED')", (lecture["lecture_id"],))
+
+
+# ---------------------------------------------------------------------------
+# full-recording resolution, persisted
+# ---------------------------------------------------------------------------
+
+def media_item(lecture, *, lead, n, minutes=None, size=None):
+    item = file_item(lecture, lead=lead, n=n)
+    if minutes is not None:
+        item["video"] = {"duration": int(minutes * 60_000)}
+    if size is not None:
+        item["size"] = size
+    return item
+
+
+def link_metadata(db, lecture):
+    return db.execute("SELECT metadata, recording_item_id FROM public.lecture_recording_links "
+                      "WHERE lecture_id = %s", (lecture["lecture_id"],)).fetchone()
+
+
+def test_a_short_false_start_resolves_to_the_full_lecture_and_only_recording_columns_change(db):
+    lecture, session_id, key = seed_world(db)
+    before_session = row_json(db, "qa_doctors_sessions", "session_id", session_id)
+    before_perfect = row_json(db, "qa_perfect_lectures", "lecture_key", key)
+    before_checklist = checklist(db, session_id)
+    # item-0 is the full lecture (so the fake createLink answers for it); item-1
+    # is a 3-minute false start named just before it.
+    service, _ = service_for(graph_for(session_id), [
+        media_item(lecture, lead=20, n=1, minutes=3, size=25_000_000),
+        media_item(lecture, lead=80, n=0, minutes=124, size=950_000_000)])
+    result = runner_with(service).execute(db, LINK_RECORDING, session_date=DAY,
+                                          lecture_id=lecture["lecture_id"])
+    assert result["legacy_rows_written"] == 2
+
+    after_session = row_json(db, "qa_doctors_sessions", "session_id", session_id)
+    assert after_session["recording_url"] == ORG_LINK
+    assert after_session["recording_item_id"] == "item-0"
+    assert without(after_session, SESSION_RECORDING_COLUMNS) == \
+        without(before_session, SESSION_RECORDING_COLUMNS)
+    assert without(row_json(db, "qa_perfect_lectures", "lecture_key", key),
+                   PERFECT_RECORDING_COLUMNS) == without(before_perfect,
+                                                         PERFECT_RECORDING_COLUMNS)
+    assert checklist(db, session_id) == before_checklist
+
+    assert link_state(db, lecture)[:2] == (m.WRITTEN, COMPLETE)
+    metadata, item_id = link_metadata(db, lecture)
+    assert item_id == "item-0"
+    assert metadata["resolution_policy"] == m.RESOLUTION_POLICY_VERSION
+    resolution = metadata["resolution"]
+    assert resolution["rule"] == "full_recording_selected_over_short_fragment"
+    assert resolution["expected_duration_seconds"] == 7200
+    assert resolution["selected"]["duration_seconds"] == 124 * 60
+    assert [x["duration_seconds"] for x in resolution["rejected"]] == [180]
+    assert metadata["raw_candidate_count"] == 2
+    assert "https://" not in str(metadata)
+    details = RecordingLinkRepository().details(db, [lecture["lecture_id"]])
+    assert details[str(lecture["lecture_id"])]["resolution_rule"] == \
+        "full_recording_selected_over_short_fragment"
+
+
+def test_two_full_length_files_stay_in_review_under_the_current_policy(db):
+    lecture, session_id, _ = seed_world(db)
+    service, _ = service_for(graph_for(session_id), [
+        media_item(lecture, lead=20, n=0, minutes=105),
+        media_item(lecture, lead=80, n=1, minutes=112)])
+    runner_with(service).execute(db, LINK_RECORDING, session_date=DAY,
+                                 lecture_id=lecture["lecture_id"])
+    assert link_state(db, lecture)[:2] == (m.AMBIGUOUS_RECORDING_FILES, REVIEW_REQUIRED)
+    assert row_json(db, "qa_doctors_sessions", "session_id", session_id)["recording_url"] is None
+    stage = resolve(db, lecture)
+    assert (stage["state"], stage["reason"]) == (REVIEW_REQUIRED, m.AMBIGUOUS_RECORDING_FILES)
+
+
+def test_a_multipart_lecture_is_persisted_as_multipart_review(db):
+    lecture, session_id, _ = seed_world(db)
+    service, _ = service_for(graph_for(session_id), [
+        media_item(lecture, lead=20, n=0, minutes=55),
+        media_item(lecture, lead=80, n=1, minutes=65)])
+    runner_with(service).execute(db, LINK_RECORDING, session_date=DAY,
+                                 lecture_id=lecture["lecture_id"])
+    assert link_state(db, lecture)[:2] == (m.MULTIPART_RECORDING, REVIEW_REQUIRED)
+    assert resolve(db, lecture)["reason"] == m.MULTIPART_RECORDING
+    assert row_json(db, "qa_doctors_sessions", "session_id", session_id)["recording_url"] is None
+
+
+def test_an_ambiguity_recorded_before_the_policy_is_re_evaluated_automatically(db):
+    """The deployed state: rows written by recording_link_v1 carry no policy."""
+    lecture, session_id, _ = seed_world(db)
+    db.execute("""
+        INSERT INTO public.lecture_recording_links
+            (lecture_id, legacy_session_id, link_version, status, stage_state, reason,
+             exact_candidate_count, attempt_count, metadata)
+        VALUES (%s, %s, 'recording_link_v1', 'AMBIGUOUS_RECORDING_FILES',
+                'REVIEW_REQUIRED', '2 exact of 2 candidates', 2, 3,
+                '{"ambiguous_filenames": ["a.mp4", "b.mp4"]}'::jsonb)""",
+               (lecture["lecture_id"], session_id))
+    stage = resolve(db, lecture)
+    assert (stage["state"], stage["action"], stage["reason"]) == (
+        MISSING, LINK_RECORDING, "RECORDING_RESOLUTION_POLICY_CHANGED")
+
+    service, _ = service_for(graph_for(session_id), [
+        media_item(lecture, lead=20, n=1, minutes=3),
+        media_item(lecture, lead=80, n=0, minutes=124)])
+    result = runner_with(service).execute(db, LINK_RECORDING, session_date=DAY,
+                                          lecture_id=lecture["lecture_id"])
+    assert result["legacy_rows_written"] == 2
+    assert row_json(db, "qa_doctors_sessions", "session_id",
+                    session_id)["recording_url"] == ORG_LINK
+    status, state, attempts, _, written = link_state(db, lecture)
+    assert (status, state, attempts, written) == (m.WRITTEN, COMPLETE, 4, True)
+
+
+def test_a_re_evaluation_that_is_still_ambiguous_settles_and_is_not_retried(db):
+    lecture, session_id, _ = seed_world(db)
+    db.execute("""
+        INSERT INTO public.lecture_recording_links
+            (lecture_id, legacy_session_id, link_version, status, stage_state,
+             attempt_count, metadata)
+        VALUES (%s, %s, 'recording_link_v1', 'AMBIGUOUS_RECORDING_FILES',
+                'REVIEW_REQUIRED', 1, '{}'::jsonb)""", (lecture["lecture_id"], session_id))
+    graph = graph_for(session_id)
+    service, source = service_for(graph, [
+        media_item(lecture, lead=20, n=0, minutes=105),
+        media_item(lecture, lead=80, n=1, minutes=112)])
+    runner = runner_with(service)
+    runner.execute(db, LINK_RECORDING, session_date=DAY, lecture_id=lecture["lecture_id"])
+    assert link_state(db, lecture)[:3] == (m.AMBIGUOUS_RECORDING_FILES, REVIEW_REQUIRED, 2)
+    calls = len(graph.paths)
+    again = runner.execute(db, LINK_RECORDING, session_date=DAY,
+                           lecture_id=lecture["lecture_id"])
+    assert again["summary"]["status"] == "NOOP"          # the current policy has spoken
+    assert len(graph.paths) == calls and source.calls == 1
+    assert resolve(db, lecture)["state"] == REVIEW_REQUIRED
+
+
+def test_the_target_carries_the_lecture_schedule(db):
+    lecture, session_id, _ = seed_world(db)
+    target = RecordingLinkRepository().target(db, lecture["lecture_id"], session_id)
+    assert target.expected_duration_seconds == 7200

@@ -11,14 +11,18 @@
  * There is no Force Reprocess here and there is no generic action runner. The
  * three guarded endpoints are the whole mutation surface.
  *
- * The tabs are prepared for Lecture Parts and Media, which do not exist yet -
- * so they are not shown. An empty tab promising future media would be a lie
- * told in navigation.
+ * The Positive Moments tab is the lecture's Media view: analysis, recording
+ * and every moment with its clip (components/media/LectureMomentsPanel.vue).
+ * Lecture Parts do not exist yet, so no tab promises them.
+ *
+ * The full recording is opened through an authenticated API call on click;
+ * its URL is never embedded in the page.
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import ActionPlanDialog from '../components/ActionPlanDialog.vue'
+import LectureMomentsPanel from '../components/media/LectureMomentsPanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AttendanceCell from '../components/operations/AttendanceCell.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -35,8 +39,10 @@ import {
   getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan,
   recoverAttendance, retryLecture,
 } from '../services/operations'
+import { openRecording } from '../services/media'
+import { errorMessage, openSafely } from '../utils/format'
 import type { DirectoryEntry, LectureDetail } from '../types/operations'
-import { businessDate, businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
+import { businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
 import {
   actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
   recordingOwner, recordingSource, retryReason, stageLabel, stageState,
@@ -96,7 +102,7 @@ const tabs = computed(() => [
   { id: 'overview', label: 'Overview' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'qa', label: 'Quality' },
-  { id: 'moments', label: 'Positive Moments', count: analysed.value ? momentCount.value : null },
+  { id: 'moments', label: 'Positive Moments', count: null },
 ])
 
 const versionEntries = computed<[string, string][]>(() => {
@@ -112,6 +118,15 @@ const versionEntries = computed<[string, string][]>(() => {
   }
   return rows
 })
+
+/** The full recording, fetched on click through the authenticated API. */
+async function openFullRecording() {
+  try {
+    openSafely(await openRecording(lectureId.value))
+  } catch (caught) {
+    notice.value = errorMessage(caught, 'This lecture has no recording that can be opened yet.')
+  }
+}
 
 async function openAction(kind: 'Retry' | 'Recover attendance') {
   actionKind.value = kind
@@ -338,13 +353,14 @@ async function confirmAction() {
               The recording link and the Excel stamp are produced by the live legacy workflows, not by this
               platform. Waiting on them does not hold the lecture open.
             </p>
-            <a
+            <button
               v-if="entry?.recording_url"
+              type="button"
               class="btn-secondary btn-sm mt-3"
-              :href="entry.recording_url"
-              target="_blank"
-              rel="noopener noreferrer"
-            ><AppIcon name="play" :size="14" /> Watch the recording</a>
+              @click="openFullRecording"
+            >
+              <AppIcon name="play" :size="14" /> Open full recording
+            </button>
           </SectionPanel>
         </section>
 
@@ -432,13 +448,14 @@ async function confirmAction() {
             {{ recording.last_reason ?? humanise(recording.reason) }}
           </p>
 
-          <a
-            v-if="recording.recording_available && entry?.recording_url"
+          <button
+            v-if="recording.recording_available"
+            type="button"
             class="btn-secondary btn-sm mt-3"
-            :href="entry.recording_url"
-            target="_blank"
-            rel="noopener noreferrer"
-          ><AppIcon name="play" :size="14" /> Watch full lecture</a>
+            @click="openFullRecording"
+          >
+            <AppIcon name="play" :size="14" /> Open full recording
+          </button>
         </SectionPanel>
 
         <SectionPanel title="Run history" flush>
@@ -532,33 +549,13 @@ async function confirmAction() {
         </p>
       </template>
 
-      <!-- ================= Positive Moments ================= -->
+      <!-- ================= Positive Moments / Media ================= -->
       <template v-else>
-        <SectionPanel title="Positive moments">
-          <EmptyState
-            v-if="!analysed"
-            compact
-            tone="neutral"
-            icon="moments"
-            title="No positive-moment analysis for this lecture yet"
-            message="Positive-moment analysis runs separately from the processing pipeline. When it completes for this lecture, its moments will be linked here."
-          />
-          <template v-else>
-            <p class="text-sm text-body">
-              The analysis found
-              <strong class="font-semibold text-ink">{{ momentCount }}</strong>
-              positive moment{{ momentCount === 1 ? '' : 's' }} in this lecture on
-              {{ businessDate(lecture.session_date) }}.
-            </p>
-            <RouterLink
-              v-if="momentKey"
-              class="btn-primary mt-4"
-              :to="{ name: 'positive-moment-detail', params: { sessionKey: momentKey } }"
-            >
-              <AppIcon name="moments" :size="16" /> Open the moments
-            </RouterLink>
-          </template>
-        </SectionPanel>
+        <LectureMomentsPanel :lecture-id="lecture.lecture_id" :session-date="lecture.session_date" />
+        <p v-if="analysed && momentKey" class="text-xs text-muted">
+          The historical V5 analysis ({{ momentCount }} moment{{ momentCount === 1 ? '' : 's' }}) is still available in
+          <RouterLink class="font-semibold underline" :to="{ name: 'positive-moment-detail', params: { sessionKey: momentKey } }">the Positive Moments archive</RouterLink>.
+        </p>
       </template>
 
       <ActionPlanDialog

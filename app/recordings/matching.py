@@ -1,15 +1,20 @@
 """
 Candidate matching: the safe matching contract, as a pure function.
 
-A driveItem is THE lecture's recording only if all of these hold:
-  * the Graph recording was resolved exactly (organizer route, exact call id);
+A driveItem is an EXACT candidate for the lecture's recording only if all of
+these hold:
+  * the Graph recording(s) for the lecture's exact call id were resolved
+    through the organizer route;
   * its file name carries the lecture's exact normalized subject;
   * its file name is dated the lecture's own business date;
-  * its file-name timestamp is at or before Graph's createdDateTime, by at
-    most MAX_FILE_LEAD_SECONDS (a file named after Graph's timestamp never
-    matches - no evidence supports that case);
-  * it is the ONLY candidate for which all of the above hold.
+  * its file-name timestamp is at or before the createdDateTime of one of those
+    Graph recordings, by at most MAX_FILE_LEAD_SECONDS (a file named after
+    Graph's timestamp never matches - no evidence supports that case).
 
+Exactly one exact candidate for exactly one Graph recording is the match, as
+it always was. Anything more is handed to app/recordings/resolution.py, which
+selects the full delivery over a short fragment and otherwise fails closed
+(AMBIGUOUS_RECORDING_FILES, MULTIPART_RECORDING, GRAPH_RECORDING_AMBIGUOUS).
 Anything else is a reason, never a guess.
 """
 from __future__ import annotations
@@ -17,9 +22,7 @@ from __future__ import annotations
 from app.common.time import parse_graph_datetime
 from app.recordings.candidates import normalize_subject
 from app.recordings.models import (
-    AMBIGUOUS_RECORDING_FILES,
     EXACT_RECORDING_FILE_MATCHED,
-    GRAPH_RECORDING_FOUND,
     MAX_FILE_LEAD_SECONDS,
     RECORDING_FILE_NOT_FOUND,
     SUBJECT_MISMATCH,
@@ -28,6 +31,7 @@ from app.recordings.models import (
     GraphRecordingLookup,
     MatchResult,
 )
+from app.recordings.resolution import DEFAULT_POLICY, Exact, ResolutionPolicy, resolve
 
 
 def lead_seconds(graph_created_at: str, candidate: DriveItemCandidate) -> float | None:
@@ -42,10 +46,26 @@ def timestamp_ok(lead: float | None) -> bool:
     return lead is not None and 0 <= lead <= MAX_FILE_LEAD_SECONDS
 
 
+def pair(candidate: DriveItemCandidate, recordings) -> tuple:
+    """
+    (lead, recording) for the Graph recording this file belongs to: the one
+    whose createdDateTime it precedes by the least within the allowed window;
+    failing that, the nearest one (so a mismatch can still report its lead).
+    """
+    leads = [(lead_seconds(r.created_at, candidate), r) for r in recordings]
+    inside = [pair_ for pair_ in leads if timestamp_ok(pair_[0])]
+    if inside:
+        return min(inside, key=lambda pair_: pair_[0])
+    return min(leads, key=lambda pair_: abs(pair_[0]))
+
+
 def match_candidates(*, subject: str | None, session_date: str,
-                     graph: GraphRecordingLookup, candidates) -> MatchResult:
-    if graph is None or graph.status != GRAPH_RECORDING_FOUND or not graph.created_at:
+                     graph: GraphRecordingLookup, candidates,
+                     expected_duration_seconds: float | None = None,
+                     policy: ResolutionPolicy = DEFAULT_POLICY) -> MatchResult:
+    if graph is None or not graph.resolvable:
         raise ValueError("matching requires an exactly resolved Graph recording")
+    recordings = graph.logical_recordings
     expected = normalize_subject(subject)
     parsed = [c for c in candidates if c.file_timestamp is not None]
     total = len(parsed)
@@ -54,31 +74,36 @@ def match_candidates(*, subject: str | None, session_date: str,
 
     assessed = []
     for candidate in parsed:
-        lead = lead_seconds(graph.created_at, candidate)
-        assessed.append((candidate, lead,
+        lead, recording = pair(candidate, recordings)
+        assessed.append((candidate, lead, recording,
                          candidate.subject_key == expected,
                          candidate.file_date == session_date,
                          timestamp_ok(lead)))
 
-    exact = sorted(((c, lead) for c, lead, subject_ok, date_ok, time_ok in assessed
+    exact = sorted((Exact(c, lead, recording)
+                    for c, lead, recording, subject_ok, date_ok, time_ok in assessed
                     if subject_ok and date_ok and time_ok),
-                   key=lambda pair: pair[1])
-    same_subject_leads = [lead for _, lead, subject_ok, date_ok, _ in assessed
+                   key=lambda e: (e.lead, e.candidate.drive_id, e.candidate.item_id))
+    same_subject_leads = [lead for _, lead, _, subject_ok, date_ok, _ in assessed
                           if subject_ok and date_ok]
     nearest = min(same_subject_leads, key=abs) if same_subject_leads else None
     common = {"candidate_file_count": total, "exact_candidate_count": len(exact),
-              "nearest_same_subject_lead_seconds": nearest}
+              "nearest_same_subject_lead_seconds": nearest,
+              "exact_candidates": tuple(e.candidate for e in exact)}
 
-    if len(exact) == 1:
-        candidate, lead = exact[0]
-        return MatchResult(status=EXACT_RECORDING_FILE_MATCHED, candidate=candidate,
-                           timestamp_difference_seconds=lead, **common)
-    if len(exact) > 1:
-        return MatchResult(status=AMBIGUOUS_RECORDING_FILES,
-                           ambiguous_filenames=tuple(c.name for c, _ in exact),
-                           **common)
+    if exact:
+        resolved = resolve(exact, recordings=recordings,
+                           expected=expected_duration_seconds, policy=policy)
+        if resolved.status == EXACT_RECORDING_FILE_MATCHED:
+            return MatchResult(status=EXACT_RECORDING_FILE_MATCHED,
+                               candidate=resolved.chosen.candidate,
+                               timestamp_difference_seconds=resolved.chosen.lead,
+                               resolution=resolved.detail, **common)
+        return MatchResult(status=resolved.status,
+                           ambiguous_filenames=tuple(e.candidate.name for e in exact),
+                           resolution=resolved.detail, **common)
     if same_subject_leads:
         return MatchResult(status=TIMESTAMP_MISMATCH, **common)
-    if any(date_ok and time_ok for _, _, _, date_ok, time_ok in assessed):
+    if any(date_ok and time_ok for *_, date_ok, time_ok in assessed):
         return MatchResult(status=SUBJECT_MISMATCH, **common)
     return MatchResult(status=RECORDING_FILE_NOT_FOUND, **common)

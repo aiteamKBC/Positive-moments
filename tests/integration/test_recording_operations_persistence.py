@@ -294,11 +294,16 @@ def test_two_graph_recordings_for_one_call_are_ambiguous_and_never_written(db):
     call_id = graph.collections["/users/"][0]["callId"]
     graph.collections["/users/"] = [
         {"id": "rec-1", "callId": call_id, "createdDateTime": GRAPH_CREATED.isoformat()},
-        {"id": "rec-2", "callId": call_id, "createdDateTime": GRAPH_CREATED.isoformat()}]
+        # A second, distinct recording of unknown length with no file of its
+        # own: it may be the delivery, so the visible file proves nothing.
+        {"id": "rec-2", "callId": call_id,
+         "createdDateTime": (GRAPH_CREATED + timedelta(minutes=50)).isoformat()}]
     service, source = service_for(graph, [file_item(lecture)])
     result = runner_with(service).execute(db, LINK_RECORDING, session_date=DAY,
                                           lecture_id=lecture["lecture_id"])
-    assert result["legacy_rows_written"] == 0 and source.calls == 0
+    # Same-call recordings are carried into resolution (files are looked at),
+    # which fails closed here.
+    assert result["legacy_rows_written"] == 0 and source.calls == 1
     assert row_json(db, "qa_doctors_sessions", "session_id", session_id)["recording_url"] is None
     assert not [p for v, p in graph.paths if v == "POST"]
     items = execute_items(db, DAY, resolver=resolver(), repository=RecordingLinkRepository(),

@@ -18,6 +18,13 @@ Classification is exhaustive and never conflates failure with absence:
   * 200, no recording with the call id  -> GRAPH_RECORDING_NOT_FOUND
   * 200, several with the call id       -> GRAPH_RECORDING_AMBIGUOUS
   * 200, exactly one, valid timestamp   -> GRAPH_RECORDING_FOUND
+
+Several recordings for one call (a false start and the real delivery, or an
+interrupted lecture) are NOT a dead end: GRAPH_RECORDING_AMBIGUOUS carries
+every one of them - createdDateTime, endDateTime, contentCorrelationId - so the
+resolution policy can decide from file and duration evidence, and fails closed
+when it cannot. Byte-identical duplicates (same id, or same created AND end
+time) are collapsed first: two entries for one moment are one recording.
 """
 from __future__ import annotations
 
@@ -30,6 +37,7 @@ from app.recordings.models import (
     GRAPH_RECORDING_AMBIGUOUS,
     GRAPH_RECORDING_FOUND,
     GRAPH_RECORDING_NOT_FOUND,
+    GraphRecording,
     GraphRecordingLookup,
 )
 
@@ -39,6 +47,35 @@ def recordings_path(meeting_lookup_user_id: str, meeting_id: str) -> str:
         raise ValueError("an organizer lookup id and a meeting id are both required")
     return (f"/users/{quote(meeting_lookup_user_id.strip(), safe='')}"
             f"/onlineMeetings/{quote(meeting_id.strip(), safe='')}/recordings")
+
+
+def _valid_time(value) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parse_graph_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
+def distinct_recordings(rows) -> tuple:
+    """Graph recordings for one call, identical duplicates collapsed, in time order."""
+    seen, found = set(), []
+    for row in rows:
+        created = row.get("createdDateTime")
+        end = _valid_time(row.get("endDateTime"))
+        moment = (parse_graph_datetime(created).timestamp(),
+                  parse_graph_datetime(end).timestamp() if end else None)
+        keys = {("id", row.get("id"))} if row.get("id") else set()
+        keys.add(("moment", moment))
+        if keys & seen:
+            continue
+        seen |= keys
+        found.append(GraphRecording(recording_id=row.get("id"), created_at=created,
+                                    end_at=end,
+                                    content_correlation_id=row.get("contentCorrelationId")))
+    return tuple(sorted(found, key=lambda r: parse_graph_datetime(r.created_at)))
 
 
 def _diagnostic(error: GraphError) -> str | None:
@@ -83,18 +120,18 @@ class RecordingMetadataGateway:
                 "call_id_matches": len(matches)}
         if not matches:
             return GraphRecordingLookup(status=GRAPH_RECORDING_NOT_FOUND, **base)
-        if len(matches) > 1:
-            return GraphRecordingLookup(status=GRAPH_RECORDING_AMBIGUOUS, **base)
-        recording = matches[0]
-        created = recording.get("createdDateTime")
-        try:
-            parse_graph_datetime(created)
-        except (TypeError, ValueError):
+        if any(_valid_time(row.get("createdDateTime")) is None for row in matches):
             return GraphRecordingLookup(status=GRAPH_LOOKUP_FAILED,
                                         error_code="invalid_created_date_time",
                                         diagnostic_reason="GRAPH_RESPONSE_INVALID",
                                         **base)
+        recordings = distinct_recordings(matches)
+        if len(recordings) > 1:
+            return GraphRecordingLookup(status=GRAPH_RECORDING_AMBIGUOUS,
+                                        recordings=recordings, **base)
+        [recording] = recordings
         return GraphRecordingLookup(
-            status=GRAPH_RECORDING_FOUND, recording_id=recording.get("id"),
-            created_at=created,
-            content_correlation_id=recording.get("contentCorrelationId"), **base)
+            status=GRAPH_RECORDING_FOUND, recording_id=recording.recording_id,
+            created_at=recording.created_at, end_at=recording.end_at,
+            content_correlation_id=recording.content_correlation_id,
+            recordings=recordings, **base)
