@@ -24,7 +24,7 @@ from app.media import access
 from app.media.dashboard import dashboard, lecture_media
 from app.media.delivery import DeliveredItem, DeliveryError, SourceFile
 from app.media.moments_media import MediaSettings, PositiveMomentMediaService
-from app.media.render.base import SUCCEEDED, RenderStatus
+from app.media.render.base import SUCCEEDED, RenderProviderError, RenderStatus
 from app.media.runner import MediaJobWorker, MediaRunProcessor, MediaRunner
 from app.media.webhook import handle_creatomate_webhook, webhook_token
 from app.positive_moments import policy as p
@@ -194,12 +194,19 @@ class FakeProvider:
 
 
 class FakeSharePoint:
-    def __init__(self, tmp_path, *, fail_upload=None):
+    def __init__(self, tmp_path, *, fail_upload=None, source_errors=()):
         self.tmp_path, self.fail_upload = tmp_path, fail_upload
         self.uploads, self.temp_files = [], []
+        self.source_errors = list(source_errors)
+        self.source_calls = 0
 
     def source_file(self, drive_id, item_id):
-        return SourceFile(item_id, "x.mp4", 1, RECORDING_WINDOW, TEMP_URL)
+        self.source_calls += 1
+        if self.source_errors:
+            raise self.source_errors.pop(0)
+        # A fresh temporary URL on every call, as Graph issues them.
+        return SourceFile(item_id, "x.mp4", 1, RECORDING_WINDOW,
+                          f"{TEMP_URL}&fresh={self.source_calls}")
 
     def item_facts(self, drive_id, item_id):
         return {"name": None, "size_bytes": 1, "duration_seconds": RECORDING_WINDOW}
@@ -390,7 +397,7 @@ def test_the_full_render_and_delivery_flow(db, tmp_path):
 
     assert claim_and_step(db, provider, sharepoint) == "RENDERING"
     [request] = provider.submitted
-    assert request.source_url == TEMP_URL
+    assert request.source_url == f"{TEMP_URL}&fresh=1"
     assert (request.trim_start_seconds, request.trim_duration_seconds) == (0.0, 135.0)
 
     [job] = MediaPlatformRepository().jobs_for_lecture(db, lecture["lecture_id"])
@@ -469,6 +476,132 @@ def test_a_submit_that_died_mid_call_is_never_silently_resubmitted(db, tmp_path)
     [job] = MediaPlatformRepository().jobs_for_lecture(db, lecture["lecture_id"])
     assert job["error_code"] == "SUBMIT_OUTCOME_UNKNOWN"
     assert svc.retry_failed(db, lecture_id=lecture["lecture_id"]) == 1     # explicit only
+
+
+# ---------------------------------------------------------------------------
+# the source download URL (production failure 2026-09-27)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def settle(db):
+    """
+    submit() commits by design (the double-spend guard), so these tests leave
+    committed jobs behind. Retire them afterwards, or a later test's
+    claim_job() would pick them up.
+    """
+    lectures = []
+    yield lectures.append
+    db.rollback()
+    db.execute("UPDATE public.positive_moment_media_jobs SET status = 'SUPERSEDED', "
+               "locked_at = NULL, locked_by = NULL WHERE lecture_id = ANY(%s) "
+               "AND status NOT IN ('COMPLETED', 'SUPERSEDED')",
+               ([str(lecture_id) for lecture_id in lectures],))
+    db.commit()
+
+
+def _only_job(db, lecture):
+    [job] = MediaPlatformRepository().jobs_for_lecture(db, lecture["lecture_id"])
+    return job
+
+
+def _due(db, job):
+    db.execute("UPDATE public.positive_moment_media_jobs SET next_retry_at = now() "
+               "WHERE job_id = %s", (job["job_id"],))
+
+
+def test_a_job_that_failed_for_no_source_url_submits_exactly_once_on_retry(
+        db, tmp_path, settle, caplog):
+    """The production shape: FAILED_RETRYABLE at RENDER_SUBMIT, no render id."""
+    caplog.set_level("DEBUG")
+    lecture, svc = planned(db)
+    settle(lecture["lecture_id"])
+    svc.queue_render(db, lecture_id=lecture["lecture_id"])
+    provider = FakeProvider()
+    unavailable = DeliveryError("SOURCE_GRAPH_DOWNLOAD_URL_UNAVAILABLE", "no download URL")
+    failing = FakeSharePoint(tmp_path, source_errors=[unavailable])
+    assert claim_and_step(db, provider, failing) == "FAILED_RETRYABLE"
+    job = _only_job(db, lecture)
+    assert (job["error_code"], job["resume_stage"], job["provider_render_id"],
+            job["submitted_at"]) == ("SOURCE_GRAPH_DOWNLOAD_URL_UNAVAILABLE", "SUBMIT", None, None)
+    assert provider.submitted == []                              # no Creatomate call
+
+    # The operator's Retry re-arms THIS job; no second job, no second plan.
+    assert svc.retry_failed(db, lecture_id=lecture["lecture_id"]) == 1
+    _due(db, job)      # the test transaction's now() predates the retry stamp
+    sharepoint = FakeSharePoint(tmp_path)
+    assert claim_and_step(db, provider, sharepoint) == "QUEUED"               # re-armed
+    assert claim_and_step(db, provider, sharepoint) == "RENDERING"            # submitted
+    assert len(provider.submitted) == 1
+    assert provider.submitted[0].source_url == f"{TEMP_URL}&fresh=1"         # fresh, in memory
+    job = _only_job(db, lecture)
+    assert job["provider_render_id"] and job["error_code"] is None
+    assert len(MediaPlatformRepository().jobs_for_lecture(db, lecture["lecture_id"])) == 1
+
+    stored = everything_as_text(db)
+    assert "SECRET-TEMP-URL" not in stored and "tempauth" not in stored
+    assert "SECRET-TEMP-URL" not in caplog.text and "tempauth" not in caplog.text
+
+
+def test_every_submission_reads_a_new_source_url(db, tmp_path, settle):
+    lecture, svc = planned(db)
+    settle(lecture["lecture_id"])
+    svc.queue_render(db, lecture_id=lecture["lecture_id"])
+    provider = FakeProvider()
+    provider.submit = lambda request: (_ for _ in ()).throw(
+        RenderProviderError("CREATOMATE_UNREACHABLE", "unreachable", retryable=True))
+    sharepoint = FakeSharePoint(tmp_path)
+    assert claim_and_step(db, provider, sharepoint) == "FAILED_RETRYABLE"
+    _due(db, _only_job(db, lecture))
+    ok = FakeProvider()
+    assert claim_and_step(db, ok, sharepoint) == "QUEUED"
+    assert claim_and_step(db, ok, sharepoint) == "RENDERING"
+    assert sharepoint.source_calls == 2
+    assert ok.submitted[0].source_url == f"{TEMP_URL}&fresh=2"    # not the first attempt's
+
+
+def test_a_retry_of_a_job_with_a_render_id_reconciles_instead_of_resubmitting(
+        db, tmp_path, settle):
+    lecture, svc = planned(db)
+    settle(lecture["lecture_id"])
+    svc.queue_render(db, lecture_id=lecture["lecture_id"])
+    provider, sharepoint = FakeProvider(), FakeSharePoint(tmp_path)
+    assert claim_and_step(db, provider, sharepoint) == "RENDERING"
+    job = _only_job(db, lecture)
+    # A poll failure leaves the job FAILED_RETRYABLE, resuming at POLL, with its render id.
+    db.execute("UPDATE public.positive_moment_media_jobs SET status = 'FAILED_RETRYABLE', "
+               "resume_stage = 'POLL' WHERE job_id = %s", (job["job_id"],))
+    assert svc.retry_failed(db, lecture_id=lecture["lecture_id"]) == 1
+    _due(db, job)      # the test transaction's now() predates the retry stamp
+    assert claim_and_step(db, provider, sharepoint) == "RENDERING"         # re-armed to poll
+    assert claim_and_step(db, provider, sharepoint) == "RENDERING"         # polled
+    # A QUEUED job that already holds a render id is reconciled, not resubmitted.
+    db.execute("UPDATE public.positive_moment_media_jobs SET status = 'QUEUED' "
+               "WHERE job_id = %s", (job["job_id"],))
+    assert claim_and_step(db, provider, sharepoint) == "RENDERING"
+    assert _only_job(db, lecture)["provider_render_id"] == job["provider_render_id"]
+    assert len(provider.submitted) == 1                                    # never twice
+    assert sharepoint.source_calls == 1 and provider.status_calls >= 1
+
+
+@pytest.mark.parametrize("code, operator_retry", [
+    ("SOURCE_GRAPH_PERMISSION_DENIED", 1),          # recoverable once access is granted
+    ("SOURCE_GRAPH_ITEM_NOT_FOUND", 0),             # the plan's source is gone: re-plan
+    ("SOURCE_GRAPH_ITEM_MISMATCH", 0),
+])
+def test_permanent_source_failures_are_final_and_never_reach_creatomate(
+        db, tmp_path, settle, code, operator_retry):
+    lecture, svc = planned(db)
+    settle(lecture["lecture_id"])
+    svc.queue_render(db, lecture_id=lecture["lecture_id"])
+    provider = FakeProvider()
+    failing = FakeSharePoint(tmp_path,
+                             source_errors=[DeliveryError(code, "refused", retryable=False)])
+    assert claim_and_step(db, provider, failing) == "FAILED_FINAL"
+    job = _only_job(db, lecture)
+    assert (job["error_code"], job["attempt_count"]) == (code, 1)          # no timed retries
+    assert provider.submitted == []
+    assert MediaPlatformRepository().claim_job(db, "r") is None
+    assert svc.retry_failed(db, lecture_id=lecture["lecture_id"]) == operator_retry
 
 
 def test_a_job_claim_is_atomic_across_connections(db):

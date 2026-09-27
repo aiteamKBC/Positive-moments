@@ -6,9 +6,12 @@ No network (tests/conftest.py), no real Creatomate credits, no real Graph.
 """
 from __future__ import annotations
 
+import email.message
 import io
 import json
 import os
+import urllib.request
+import urllib.response
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -410,14 +413,166 @@ def test_the_same_file_already_uploaded_is_adopted(tmp_path):
     assert delivered.adopted_existing is True and delivered.item_id == "same"
 
 
+SOURCE_PATH = "/drives/d/items/i?$select=id,name,size,video,file,content.downloadUrl"
+CONTENT_PATH = "/drives/d/items/i/content"
+REDIRECT_URL = "https://kbc.sharepoint.com/_layouts/15/download.aspx?tempauth=SECRET-REDIRECT"
+
+
+class SourceGraph(FakeGraph):
+    """FakeGraph plus the no-redirect `/content` probe."""
+
+    def __init__(self, item=None, *, redirect=(302, REDIRECT_URL), errors=None):
+        super().__init__(json={SOURCE_PATH: item} if item is not None else {},
+                         errors=errors)
+        self.redirect = redirect
+
+    def redirect_location(self, path):
+        self.paths.append(("GET-NO-REDIRECT", path))
+        self._raise_if(path)
+        return self.redirect
+
+
+def source_item(**extra):
+    return {"id": "i", "name": "x.mp4", "size": 10, "video": {"duration": 7_976_062}, **extra}
+
+
 def test_a_fresh_source_url_is_read_for_the_exact_item_and_kept_out_of_repr():
-    graph = FakeGraph(json={
-        "/drives/d/items/i?$select=id,name,size,video,file,@microsoft.graph.downloadUrl": {
-            "id": "i", "name": "x.mp4", "size": 10, "video": {"duration": 7_976_062},
-            "@microsoft.graph.downloadUrl": TEMP_URL}})
+    graph = SourceGraph(source_item(**{"@microsoft.graph.downloadUrl": TEMP_URL}))
     source = SharePointMedia(graph).source_file("d", "i")
     assert source.download_url == TEMP_URL and source.duration_seconds == 7976.062
     assert "SECRET-TEMP" not in repr(source)
+    # The annotation is requested the way Graph honours it, and /content is not needed.
+    assert graph.paths == [("GET", SOURCE_PATH)]
+
+
+def test_a_missing_annotation_falls_back_to_the_content_redirect_location():
+    graph = SourceGraph(source_item())                   # the production shape, 2026-09-27
+    source = SharePointMedia(graph).source_file("d", "i")
+    assert source.download_url == REDIRECT_URL
+    assert graph.paths == [("GET", SOURCE_PATH), ("GET-NO-REDIRECT", CONTENT_PATH)]
+    assert "SECRET-REDIRECT" not in repr(source)
+
+
+def test_a_different_drive_item_fails_closed_before_any_url_is_used():
+    graph = SourceGraph(source_item(id="other", **{"@microsoft.graph.downloadUrl": TEMP_URL}))
+    with pytest.raises(DeliveryError) as caught:
+        SharePointMedia(graph).source_file("d", "i")
+    assert caught.value.code == "SOURCE_GRAPH_ITEM_MISMATCH"
+    assert caught.value.retryable is False
+    assert ("GET-NO-REDIRECT", CONTENT_PATH) not in graph.paths
+
+
+@pytest.mark.parametrize("redirect, code", [
+    ((200, None), "SOURCE_GRAPH_DOWNLOAD_URL_UNAVAILABLE"),       # no annotation, no redirect
+    ((302, None), "SOURCE_GRAPH_CONTENT_REDIRECT_MISSING"),
+    ((302, "http://insecure.example/x"), "SOURCE_GRAPH_CONTENT_REDIRECT_MISSING"),
+])
+def test_no_usable_download_location_is_a_safe_retryable_error(redirect, code):
+    with pytest.raises(DeliveryError) as caught:
+        SharePointMedia(SourceGraph(source_item(), redirect=redirect)).source_file("d", "i")
+    assert caught.value.code == code and caught.value.retryable is True
+    assert "://" not in str(caught.value) and "insecure.example" not in str(caught.value)
+
+
+@pytest.mark.parametrize("status, code", [
+    (403, "SOURCE_GRAPH_PERMISSION_DENIED"), (401, "SOURCE_GRAPH_PERMISSION_DENIED"),
+    (404, "SOURCE_GRAPH_ITEM_NOT_FOUND"),
+])
+@pytest.mark.parametrize("failing_path", [SOURCE_PATH, CONTENT_PATH])
+def test_permanent_graph_refusals_are_final_not_timed_retries(status, code, failing_path):
+    graph = SourceGraph(source_item(), errors={failing_path: graph_error(status)})
+    with pytest.raises(DeliveryError) as caught:
+        SharePointMedia(graph).source_file("d", "i")
+    assert caught.value.code == code and caught.value.retryable is False
+
+
+def test_a_transient_graph_failure_stays_retryable():
+    graph = SourceGraph(source_item(), errors={SOURCE_PATH: graph_error(503, "serviceNotAvailable")})
+    with pytest.raises(DeliveryError) as caught:
+        SharePointMedia(graph).source_file("d", "i")
+    assert caught.value.code == "SOURCE_ITEM_HTTP_503" and caught.value.retryable is True
+
+
+# -- the real Graph client, through the real urllib opener, no network ------------
+
+class _Body(io.BytesIO):
+    def __init__(self, data=b""):
+        super().__init__(data)
+        self.bytes_read = 0
+
+    def read(self, *args):
+        chunk = super().read(*args)
+        self.bytes_read += len(chunk)
+        return chunk
+
+
+class FakeGraphHost(urllib.request.BaseHandler):
+    """Answers https requests in-process; records every URL it is asked for."""
+
+    handler_order = 100                     # ahead of urllib's real HTTPSHandler
+
+    def __init__(self, status, headers=None, body=b""):
+        self.status, self.headers, self.body = status, headers or {}, _Body(body)
+        self.requests = []
+
+    def https_open(self, request):
+        self.requests.append(request.full_url)
+        message = email.message.Message()
+        for name, value in self.headers.items():
+            message[name] = value
+        response = urllib.response.addinfourl(self.body, message, request.full_url, self.status)
+        response.msg = "fake"
+        return response
+
+
+def graph_client(host=None, *, json_body=None):
+    from app.graph.client import Phase1GraphClient, _NoRedirect
+    from app.graph.transport import GraphResponse
+    client = Phase1GraphClient(tenant_id="t", client_id="c", client_secret="s",
+                               scope="https://graph.microsoft.com/.default",
+                               base_url="https://graph.test/v1.0")
+    client._access_token = lambda: "TOKEN"
+    if host is not None:
+        client._build_no_redirect_opener = lambda: urllib.request.build_opener(_NoRedirect, host)
+    if json_body is not None:
+        client._open = lambda request, service: GraphResponse(
+            json.dumps(json_body).encode(), "application/json", 200)
+    return client
+
+
+def test_the_graph_client_keeps_the_download_annotation():
+    client = graph_client(json_body=source_item(**{"@microsoft.graph.downloadUrl": TEMP_URL}))
+    assert client.get_json(SOURCE_PATH)["@microsoft.graph.downloadUrl"] == TEMP_URL
+
+
+def test_content_redirect_is_read_but_never_followed_and_no_body_is_read():
+    big = b"\0" * (4 * 1024 * 1024)                 # stands in for a multi-GB recording
+    host = FakeGraphHost(302, {"Location": REDIRECT_URL}, big)
+    status, location = graph_client(host).redirect_location(CONTENT_PATH)
+    assert (status, location) == (302, REDIRECT_URL)
+    assert host.requests == ["https://graph.test/v1.0/drives/d/items/i/content"]  # not followed
+    assert host.body.bytes_read == 0
+
+
+def test_a_content_endpoint_that_streams_the_file_is_not_read():
+    host = FakeGraphHost(200, {"Content-Type": "video/mp4"}, b"\0" * (4 * 1024 * 1024))
+    assert graph_client(host).redirect_location(CONTENT_PATH) == (200, None)
+    assert host.body.bytes_read == 0
+
+
+def test_a_content_refusal_is_a_sanitised_graph_error():
+    from app.graph.transport import GraphError
+    host = FakeGraphHost(403, {"Content-Type": "application/json"},
+                         b'{"error": {"code": "accessDenied", "message": "denied"}}')
+    with pytest.raises(GraphError) as caught:
+        graph_client(host).redirect_location(CONTENT_PATH)
+    assert (caught.value.status, caught.value.code) == (403, "accessDenied")
+    assert "TOKEN" not in str(caught.value)
+
+
+def test_the_no_redirect_probe_refuses_absolute_urls():
+    with pytest.raises(ValueError):
+        graph_client().redirect_location(REDIRECT_URL)
 
 
 def test_output_names_are_deterministic_and_collision_resistant():

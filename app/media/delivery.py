@@ -13,8 +13,8 @@ The VPS has run out of memory before. Nothing here holds a video in RAM:
 
 SECRETS
 -------
-`@microsoft.graph.downloadUrl` and an upload session's `uploadUrl` are
-pre-authenticated. They are used once, in memory, and never logged, returned
+`@microsoft.graph.downloadUrl`, the Location of a `/content` redirect and an
+upload session's `uploadUrl` are pre-authenticated. They are used once, in memory, and never logged, returned
 to a caller outside the runner, or persisted. Upload-session requests carry NO
 Authorization header (Graph rejects one, and it would leak the token to the
 upload host).
@@ -42,7 +42,11 @@ UPLOAD_CHUNK_UNIT = 320 * 1024
 UPLOAD_CHUNK_BYTES = 32 * UPLOAD_CHUNK_UNIT            # 10 MiB
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024 * 1024              # a clip, not a lecture
 
-SOURCE_FIELDS = "id,name,size,video,file,@microsoft.graph.downloadUrl"
+# `content.downloadUrl` is how $select asks Graph for the download annotation.
+# Selecting the annotation's own name (`@microsoft.graph.downloadUrl`) is
+# silently ignored: measured on the production tenant 2026-09-27, the item came
+# back without it. The reply still carries it as `@microsoft.graph.downloadUrl`.
+SOURCE_FIELDS = "id,name,size,video,file,content.downloadUrl"
 
 
 class DeliveryError(Exception):
@@ -77,6 +81,26 @@ class DeliveredItem:
 def _default_open(method, url, headers, body, timeout):
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _source_graph_error(error: GraphError) -> DeliveryError:
+    """
+    A Graph failure reading the source recording, as a safe job error.
+
+    404/410 and 401/403 do not heal by waiting, so they are final instead of
+    retrying on a timer; an operator Retry is honoured for a permission
+    failure once access is granted (see RECOVERABLE_FINAL).
+    """
+    if error.status in (404, 410):
+        return DeliveryError("SOURCE_GRAPH_ITEM_NOT_FOUND",
+                             "the source recording DriveItem was not found", retryable=False)
+    if error.status in (401, 403):
+        return DeliveryError("SOURCE_GRAPH_PERMISSION_DENIED",
+                             f"Graph refused access to the source recording ({error.code})",
+                             retryable=False)
+    return DeliveryError(f"SOURCE_ITEM_HTTP_{error.status}",
+                         f"source recording could not be read ({error.code})",
+                         retryable=error.status is None or error.status >= 429)
 
 
 def safe_filename(value: str, limit: int = 60) -> str:
@@ -114,25 +138,47 @@ class SharePointMedia:
     # -- the source recording ----------------------------------------------------
 
     def source_file(self, drive_id: str, item_id: str) -> SourceFile:
-        """A FRESH temporary download URL for exactly this DriveItem."""
+        """
+        A FRESH temporary download URL for exactly this DriveItem.
+
+        Read immediately before every submit, never stored. The item must be
+        the recording's durable identity. The download annotation is preferred;
+        without it, `/content` is asked for its redirect WITHOUT following it,
+        so the recording itself is never downloaded here.
+        """
         self.calls += 1
+        path = f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}"
         try:
-            item = self.graph.get_json(
-                f"/drives/{quote(drive_id, safe='')}/items/{quote(item_id, safe='')}"
-                f"?$select={SOURCE_FIELDS}")
+            item = self.graph.get_json(f"{path}?$select={SOURCE_FIELDS}")
         except GraphError as error:
-            raise DeliveryError(f"SOURCE_ITEM_HTTP_{error.status}",
-                                f"source recording could not be read ({error.code})",
-                                retryable=error.status is None or error.status >= 429) from None
+            raise _source_graph_error(error) from None
+        if str(item.get("id") or "") != str(item_id):
+            raise DeliveryError("SOURCE_GRAPH_ITEM_MISMATCH",
+                                "Graph returned a different DriveItem than the recording's "
+                                "durable identity", retryable=False)
         url = item.get("@microsoft.graph.downloadUrl")
-        if str(item.get("id") or "") != str(item_id) or not str(url or "").startswith("https://"):
-            raise DeliveryError("SOURCE_DOWNLOAD_URL_UNAVAILABLE",
-                                "Graph returned no download URL for the source recording")
+        if not str(url or "").startswith("https://"):
+            url = self._content_redirect(path)
         duration = (item.get("video") or {}).get("duration")
         return SourceFile(item_id=str(item_id), name=item.get("name"),
                           size_bytes=item.get("size"),
                           duration_seconds=(int(duration) / 1000.0 if duration else None),
                           download_url=url)
+
+    def _content_redirect(self, path: str) -> str:
+        """The Location of `/content`'s redirect, in memory only; never followed."""
+        self.calls += 1
+        try:
+            status, location = self.graph.redirect_location(f"{path}/content")
+        except GraphError as error:
+            raise _source_graph_error(error) from None
+        if not 300 <= status < 400:
+            raise DeliveryError("SOURCE_GRAPH_DOWNLOAD_URL_UNAVAILABLE",
+                                "Graph returned no download URL for the source recording")
+        if not str(location or "").startswith("https://"):
+            raise DeliveryError("SOURCE_GRAPH_CONTENT_REDIRECT_MISSING",
+                                "Graph /content did not redirect to an https download location")
+        return location
 
     def item_facts(self, drive_id: str, item_id: str) -> dict:
         """Name, size and measured duration of a DriveItem. No URL."""

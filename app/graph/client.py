@@ -1,7 +1,15 @@
 import json
+import urllib.error
 import urllib.request
 
 from app.graph.transport import GraphAppClient, GraphError, GraphResponse
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse every redirect: urllib then raises HTTPError carrying the 3xx."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 
 class Phase1GraphClient(GraphAppClient):
@@ -45,6 +53,52 @@ class Phase1GraphClient(GraphAppClient):
 
     def get_json(self, path_or_url: str, *, headers=None):
         return self.request("GET", path_or_url, headers=headers).json()
+
+    def _build_no_redirect_opener(self):
+        return urllib.request.build_opener(_NoRedirect)
+
+    def redirect_location(self, path: str) -> tuple[int, str | None]:
+        """
+        GET a Graph path WITHOUT following its redirect: (status, Location).
+
+        For `/drives/{d}/items/{i}/content` Graph answers 302 to a
+        pre-authenticated download URL. The redirect is never followed and no
+        response body is read, so a multi-GB recording is never downloaded
+        here. The Location is a temporary credential: callers keep it in
+        memory only; it is never logged or placed in an error.
+        """
+        if path.startswith(("http://", "https://")):
+            raise ValueError("redirect_location takes a Graph path, not an absolute URL")
+        request = urllib.request.Request(
+            self.base_url + "/" + path.lstrip("/"),
+            headers={"Authorization": "Bearer " + self._access_token()},
+            method="GET")
+        try:
+            response = self._build_no_redirect_opener().open(request,
+                                                             timeout=self.timeout_seconds)
+        except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                location = exc.headers.get("Location")
+                exc.close()
+                return exc.code, location or None
+            code, message = "request_failed", "request was rejected"
+            try:
+                error = json.loads(exc.read()).get("error", {})
+                code = str(error.get("code", code))
+                message = str(error.get("message", message))
+            except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                pass
+            finally:
+                exc.close()
+            raise GraphError("Microsoft Graph", exc.code, code, message) from None
+        except urllib.error.URLError as exc:
+            reason = getattr(exc, "reason", None)
+            raise GraphError("Microsoft Graph", None,
+                             type(reason).__name__ if reason else "network_error",
+                             "network request failed") from None
+        status = response.status
+        response.close()            # a 2xx would be the file itself: never read it
+        return status, None
 
     def get_collection(self, path: str, *, headers=None) -> list[dict]:
         rows: list[dict] = []
