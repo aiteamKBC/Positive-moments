@@ -1,14 +1,7 @@
-# Positive Moments media runner: Positive Moments analysis runs, Creatomate
-# submissions/polling and SharePoint delivery. Concurrency 1.
-#
-# PROPOSED unit. Before installing, align User/Group, WorkingDirectory and the
-# Python interpreter with the existing units on the host:
-#     systemctl cat positive-moments-backfill.service
-# The media runner must use exactly the same checkout, virtualenv and
-# EnvironmentFile as the backfill runner.
-#
-# Restarting this service never queues or submits a render: money is spent
-# only on jobs an operator moved to QUEUED from the website.
+# Positive Moments media runner.
+# Analysis, Creatomate render processing and SharePoint delivery.
+# Restarting this service does not queue a render by itself.
+
 [Unit]
 Description=KBC Positive Moments media runner
 After=network-online.target
@@ -18,16 +11,20 @@ Wants=network-online.target
 Type=simple
 User=www-data
 Group=www-data
+
 WorkingDirectory=/var/www/Positive-moments
+
 EnvironmentFile=/var/www/Positive-moments/backend/config/.env
-ExecStart=/var/www/Positive-moments/venv/bin/python -m app.cli.media media-runner --poll-seconds 10
+Environment="PYTHONPATH=/var/www/Positive-moments"
+Environment="PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
+
+ExecStart=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.media media-runner --poll-seconds 10
+
 Restart=always
 RestartSec=10
-# SIGTERM: the unit in flight finishes; leases and run checkpoints make the
-# next start resume safely.
 KillSignal=SIGTERM
 TimeoutStopSec=300
-# Bounded memory: renders are streamed to one temp file, never held in RAM.
+
 MemoryMax=512M
 PrivateTmp=true
 NoNewPrivileges=true
