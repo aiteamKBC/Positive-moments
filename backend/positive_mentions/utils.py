@@ -2,7 +2,7 @@ import base64
 import json
 import re
 from datetime import date
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 TIMESTAMP_PATTERN = re.compile(
     r"^(?P<hours>\d+):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d(?:\.\d+)?)$"
@@ -35,29 +35,56 @@ def decode_session_id(session_key: str) -> str:
 
 
 def _decode_nav(value: str) -> dict:
+    # Stream writes standard base64 with padding; older links from this app
+    # used the URL-safe alphabet without it. Accept both.
     try:
-        padding = "=" * (-len(value) % 4)
-        decoded = base64.urlsafe_b64decode(value + padding).decode("utf-8")
+        padded = value + "=" * (-len(value) % 4)
+        decoded = base64.b64decode(padded.replace("-", "+").replace("_", "/")).decode("utf-8")
         payload = json.loads(decoded)
         return payload if isinstance(payload, dict) else {}
     except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
 
 
+# A SharePoint site, team site or OneDrive root at the start of a file path.
+SITE_ROOT_PATTERN = re.compile(r"^/(?:sites|teams|personal)/[^/]+")
+
+
+def _stream_player_parts(parts):
+    """
+    The Stream player URL for a direct file link, or None to keep the link.
+
+    Only the player page (`/_layouts/15/stream.aspx?id=<file>`) reads the `nav`
+    start time. A direct `.../Recordings/<file>.mp4` web URL is redirected to
+    the player and the redirect drops `nav`, so the video starts at 0:00.
+    Sharing links (`/:v:/...`) and links already on the player keep their
+    shape: Stream honours `nav` on both.
+    """
+    path = unquote(parts.path)
+    if not path.lower().endswith(".mp4"):
+        return None
+    root = SITE_ROOT_PATTERN.match(path)
+    if root is None:
+        return None
+    return parts.scheme, parts.netloc, f"{root.group(0)}/_layouts/15/stream.aspx", {"id": path}
+
+
 def timestamped_sharepoint_url(recording_url: str, start_seconds: float) -> str:
     parts = urlsplit(recording_url)
     params = dict(parse_qsl(parts.query, keep_blank_values=True))
+    scheme, netloc, path = parts.scheme, parts.netloc, parts.path
+    player = _stream_player_parts(parts)
+    if player is not None:
+        scheme, netloc, path, params = player
     nav = _decode_nav(params.get("nav", ""))
     playback = nav.get("playbackOptions")
     if not isinstance(playback, dict):
         playback = {}
     playback["startTimeInSeconds"] = start_seconds
     nav["playbackOptions"] = playback
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(nav, separators=(",", ":")).encode()
-    ).decode().rstrip("=")
-    params["nav"] = encoded
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+    # The same encoding Stream's own "share at time" links use.
+    params["nav"] = base64.b64encode(json.dumps(nav, separators=(",", ":")).encode()).decode()
+    return urlunsplit((scheme, netloc, path, urlencode(params, quote_via=quote), parts.fragment))
 
 
 def four_months_ago(today: date) -> date:
