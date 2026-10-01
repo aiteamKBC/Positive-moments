@@ -437,3 +437,27 @@ def test_publishing_paths_gate_on_qa_status_not_delivery_status():
     from app.db.repositories.qa_writer import LOAD_RENDERED, LOAD_RENDERED_FOR_LECTURE
     for statement in (LOAD_RENDERED, LOAD_RENDERED_FOR_LECTURE):
         assert "e2.updated_at > e.updated_at" in statement
+
+
+# --- 13f. a scored lecture that the speech guard says was not delivered --------
+
+def test_13f_a_completed_lecture_of_mostly_silence_is_re_run():
+    """Ray | PMP 2026-09-30: 26-minute span, 10.4 minutes of speech, short call."""
+    rows = complete_rows(
+        selection=[selection_row(duration_minutes=26,
+                                 actual_start=SCHEDULED_START - timedelta(minutes=6),
+                                 actual_end=SCHEDULED_START + timedelta(minutes=19))],
+        documents=[(DOCUMENT_ID, PARSER_VERSION, "PARSED", 187, SELECTION_ID, NOW,
+                    "b" * 64, 624_000)])
+    stage = resolve(rows)["stages"][QA_EVALUATION]
+    assert stage["state"] == STALE
+    assert stage["action"] == RUN_QA
+    assert stage["reason"] == "DELIVERY_POLICY_RECLASSIFIES_DELIVERED"
+    assert stage["delivery_classification"] == "NON_DELIVERED"
+
+
+def test_13g_a_completed_lecture_with_real_speech_stays_complete():
+    rows = complete_rows(
+        documents=[(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW,
+                    "b" * 64, 95 * 60_000)])
+    assert resolve(rows)["stages"][QA_EVALUATION]["state"] == COMPLETE

@@ -34,11 +34,13 @@ and it is injected, never constructed here - see `attendance_probe`.
 """
 from datetime import date as _date
 from datetime import datetime as _datetime
+from datetime import timedelta as _timedelta
 from datetime import timezone as _timezone
 
 from app.attendance.coverage import is_authoritative
 from app.attendance.roster import ATTENDANCE_RESOLUTION_VERSION
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.db.repositories.qa_shadow import SPOKEN_MS_SQL
 from app.db.repositories.transcript_selections import TranscriptSelectionRepository
 from app.lectures.duplicate_service import DuplicateResolutionService
 from app.lectures.duplicates import (
@@ -102,7 +104,7 @@ from app.orchestration.stages import (
     WAITING,
 )
 from app.qa.delivery import TRANSCRIPT_COVERAGE_INCOMPLETE, classify_delivery
-from app.qa.deterministic import NON_DELIVERED
+from app.qa.deterministic import DELIVERED, NON_DELIVERED
 from app.qa.evidence_policy import DEFAULT_EVIDENCE_POLICY
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION, PENDING_ATTENDANCE_DATA
 from app.qa.recovery import recovery_state
@@ -118,6 +120,8 @@ from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
 from app.transcripts.identity import canonical_key
 from app.transcripts.selection import (
+    NO_CANDIDATES,
+    NO_SAME_DAY_CANDIDATES,
     SELECTED,
     SELECTION_VERSION,
     combined_source_fingerprint,
@@ -143,6 +147,26 @@ ACCEPTED_PARSER_VERSIONS = (PARSER_VERSION, SEAM_PARSER_VERSION)
 
 # A QA status that is a real, finished answer rather than work in progress.
 TERMINAL_QA_STATUSES = ("COMPLETED", "NON_DELIVERED")
+
+# A lecture with no Teams transcript at all on its day. 2026-09-30 "G2 Keith -
+# Commercial Intelligence" was never held: Graph had no transcript for that
+# day, and the lecture sat "in progress" re-selecting nothing every cycle.
+# Once the day is over AND the selector has answered "nothing" again after the
+# grace below, the honest answer is that the lecture was not delivered; the
+# transcript-dependent stages then have no work, rather than work outstanding.
+# NO_WINDOW_CANDIDATES is deliberately absent: a same-day transcript at another
+# time may be a moved lecture, which is not the same fact.
+NO_TRANSCRIPT_SELECTION_STATUSES = (NO_CANDIDATES, NO_SAME_DAY_CANDIDATES)
+NO_TRANSCRIPT_GRACE = _timedelta(hours=12)
+NO_TRANSCRIPT_FOR_OCCURRENCE = "NO_TRANSCRIPT_FOR_OCCURRENCE"
+# Everything downstream of the transcript. Attendance is included because the
+# platform resolves it against the transcript's speaker inventory
+# (app/attendance/service.py), so with no transcript it is not owed - running
+# it would fail every cycle on "no speaker inventory".
+NO_TRANSCRIPT_DEPENDENT_STAGES = (
+    CANONICAL_CUES, SPEAKERS, ATTENDANCE, ENGAGEMENT, QA_EVALUATION, QA_RENDER,
+    PERFECT_ELIGIBILITY, LEGACY_QA_SYNC, PERFECT_SYNC, RECORDING_LINK, EXCEL_SYNC)
+QA_NON_DELIVERED = "QA_NON_DELIVERED"
 
 # Both are successful renders. `RENDERED_NON_DELIVERED` is the legacy cancelled
 # output - eleven Not Met rows and a fixed evidence string - and treating it as
@@ -230,11 +254,12 @@ SELECT p.provider_transcript_id
 
 DOCUMENTS = """
 SELECT d.document_id, d.parser_version, d.parse_status, d.cue_count,
-       d.selection_id, d.updated_at, d.source_content_sha256
+       d.selection_id, d.updated_at, d.source_content_sha256,
+       ({spoken})
   FROM public.lecture_transcript_documents d
  WHERE d.lecture_id = %s AND d.parser_version = ANY(%s)
  ORDER BY d.updated_at DESC, d.document_id DESC
-"""
+""".format(spoken=SPOKEN_MS_SQL.format(document="d.document_id").strip())
 
 ENGAGEMENT_LINEAGE = """
 SELECT m.engagement_id, m.document_id, m.attendance_snapshot_id,
@@ -433,6 +458,13 @@ class PipelineStateResolver:
         stages[RECORDING_LINK] = self._recording_link(connection, lecture,
                                                       legacy_session_id)
         stages[EXCEL_SYNC] = self._excel_sync(connection, perfect_result, perfect_key)
+        if lecture.get("_not_delivered") == NO_TRANSCRIPT_FOR_OCCURRENCE:
+            for stage in NO_TRANSCRIPT_DEPENDENT_STAGES:
+                stages[stage] = _stage(NOT_APPLICABLE, reason=NO_TRANSCRIPT_FOR_OCCURRENCE)
+        elif (stages[QA_EVALUATION]["state"] == COMPLETE
+              and (downstream.get("current_evaluation") or {}).get("qa_status")
+              == NON_DELIVERED):
+            lecture["_not_delivered"] = QA_NON_DELIVERED
 
         headline, runnable, operator_actions = self._next_action(stages)
         next_action, blocking_stage = headline
@@ -442,6 +474,8 @@ class PipelineStateResolver:
                       or executable_stage in self.observed_only_stages
                       else executable_action)
         lecture.pop("_occurrence", None)
+        lecture.pop("_spoken_seconds", None)
+        not_delivered_reason = lecture.pop("_not_delivered", None)
         return {
             **lecture,
             "orchestration_version": ORCHESTRATION_VERSION,
@@ -467,6 +501,11 @@ class PipelineStateResolver:
             **attendance_flag(downstream["attendance_source_authoritative"]),
             "perfect_policy_version": self.perfect_eligibility_version,
             "is_suppressed_duplicate": False,
+            # The lecture did not happen: QA said so, or there was no Teams
+            # transcript for its day. Consumers must not wait for attendance
+            # or describe it as a lecture still owed anything.
+            "not_delivered": not_delivered_reason is not None,
+            "not_delivered_reason": not_delivered_reason,
             "duplicate_resolution": duplicate,
             "versions": {
                 "selection_version": self.selection_version,
@@ -538,6 +577,7 @@ class PipelineStateResolver:
             "operator_actions": [],
             "is_complete": True, "requires_review": False, "is_waiting": False,
             "is_suppressed_duplicate": True,
+            "not_delivered": False, "not_delivered_reason": None,
             "duplicate_resolution": {
                 "case": CASE_SUPPRESSED, "role": "SUPPRESSED_DUPLICATE",
                 "winner_lecture_id": annotation.get("winner_lecture_id"),
@@ -645,6 +685,10 @@ class PipelineStateResolver:
                    "combined_duration_minutes": row[9],
                    "combined_duration_seconds": row[10]}
         if row[1] != "SELECTED":
+            if self._no_transcript_is_conclusive(lecture, row):
+                lecture["_not_delivered"] = NO_TRANSCRIPT_FOR_OCCURRENCE
+                return _stage(NOT_APPLICABLE, reason=NO_TRANSCRIPT_FOR_OCCURRENCE,
+                              **selection), lineage
             # A real, recorded answer of "nothing to select". Re-running is
             # free (pure DB) and is exactly what makes a late transcript
             # recoverable, so this is MISSING rather than FAILED.
@@ -656,6 +700,21 @@ class PipelineStateResolver:
             return _stage(STALE, action=SELECT_TRANSCRIPT, **freshness,
                           **selection), lineage
         return _stage(COMPLETE, **freshness, **selection), lineage
+
+    def _no_transcript_is_conclusive(self, lecture, row) -> bool:
+        """
+        "No transcript" becomes "not delivered" only when the selector said so
+        AFTER the grace that follows the scheduled end. An earlier "nothing"
+        may simply predate the transcript, and is retried as before.
+        """
+        if row[1] not in NO_TRANSCRIPT_SELECTION_STATUSES:
+            return False
+        occurrence = lecture.get("_occurrence")
+        scheduled_end = occurrence[1] if occurrence else None
+        if scheduled_end is None or row[4] is None:
+            return False
+        settled_after = scheduled_end + NO_TRANSCRIPT_GRACE
+        return row[4] >= settled_after and self._now() >= settled_after
 
     def _selection_freshness(self, connection, lecture, row) -> dict:
         """
@@ -751,6 +810,10 @@ class PipelineStateResolver:
         row = matching[0]
         document = {"document_id": str(row[0]), "parser_version": row[1],
                     "parse_status": row[2], "cue_count": row[3]}
+        # Carried for the delivery policy, never reported as stage detail.
+        spoken_ms = row[7] if len(row) > 7 else None
+        lecture["_spoken_seconds"] = (spoken_ms / 1000.0
+                                      if spoken_ms is not None else None)
         if row[2] in ("PARSED", "PARSED_WITH_WARNINGS"):
             return _stage(COMPLETE, **document), document
         if row[2] == "EMPTY_TRANSCRIPT":
@@ -898,6 +961,17 @@ class PipelineStateResolver:
                 return _stage(REVIEW_REQUIRED, action=RUN_QA, **detail)
             return _stage(REVIEW_REQUIRED, action=MANUAL_REVIEW_REQUIRED,
                           reason="GENERATION_BUDGET_EXHAUSTED", **detail)
+        if current["qa_status"] == "COMPLETED":
+            decision = self._delivery_decision(lecture, selection)
+            if decision is not None and decision.classification != DELIVERED:
+                # Scored as delivered, but the versioned delivery policy now
+                # says the transcript does not show a delivered lecture (a
+                # long span that is mostly silence). Re-running QA replaces the
+                # score with the honest answer; the old one stays on record.
+                return _stage(STALE, action=RUN_QA,
+                              reason="DELIVERY_POLICY_RECLASSIFIES_DELIVERED",
+                              delivery_classification=decision.classification,
+                              delivery=decision.diagnostics, **detail)
         if current["qa_status"] == NON_DELIVERED:
             decision = self._delivery_decision(lecture, selection)
             if decision is not None and decision.classification != NON_DELIVERED:
@@ -949,7 +1023,8 @@ class PipelineStateResolver:
             scheduled_start=occurrence[0], scheduled_end=occurrence[1],
             call_start=selection.get("actual_start"),
             call_end=selection.get("actual_end"),
-            transcript_span_seconds=float(seconds) if seconds is not None else None)
+            transcript_span_seconds=float(seconds) if seconds is not None else None,
+            spoken_seconds=lecture.get("_spoken_seconds"))
 
     def _qa_render(self, lecture, downstream) -> dict:
         rendered = downstream.get("rendered")

@@ -145,7 +145,9 @@ FOREIGN = {"recording_url": "https://recording.invalid/keep",
 
 def _cues(learner_speakers):
     """Two hours, trainer throughout; the named learners speak once each."""
-    cues = [(minute * 60_000, minute * 60_000 + 30_000, TRAINER, f"Synthetic line {minute}.")
+    # Nine minutes of every ten: enough speech to count as delivered under
+    # delivery_speech_guard_v2.
+    cues = [(minute * 60_000, minute * 60_000 + 540_000, TRAINER, f"Synthetic line {minute}.")
             for minute in range(0, 120, 10)]
     for index, name in enumerate(learner_speakers):
         start = (5 + index * 20) * 60_000

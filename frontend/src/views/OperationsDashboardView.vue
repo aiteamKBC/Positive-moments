@@ -108,7 +108,13 @@ const attention = computed(() => lectures.value.filter((row) => row.bucket !== '
 const isEmptyDay = computed(() => Boolean(day.value) && day.value?.canonical_lecture_count === 0)
 
 function trainerOf(row: LectureRow) {
-  return directory.value[row.lecture_id]?.trainer ?? null
+  const trainer = directory.value[row.lecture_id]?.trainer ?? null
+  // No legacy QA row is ever written for a lecture with no transcript, so
+  // there is no trainer line to show; say why the row is quiet instead.
+  if (!trainer && row.not_delivered_reason === 'NO_TRANSCRIPT_FOR_OCCURRENCE') {
+    return 'Session not delivered – no Teams transcript'
+  }
+  return trainer
 }
 
 function timeOf(row: LectureRow) {
@@ -311,6 +317,7 @@ function timeOf(row: LectureRow) {
                   <AttendanceCell
                     compact
                     :authoritative="row.attendance_source_authoritative"
+                    :not-delivered="row.not_delivered"
                     :coverage-status="row.attendance_coverage_status"
                   />
                 </td>
@@ -358,6 +365,7 @@ function timeOf(row: LectureRow) {
                     <AttendanceCell
                       compact
                       :authoritative="row.attendance_source_authoritative"
+                      :not-delivered="row.not_delivered"
                       :coverage-status="row.attendance_coverage_status"
                     />
                   </td>

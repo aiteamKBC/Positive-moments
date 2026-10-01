@@ -37,6 +37,29 @@ match the Teams recording's bounds to the millisecond.
 A long call is NOT proof of useful teaching. It only stops the platform from
 claiming the lecture was not delivered. The outcome is a review, never a QA
 score built from thirteen minutes.
+
+THE SPEECH GUARD (`delivery_speech_guard_v2`)
+---------------------------------------------
+The cue SPAN is first cue to last cue, so it counts silence. On 2026-09-30
+"Ray | PMP - June 2026" was never taught: the tutor did not join, a member of
+staff and four learners talked in the open meeting for about ten minutes, and
+the call ended 07:54-08:19 UTC against an 08:00-10:00 slot. The span was 26
+minutes, so the legacy gate called it delivered, the top speaker became the
+"trainer" and the model scored an 11-item checklist for a lecture that did
+not happen.
+
+So the legacy minimum is applied a third time, to the time somebody was
+actually speaking (the union of the cue intervals, overlaps counted once):
+
+    span meets the minimum but speech does not  -> the coverage guard above,
+        with the speech in place of the span: call live inside the schedule
+        for the minimum -> TRANSCRIPT_COVERAGE_INCOMPLETE (review, never a
+        score); otherwise -> NON_DELIVERED.
+
+Still no new threshold. On every lecture delivered in production up to
+2026-09-30 the lowest speech time was 30.2 minutes (a 210-minute workshop);
+the only lecture below 20 was the 30 Sep one above. Missing speech evidence
+(an input built before this guard) leaves the legacy answer untouched.
 """
 from dataclasses import dataclass, field
 from typing import Any
@@ -49,7 +72,12 @@ from app.qa.deterministic import (
 )
 
 
-DELIVERY_POLICY_VERSION = "delivery_coverage_guard_v1"
+DELIVERY_POLICY_VERSION = "delivery_speech_guard_v2"
+# Which rule produced a departure from the legacy gate. The QA fingerprint is
+# keyed on THIS, not on the policy version, so introducing v2 leaves every
+# answer the v1 rule already produced with its exact provenance.
+COVERAGE_RULE_VERSION = "delivery_coverage_guard_v1"
+SPEECH_RULE_VERSION = DELIVERY_POLICY_VERSION
 
 # A classification, and also the review reason carried by the evaluation. It is
 # not a new QA status: the evaluation is REVIEW_REQUIRED, as for every other
@@ -61,6 +89,8 @@ TRANSCRIPT_COVERAGE_INCOMPLETE = "TRANSCRIPT_COVERAGE_INCOMPLETE"
 TRANSCRIPT_MEETS_DELIVERY_MINIMUM = "TRANSCRIPT_MEETS_DELIVERY_MINIMUM"
 DURATION_BELOW_DELIVERY_MINIMUM = "DURATION_BELOW_DELIVERY_MINIMUM"
 CALL_COVERED_SCHEDULE_TRANSCRIPT_SHORT = "CALL_COVERED_SCHEDULE_TRANSCRIPT_SHORT"
+SPEECH_BELOW_DELIVERY_MINIMUM = "SPEECH_BELOW_DELIVERY_MINIMUM"
+CALL_COVERED_SCHEDULE_SPEECH_SHORT = "CALL_COVERED_SCHEDULE_SPEECH_SHORT"
 
 
 @dataclass(frozen=True)
@@ -72,12 +102,17 @@ class DeliveryDecision:
     @property
     def departs_from_legacy(self) -> bool:
         """True exactly when the legacy gate alone would have decided otherwise."""
-        return self.classification == TRANSCRIPT_COVERAGE_INCOMPLETE
+        return self.classification != self.diagnostics.get(
+            "legacy_classification", self.classification)
+
+    @property
+    def rule_version(self) -> str:
+        return self.diagnostics.get("delivery_rule_version", COVERAGE_RULE_VERSION)
 
 
 def classify_delivery(*, duration_minutes, scheduled_start, scheduled_end,
-                      call_start, call_end, transcript_span_seconds=None
-                      ) -> DeliveryDecision:
+                      call_start, call_end, transcript_span_seconds=None,
+                      spoken_seconds=None) -> DeliveryDecision:
     """
     Deterministic, offline, and shared: the QA service classifies with it and
     the pipeline state resolver asks it whether an old NON_DELIVERED answer
@@ -106,11 +141,22 @@ def classify_delivery(*, duration_minutes, scheduled_start, scheduled_end,
                                     if transcript_span_seconds is not None else None),
         "transcript_schedule_coverage_ratio": _ratio(
             transcript_span_seconds, scheduled_seconds),
+        "spoken_seconds": float(spoken_seconds) if spoken_seconds is not None else None,
+        "legacy_classification": delivery_status(duration_minutes),
+        "delivery_rule_version": COVERAGE_RULE_VERSION,
     }
+    call_covered_schedule = (overlap_seconds is not None
+                             and overlap_seconds >= minimum_seconds)
 
     if delivery_status(duration_minutes) == DELIVERED:
-        return _decision(DELIVERED, TRANSCRIPT_MEETS_DELIVERY_MINIMUM, diagnostics)
-    if overlap_seconds is not None and overlap_seconds >= minimum_seconds:
+        if spoken_seconds is None or float(spoken_seconds) >= minimum_seconds:
+            return _decision(DELIVERED, TRANSCRIPT_MEETS_DELIVERY_MINIMUM, diagnostics)
+        diagnostics["delivery_rule_version"] = SPEECH_RULE_VERSION
+        if call_covered_schedule:
+            return _decision(TRANSCRIPT_COVERAGE_INCOMPLETE,
+                             CALL_COVERED_SCHEDULE_SPEECH_SHORT, diagnostics)
+        return _decision(NON_DELIVERED, SPEECH_BELOW_DELIVERY_MINIMUM, diagnostics)
+    if call_covered_schedule:
         return _decision(TRANSCRIPT_COVERAGE_INCOMPLETE,
                          CALL_COVERED_SCHEDULE_TRANSCRIPT_SHORT, diagnostics)
     return _decision(NON_DELIVERED, DURATION_BELOW_DELIVERY_MINIMUM, diagnostics)

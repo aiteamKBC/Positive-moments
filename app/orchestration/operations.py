@@ -172,6 +172,8 @@ class OperationsService:
             "attendance_source_authoritative":
                 state["attendance_source_authoritative"],
             "is_suppressed_duplicate": bool(state.get("is_suppressed_duplicate")),
+            "not_delivered": bool(state.get("not_delivered")),
+            "not_delivered_reason": state.get("not_delivered_reason"),
             "duplicate_resolution": state.get("duplicate_resolution"),
             "bucket": bucket_for(state),
             "recording_link": self.recording_link_detail(connection, state),
@@ -235,7 +237,8 @@ class OperationsService:
     def pending_attendance(self, connection, session_date: _date) -> list[dict]:
         report = self.reconciliation.for_day(connection, session_date)
         return [row for row in report["lectures"]
-                if not row["attendance_source_authoritative"]]
+                if not row["attendance_source_authoritative"]
+                and not row.get("not_delivered")]
 
     def review_required(self, connection, session_date: _date) -> list[dict]:
         report = self.reconciliation.for_day(connection, session_date)

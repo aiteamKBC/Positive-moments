@@ -20,10 +20,24 @@ import uuid
 from app.common.errors import DATABASE_ERROR, PlatformError
 
 
+# Milliseconds during which at least one cue of a document is running: the
+# union of the cue intervals, so overlapping speakers count once. Each cue adds
+# only what it extends past the furthest end seen before it. Shared with the
+# pipeline state resolver so both ask the delivery policy the same question.
+SPOKEN_MS_SQL = """
+SELECT coalesce(sum(greatest(0, c.end_ms - greatest(c.start_ms,
+                                                   coalesce(c.covered_to, c.start_ms)))), 0)::bigint
+  FROM (SELECT x.start_ms, x.end_ms,
+               max(x.end_ms) OVER (ORDER BY x.start_ms, x.end_ms
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS covered_to
+          FROM public.lecture_transcript_cues x
+         WHERE x.document_id = {document}) c
+"""
+
 # One row per lecture: schedule, selection, combined transcript, canonical
 # document, engagement and the deterministic trainer, all pinned to the
 # approved roster rule and the validated algorithm versions.
-LOAD_QA_INPUTS = """
+LOAD_QA_INPUTS = ("""
 SELECT l.lecture_id, l.subject, l.module, l.meeting_id,
        l.scheduled_start, l.scheduled_end, l.session_date,
        s.selection_id, s.primary_provider_transcript_id, s.actual_start, s.actual_end,
@@ -42,7 +56,10 @@ SELECT l.lecture_id, l.subject, l.module, l.meeting_id,
        -- about to evaluate. Appended, never interleaved: every positional
        -- index above is part of an existing contract.
        sn.source_row_count, sn.present_row_count, sn.effective_member_count,
-       (sn.metadata ->> 'source_rows_any_status')::int
+       (sn.metadata ->> 'source_rows_any_status')::int,
+       -- The delivery speech guard's evidence: milliseconds of actual speech
+       -- in THIS document. Appended for the same reason as the counts above.
+       ({SPOKEN_MS_SQL})
   FROM public.lecture_sessions l
   JOIN public.lecture_transcript_selections s ON s.lecture_id = l.lecture_id
   JOIN public.lecture_combined_transcripts cb ON cb.selection_id = s.selection_id
@@ -92,7 +109,8 @@ SELECT l.lecture_id, l.subject, l.module, l.meeting_id,
           ORDER BY sn2.created_at DESC, sn2.snapshot_id DESC
           LIMIT 1)
  ORDER BY l.scheduled_start, l.subject
-"""
+""").replace("{SPOKEN_MS_SQL}",
+             SPOKEN_MS_SQL.format(document="d.document_id").strip())
 
 # The lecture-scoped variant, a SEPARATE statement for the same reason the
 # engagement loader keeps one: the scope is part of the contract, so it must be
@@ -191,7 +209,9 @@ class QaInputRepository:
              "attendance_source_row_count": row[38],
              "attendance_present_row_count": row[39],
              "attendance_effective_member_count": row[40],
-             "attendance_source_rows_any_status": row[41]}
+             "attendance_source_rows_any_status": row[41],
+             "spoken_seconds": (row[42] / 1000.0 if len(row) > 42
+                                and row[42] is not None else None)}
             for row in rows
         ]
 

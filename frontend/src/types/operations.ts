@@ -82,6 +82,10 @@ export interface LectureRow {
   stages: Record<StageName, StageState>
   is_suppressed_duplicate: boolean
   duplicate_winner_lecture_id: string | null
+  // The lecture did not happen: QA judged it not delivered, or there was no
+  // Teams transcript for its day. Optional so an older API answer still types.
+  not_delivered?: boolean
+  not_delivered_reason?: string | null
 }
 
 export interface DayReport extends Navigation_Holder {
@@ -149,6 +153,8 @@ export interface LectureDetail {
   attendance_coverage_status: string | null
   attendance_source_authoritative: boolean
   is_suppressed_duplicate: boolean
+  not_delivered?: boolean
+  not_delivered_reason?: string | null
   duplicate_resolution: DuplicateResolution | null
   orchestration_version: string
   stage_order: StageName[]

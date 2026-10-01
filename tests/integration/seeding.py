@@ -139,7 +139,11 @@ TRAINER = "Trainer Synthetic"
 
 
 def default_cues(count=6, speaker=TRAINER):
-    return [(i * 60_000, i * 60_000 + 30_000, speaker if i % 3 else f"Synthetic Learner {i}",
+    # Spread across the two-hour lecture the combined row claims, with enough
+    # actual speech to count as delivered (delivery_speech_guard_v2): six
+    # 19-minute cues, 20 minutes apart.
+    return [(i * 1_200_000, i * 1_200_000 + 1_140_000,
+             speaker if i % 3 else f"Synthetic Learner {i}",
              f"Synthetic line {i}.") for i in range(count)]
 
 

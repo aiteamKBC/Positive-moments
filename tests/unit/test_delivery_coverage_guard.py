@@ -15,9 +15,13 @@ import pytest
 
 from app.qa.deterministic import DELIVERED, NON_DELIVERED
 from app.qa.delivery import (
+    CALL_COVERED_SCHEDULE_SPEECH_SHORT,
     CALL_COVERED_SCHEDULE_TRANSCRIPT_SHORT,
+    COVERAGE_RULE_VERSION,
     DELIVERY_POLICY_VERSION,
     DURATION_BELOW_DELIVERY_MINIMUM,
+    SPEECH_BELOW_DELIVERY_MINIMUM,
+    SPEECH_RULE_VERSION,
     TRANSCRIPT_COVERAGE_INCOMPLETE,
     TRANSCRIPT_MEETS_DELIVERY_MINIMUM,
     classify_delivery,
@@ -257,3 +261,78 @@ def test_the_renderer_refuses_a_coverage_review():
     """No legacy row can be rendered from an evaluation that has no verdict."""
     from app.rendering.service import RENDERABLE_QA_STATUSES
     assert "REVIEW_REQUIRED" not in RENDERABLE_QA_STATUSES
+
+
+# --- delivery_speech_guard_v2 ---------------------------------------------------
+#
+# Ray | PMP - June 2026, 2026-09-30 (real instants, no content). The tutor never
+# joined; staff and learners talked in the open meeting. The cue span was 26
+# minutes, the actual speech 10.4 minutes, and the call ended at 08:19:55
+# against an 08:00-10:00 slot.
+
+RAY_START = datetime(2026, 9, 30, 8, 0, tzinfo=UTC)
+RAY_END = datetime(2026, 9, 30, 10, 0, tzinfo=UTC)
+RAY_CALL_START = datetime(2026, 9, 30, 7, 54, 3, 965646, tzinfo=UTC)
+RAY_CALL_END = datetime(2026, 9, 30, 8, 19, 55, 414706, tzinfo=UTC)
+RAY_SPOKEN_SECONDS = 624.0
+
+
+def ray(**overrides):
+    arguments = {"duration_minutes": 26, "scheduled_start": RAY_START,
+                 "scheduled_end": RAY_END, "call_start": RAY_CALL_START,
+                 "call_end": RAY_CALL_END, "transcript_span_seconds": 26 * 60,
+                 "spoken_seconds": RAY_SPOKEN_SECONDS, **overrides}
+    return classify_delivery(**arguments)
+
+
+def test_v2_1_a_long_span_of_mostly_silence_is_not_a_delivered_lecture():
+    decision = ray()
+    assert decision.classification == NON_DELIVERED
+    assert decision.reason == SPEECH_BELOW_DELIVERY_MINIMUM
+    assert decision.departs_from_legacy is True
+    assert decision.rule_version == SPEECH_RULE_VERSION
+    assert decision.diagnostics["legacy_classification"] == DELIVERED
+    assert decision.diagnostics["spoken_seconds"] == RAY_SPOKEN_SECONDS
+
+
+def test_v2_2_short_speech_inside_a_live_scheduled_call_is_a_review_not_a_verdict():
+    """Group work or a video can be quiet; a call that covered the slot is a review."""
+    decision = ray(call_end=RAY_END)
+    assert decision.classification == TRANSCRIPT_COVERAGE_INCOMPLETE
+    assert decision.reason == CALL_COVERED_SCHEDULE_SPEECH_SHORT
+
+
+def test_v2_3_enough_speech_is_delivered_exactly_as_before():
+    decision = ray(spoken_seconds=20 * 60)
+    assert decision.classification == DELIVERED
+    assert decision.departs_from_legacy is False
+    assert ray(spoken_seconds=20 * 60 - 1).classification == NON_DELIVERED
+
+
+def test_v2_4_missing_speech_evidence_never_changes_the_legacy_answer():
+    assert ray(spoken_seconds=None).classification == DELIVERED
+
+
+def test_v2_5_the_v1_coverage_review_keeps_its_fingerprint_rule():
+    """Introducing v2 must not re-key what the v1 rule already wrote."""
+    assert aipc().rule_version == COVERAGE_RULE_VERSION == "delivery_coverage_guard_v1"
+
+
+def test_v2_6_the_service_writes_not_delivered_and_never_calls_the_model():
+    start = datetime(2026, 9, 4, 9, 0, tzinfo=UTC)
+    row = package(duration_minutes=26, duration_seconds=26 * 60,
+                  actual_start=start - timedelta(minutes=6),
+                  actual_end=start + timedelta(minutes=19, seconds=55),
+                  first_cue_start_ms=0, last_cue_end_ms=26 * 60_000,
+                  spoken_seconds=RAY_SPOKEN_SECONDS)
+    provider = StubProvider(good_output())
+    evaluations = StubEvaluations()
+    summary = service([row], provider, evaluations).run_day(None, TARGET, execute=True)
+
+    assert provider.calls == 0
+    assert summary["non_delivered_count"] == 1
+    (stored,) = evaluations.rows.values()
+    evaluation = stored["evaluation"]
+    assert evaluation["qa_status"] == "NON_DELIVERED"
+    assert evaluation["canonical_trainer"] == "Session not delivered"
+    assert evaluation["metadata"]["delivery_classification_reason"] ==         SPEECH_BELOW_DELIVERY_MINIMUM

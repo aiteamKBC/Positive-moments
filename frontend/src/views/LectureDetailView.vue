@@ -283,6 +283,7 @@ async function confirmAction() {
               <AttendanceCell
                 v-if="attendanceStage"
                 :authoritative="lecture.attendance_source_authoritative"
+                :not-delivered="lecture.not_delivered"
                 :coverage-status="lecture.attendance_coverage_status"
                 :attended-count="(attendanceStage.attended_count as number | undefined) ?? null"
               />

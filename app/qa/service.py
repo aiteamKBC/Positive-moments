@@ -353,7 +353,8 @@ class ShadowQaService:
             scheduled_start=row["scheduled_start"], scheduled_end=row["scheduled_end"],
             call_start=row["call_actual_start"], call_end=row["call_actual_end"],
             transcript_span_seconds=(float(row["duration_seconds"])
-                                     if row.get("duration_seconds") is not None else None))
+                                     if row.get("duration_seconds") is not None else None),
+            spoken_seconds=row.get("spoken_seconds"))
         row["delivery"] = decision
         row["delivery_status"] = decision.classification
 

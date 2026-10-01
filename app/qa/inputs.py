@@ -84,7 +84,9 @@ def qa_source_fingerprint(*, package: dict, model: str,
         # produce keeps its exact fingerprint, so nothing already paid for is
         # orphaned into buying itself again - while a reclassified lecture gets
         # NEW provenance beside its old answer instead of overwriting it.
-        lines.append(f"delivery:{delivery.diagnostics['delivery_policy_version']}"
+        # Keyed on the RULE that departed, so a v1 coverage review keeps the
+        # provenance it was written under after the speech guard (v2) arrived.
+        lines.append(f"delivery:{delivery.rule_version}"
                      f":{delivery.classification}")
     if package.get("attendance_source_authoritative") is False:
         # Appended ONLY when the attendance source has not answered. Every

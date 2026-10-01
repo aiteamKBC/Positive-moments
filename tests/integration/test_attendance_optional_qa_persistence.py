@@ -104,7 +104,8 @@ def _runner():
 # A two-hour lecture whose transcript spans the whole slot, so punctuality
 # (Item 2) is Met and a clean answer is all-Met - the case where Perfect has
 # to say PENDING_ATTENDANCE_DATA rather than NOT_ELIGIBLE.
-FULL_LENGTH_CUES = [(minute * 60_000, minute * 60_000 + 30_000,
+# 19 minutes of every 20, so the speech guard sees a delivered lecture.
+FULL_LENGTH_CUES = [(minute * 60_000, minute * 60_000 + 1_140_000,
                      TRAINER if minute % 3 else f"Synthetic Learner {minute}",
                      f"Synthetic line {minute}.")
                     for minute in range(0, 120, 20)] + [

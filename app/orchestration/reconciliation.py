@@ -151,7 +151,13 @@ class DayReconciliation:
             "perfect_synced_count": _stage_is(business, PERFECT_SYNC, COMPLETE),
             "recording_missing_count": _stage_is(business, RECORDING_LINK, MISSING),
             "excel_pending_count": _stage_is(business, EXCEL_SYNC, MISSING),
-            "attendance_waiting_count": _stage_is(business, ATTENDANCE, WAITING),
+            # A lecture that did not happen owes no attendance, whatever the
+            # source has or has not sent.
+            "attendance_waiting_count": _stage_is(
+                [state for state in business if not state.get("not_delivered")],
+                ATTENDANCE, WAITING),
+            "not_delivered_count": sum(1 for state in business
+                                       if state.get("not_delivered")),
 
             "by_next_action": _tally(state["next_executable_action"]
                                      for state in business),
@@ -181,6 +187,8 @@ def _row(state, bucket) -> dict:
         "next_action": state["next_action"],
         "attendance_flag": state.get("attendance_flag"),
         "is_suppressed_duplicate": bool(state.get("is_suppressed_duplicate")),
+        "not_delivered": bool(state.get("not_delivered")),
+        "not_delivered_reason": state.get("not_delivered_reason"),
         "duplicate_winner_lecture_id": (state.get("duplicate_resolution") or {})
             .get("winner_lecture_id"),
         "next_executable_action": state["next_executable_action"],
