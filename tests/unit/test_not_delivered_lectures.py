@@ -22,6 +22,7 @@ from app.orchestration.stages import (
     SELECTION,
 )
 from app.orchestration.state import (
+    EMPTY_TRANSCRIPT_FOR_OCCURRENCE,
     NO_TRANSCRIPT_DEPENDENT_STAGES,
     NO_TRANSCRIPT_FOR_OCCURRENCE,
     NO_TRANSCRIPT_GRACE,
@@ -107,3 +108,45 @@ def test_5_the_day_report_never_counts_a_not_delivered_lecture_as_waiting():
     assert row["not_delivered"] is True
     assert row["not_delivered_reason"] == NO_TRANSCRIPT_FOR_OCCURRENCE
     assert row["stages"][QA_EVALUATION] == NOT_APPLICABLE
+
+
+# --- a fetched transcript with no measurable speech ----------------------------
+#
+# Stephen - Portfolio Management, 2026-10-01: a 13-minute meeting, no teaching,
+# a transcript that could not even be combined. Left alone it re-selected for
+# ever and the console said "in progress".
+
+def combine_failed_rows(*, failure, selected_at):
+    row = selection_row(status="COMBINE_FAILED", duration_minutes=None,
+                        actual_start=None, actual_end=None, updated_at=selected_at)
+    return complete_rows(selection=[row + (failure,)], documents=[], speakers=[],
+                         evaluations=[], attempts=[], rendered=[], coverage=[])
+
+
+AFTER_GRACE = SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(minutes=5)
+
+
+def test_6_an_empty_transcript_after_the_grace_is_not_delivered():
+    result = resolve(combine_failed_rows(failure="TRANSCRIPT_UNUSABLE",
+                                         selected_at=AFTER_GRACE))
+    assert result["stages"][SELECTION]["state"] == NOT_APPLICABLE
+    assert result["stages"][SELECTION]["reason"] == EMPTY_TRANSCRIPT_FOR_OCCURRENCE
+    for stage in NO_TRANSCRIPT_DEPENDENT_STAGES:
+        assert result["stages"][stage]["state"] == NOT_APPLICABLE, stage
+    assert result["not_delivered_reason"] == EMPTY_TRANSCRIPT_FOR_OCCURRENCE
+    assert result["next_executable_action"] == NOTHING_TO_DO
+
+
+def test_7_content_not_fetched_yet_is_always_retried():
+    result = resolve(combine_failed_rows(failure="CONTENT_NOT_FETCHED",
+                                         selected_at=AFTER_GRACE))
+    assert result["stages"][SELECTION]["state"] == MISSING
+    assert result["stages"][SELECTION]["action"] == SELECT_TRANSCRIPT
+    assert result["not_delivered"] is False
+
+
+def test_8_an_empty_transcript_before_the_grace_is_still_retried():
+    result = resolve(combine_failed_rows(
+        failure="TRANSCRIPT_UNUSABLE", selected_at=SCHEDULED_END + timedelta(hours=1)))
+    assert result["stages"][SELECTION]["state"] == MISSING
+    assert result["not_delivered"] is False

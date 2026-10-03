@@ -21,6 +21,21 @@ from app.transcripts.selection import (
 )
 
 
+
+# Why a COMBINE_FAILED selection failed. The difference decides what happens
+# next: content that has not been fetched yet is retried, while a transcript
+# that was fetched and holds no measurable speech (Stephen - Portfolio
+# Management, 2026-10-01: a 13-minute meeting, no teaching) is evidence that
+# the lecture did not happen.
+COMBINE_FAILED = "COMBINE_FAILED"
+CONTENT_NOT_FETCHED_ERROR = "no stored raw content for the selected parts"
+CONTENT_NOT_FETCHED = "CONTENT_NOT_FETCHED"
+TRANSCRIPT_UNUSABLE = "TRANSCRIPT_UNUSABLE"
+
+
+def combine_failure_kind(error) -> str:
+    return CONTENT_NOT_FETCHED if error == CONTENT_NOT_FETCHED_ERROR else TRANSCRIPT_UNUSABLE
+
 class TranscriptSelectionService:
     def __init__(self, *, lecture_repository, selection_repository, run_repository,
                  qa_evidence_repository=None, selection_version: str = SELECTION_VERSION):
@@ -87,7 +102,7 @@ class TranscriptSelectionService:
             if combine_error:
                 counters["error_count"] += 1
                 result["combine_error"] = combine_error
-                result["selection_status"] = "COMBINE_FAILED"
+                result["selection_status"] = COMBINE_FAILED
 
             if len(outcome.parts) > 1:
                 counters["multi_part_selections"] += 1
@@ -119,7 +134,8 @@ class TranscriptSelectionService:
                     primary_provider_transcript_id=(
                         None if failed else outcome.primary.candidate.provider_transcript_id),
                     selection_status=result["selection_status"],
-                    diagnostics=({**outcome.diagnostics, "combine_error": combine_error}
+                    diagnostics=({**outcome.diagnostics, "combine_error": combine_error,
+                                  "combine_failure": combine_failure_kind(combine_error)}
                                  if failed else outcome.diagnostics),
                     parts=[] if failed else part_rows, combined=combined)
                 counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
@@ -211,7 +227,7 @@ class TranscriptSelectionService:
             except ValueError as exc:
                 error = str(exc)
         else:
-            error = "no stored raw content for the selected parts"
+            error = CONTENT_NOT_FETCHED_ERROR
 
         for index, (part, raw, _sha, _attr) in enumerate(sources):
             part_rows.append({

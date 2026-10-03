@@ -119,6 +119,7 @@ from app.recordings.models import (
 from app.rendering.evidence import RENDERER_VERSION
 from app.transcripts.seam import SEAM_PARSER_VERSION
 from app.transcripts.identity import canonical_key
+from app.transcripts.selection_service import COMBINE_FAILED, TRANSCRIPT_UNUSABLE
 from app.transcripts.selection import (
     NO_CANDIDATES,
     NO_SAME_DAY_CANDIDATES,
@@ -159,6 +160,11 @@ TERMINAL_QA_STATUSES = ("COMPLETED", "NON_DELIVERED")
 NO_TRANSCRIPT_SELECTION_STATUSES = (NO_CANDIDATES, NO_SAME_DAY_CANDIDATES)
 NO_TRANSCRIPT_GRACE = _timedelta(hours=12)
 NO_TRANSCRIPT_FOR_OCCURRENCE = "NO_TRANSCRIPT_FOR_OCCURRENCE"
+# The same conclusion when the day's transcript WAS fetched but holds no
+# measurable speech, so it could not even be combined.
+EMPTY_TRANSCRIPT_FOR_OCCURRENCE = "EMPTY_TRANSCRIPT_FOR_OCCURRENCE"
+NOT_DELIVERED_SELECTION_REASONS = (NO_TRANSCRIPT_FOR_OCCURRENCE,
+                                   EMPTY_TRANSCRIPT_FOR_OCCURRENCE)
 # Everything downstream of the transcript. Attendance is included because the
 # platform resolves it against the transcript's speaker inventory
 # (app/attendance/service.py), so with no transcript it is not owed - running
@@ -239,7 +245,8 @@ SELECT s.selection_id, s.selection_status, s.selected_part_count,
        s.combined_content_sha256, s.updated_at,
        s.metadata ->> 'selection_input_fingerprint',
        s.actual_start, s.actual_end,
-       cb.source_fingerprint, cb.duration_minutes, cb.duration_seconds
+       cb.source_fingerprint, cb.duration_minutes, cb.duration_seconds,
+       s.metadata ->> 'combine_failure'
   FROM public.lecture_transcript_selections s
   LEFT JOIN public.lecture_combined_transcripts cb ON cb.selection_id = s.selection_id
  WHERE s.lecture_id = %s AND s.selection_version = %s
@@ -458,9 +465,9 @@ class PipelineStateResolver:
         stages[RECORDING_LINK] = self._recording_link(connection, lecture,
                                                       legacy_session_id)
         stages[EXCEL_SYNC] = self._excel_sync(connection, perfect_result, perfect_key)
-        if lecture.get("_not_delivered") == NO_TRANSCRIPT_FOR_OCCURRENCE:
+        if lecture.get("_not_delivered") in NOT_DELIVERED_SELECTION_REASONS:
             for stage in NO_TRANSCRIPT_DEPENDENT_STAGES:
-                stages[stage] = _stage(NOT_APPLICABLE, reason=NO_TRANSCRIPT_FOR_OCCURRENCE)
+                stages[stage] = _stage(NOT_APPLICABLE, reason=lecture["_not_delivered"])
         elif (stages[QA_EVALUATION]["state"] == COMPLETE
               and (downstream.get("current_evaluation") or {}).get("qa_status")
               == NON_DELIVERED):
@@ -685,10 +692,10 @@ class PipelineStateResolver:
                    "combined_duration_minutes": row[9],
                    "combined_duration_seconds": row[10]}
         if row[1] != "SELECTED":
-            if self._no_transcript_is_conclusive(lecture, row):
-                lecture["_not_delivered"] = NO_TRANSCRIPT_FOR_OCCURRENCE
-                return _stage(NOT_APPLICABLE, reason=NO_TRANSCRIPT_FOR_OCCURRENCE,
-                              **selection), lineage
+            reason = self._not_delivered_selection_reason(lecture, row)
+            if reason is not None:
+                lecture["_not_delivered"] = reason
+                return _stage(NOT_APPLICABLE, reason=reason, **selection), lineage
             # A real, recorded answer of "nothing to select". Re-running is
             # free (pure DB) and is exactly what makes a late transcript
             # recoverable, so this is MISSING rather than FAILED.
@@ -701,14 +708,24 @@ class PipelineStateResolver:
                           **selection), lineage
         return _stage(COMPLETE, **freshness, **selection), lineage
 
-    def _no_transcript_is_conclusive(self, lecture, row) -> bool:
+    def _not_delivered_selection_reason(self, lecture, row):
         """
-        "No transcript" becomes "not delivered" only when the selector said so
-        AFTER the grace that follows the scheduled end. An earlier "nothing"
-        may simply predate the transcript, and is retried as before.
+        "No transcript" - or a fetched transcript with no measurable speech -
+        becomes "not delivered" only when the selector said so AFTER the grace
+        that follows the scheduled end. An earlier answer may simply predate
+        the transcript, and is retried as before; so is content that has not
+        been fetched yet.
         """
-        if row[1] not in NO_TRANSCRIPT_SELECTION_STATUSES:
-            return False
+        if row[1] in NO_TRANSCRIPT_SELECTION_STATUSES:
+            reason = NO_TRANSCRIPT_FOR_OCCURRENCE
+        elif (row[1] == COMBINE_FAILED and len(row) > 11
+              and row[11] == TRANSCRIPT_UNUSABLE):
+            reason = EMPTY_TRANSCRIPT_FOR_OCCURRENCE
+        else:
+            return None
+        return reason if self._after_no_transcript_grace(lecture, row) else None
+
+    def _after_no_transcript_grace(self, lecture, row) -> bool:
         occurrence = lecture.get("_occurrence")
         scheduled_end = occurrence[1] if occurrence else None
         if scheduled_end is None or row[4] is None:
