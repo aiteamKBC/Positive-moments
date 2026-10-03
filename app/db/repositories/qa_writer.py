@@ -51,7 +51,13 @@ SELECT rs.rendered_session_id, rs.lecture_id, rs.evaluation_id, rs.render_status
          SELECT 1
            FROM public.lecture_qa_evaluations e2
           WHERE e2.lecture_id = rs.lecture_id
-            AND e2.updated_at > e.updated_at)
+            AND (e2.updated_at > e.updated_at
+                 -- A deterministic refresh written in the SAME transaction as
+                 -- its origin shares its now(). The refresh names its origin,
+                 -- so that tie is decided by fact (Andrew SP, 2026-09-23).
+                 OR (e2.updated_at = e.updated_at
+                     AND e2.metadata #>> '{deterministic_refresh,origin_evaluation_id}'
+                         = e.evaluation_id::text)))
  ORDER BY l.scheduled_start, l.subject
 """
 
@@ -64,7 +70,8 @@ LOAD_RENDERED_FOR_LECTURE = (
     .replace(" WHERE l.session_date = %s AND rs.renderer_version = %s",
              " WHERE rs.lecture_id = %s AND rs.renderer_version = %s")
     .replace(" ORDER BY l.scheduled_start, l.subject",
-             " ORDER BY rs.updated_at DESC, rs.rendered_session_id DESC"))
+             " ORDER BY rs.updated_at DESC,"
+             " (e.metadata ? 'deterministic_refresh') DESC, rs.rendered_session_id DESC"))
 
 LOAD_RENDERED_ITEMS = """
 SELECT checklist_order, checklist_item, status, session_id, session_id_match, evidence
@@ -191,10 +198,12 @@ class LegacyQaTargetRepository:
         """The lecture's CURRENT evaluation, by the recovery_state rule."""
         try:
             rows = connection.execute("""
-            SELECT e.evaluation_id, e.qa_status, e.review_reason, e.updated_at
+            SELECT e.evaluation_id, e.qa_status, e.review_reason, e.updated_at,
+                   e.metadata #>> '{deterministic_refresh,origin_evaluation_id}'
               FROM public.lecture_qa_evaluations e
              WHERE e.lecture_id = %s
-             ORDER BY e.updated_at DESC, e.evaluation_id DESC
+             ORDER BY e.updated_at DESC, (e.metadata ? 'deterministic_refresh') DESC,
+                      e.evaluation_id DESC
              LIMIT 2
             """, (lecture_id,)).fetchall()
         except Exception as exc:
@@ -205,7 +214,10 @@ class LegacyQaTargetRepository:
         return {"evaluation_id": str(row[0]), "qa_status": row[1], "review_reason": row[2],
                 # Two evaluations with the same timestamp: which is current is
                 # not knowable, and a deletion must never rest on a coin toss.
-                "ambiguous": len(rows) > 1 and rows[1][3] == row[3]}
+                # A refresh tied with its own origin is not ambiguous: it
+                # names the evaluation it supersedes.
+                "ambiguous": (len(rows) > 1 and rows[1][3] == row[3]
+                              and row[4] != str(rows[1][0]))}
 
     def coded_perfect_writes(self, connection, lecture_id) -> int:
         try:

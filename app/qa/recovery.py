@@ -95,7 +95,10 @@ SELECT e.evaluation_id, e.source_fingerprint, e.qa_status, e.review_reason,
         OR e.engagement_score IS NOT NULL)
   FROM public.lecture_qa_evaluations e
  WHERE e.lecture_id = %s
- ORDER BY e.updated_at DESC, e.evaluation_id DESC
+ -- At an equal updated_at a deterministic refresh is newer than its origin:
+ -- both are written in one transaction, so they share its now().
+ ORDER BY e.updated_at DESC, (e.metadata ? 'deterministic_refresh') DESC,
+          e.evaluation_id DESC
 """
 
 ATTEMPTS = """
@@ -122,8 +125,10 @@ SELECT rs.rendered_session_id, rs.render_status, rs.renderer_version,
        rs.source_fingerprint, rs.met_count, rs.partial_count, rs.not_met_count,
        rs.evaluation_id, rs.session_id
   FROM public.lecture_qa_rendered_sessions rs
+  LEFT JOIN public.lecture_qa_evaluations e ON e.evaluation_id = rs.evaluation_id
  WHERE rs.lecture_id = %s
- ORDER BY rs.updated_at DESC, rs.rendered_session_id DESC
+ ORDER BY rs.updated_at DESC, (e.metadata ? 'deterministic_refresh') DESC NULLS LAST,
+          rs.rendered_session_id DESC
 """
 
 QA_WRITES = """
