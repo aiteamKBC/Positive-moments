@@ -46,7 +46,11 @@ again and a repaired key is used at once.
 """
 import logging
 import time
+from contextlib import contextmanager
 from datetime import date as _date, timedelta
+
+import psycopg
+from psycopg.pq import TransactionStatus
 
 from app.common.errors import (
     DATABASE_ERROR,
@@ -458,14 +462,15 @@ class PipelineOrchestrator:
         started = time.monotonic()
         try:
             if locked:
-                with self.lock_manager.hold(connection, lecture_id):
+                with self.lock_manager.hold(connection, lecture_id),                         _stage_savepoint(connection):
                     result = self.runner.execute(
                         connection, action, session_date=session_date,
                         lecture_id=lecture_id)
             else:
-                result = self.runner.execute(connection, action,
-                                             session_date=session_date,
-                                             lecture_id=lecture_id)
+                with _stage_savepoint(connection):
+                    result = self.runner.execute(connection, action,
+                                                 session_date=session_date,
+                                                 lecture_id=lecture_id)
         except LectureBusy:
             # Another process owns this lecture right now. Not a failure, and
             # not something to wait for: the other cycle will finish it.
@@ -491,7 +496,8 @@ class PipelineOrchestrator:
             if exc.code in WRITER_INTEGRITY_CODES:
                 raise _RunStopped(RUN_BLOCKED_WRITER_INTEGRITY, exc.code,
                                   str(exc)) from exc
-            if exc.code in SHARED_INFRASTRUCTURE_CODES:
+            if (exc.code in SHARED_INFRASTRUCTURE_CODES
+                    and not _statement_error_recovered(connection, exc)):
                 raise _RunStopped(RUN_ABORTED, exc.code, str(exc)) from exc
             return False
         except Exception as exc:  # noqa: BLE001 - one lecture must not stop the rest
@@ -732,3 +738,54 @@ def _counts(items) -> dict:
             key = "skipped_count"
         buckets[key] += 1
     return {"lectures_seen": len(items), **buckets}
+
+
+STAGE_SAVEPOINT = "orchestrator_stage"
+
+
+@contextmanager
+def _stage_savepoint(connection):
+    """
+    Keep one stage's DATABASE error from aborting the whole cycle.
+
+    The isolation rule above ("its failure is caught, recorded and stepped
+    over") only held for errors outside PostgreSQL. A failed statement leaves
+    the cycle's single transaction aborted, so the very next state read failed
+    and the daemon rolled back every lecture's work - which is how every cycle
+    from 2026-10-01 18:00 UTC onward was lost with nothing but "PlatformError".
+
+    Rolled back ONLY when the transaction is actually aborted: then nothing in
+    it could have been committed anyway, and losing this one action's writes
+    is the whole cost. When the transaction is still healthy the savepoint is
+    released, so whatever an action recorded before raising - a generation
+    attempt that spent budget, a recording-link attempt - is kept exactly as
+    before.
+    """
+    if not isinstance(connection, psycopg.Connection) or connection.autocommit:
+        yield
+        return
+    connection.execute(f"SAVEPOINT {STAGE_SAVEPOINT}")
+    try:
+        yield
+    except BaseException:
+        if connection.info.transaction_status == TransactionStatus.INERROR:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {STAGE_SAVEPOINT}")
+        connection.execute(f"RELEASE SAVEPOINT {STAGE_SAVEPOINT}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {STAGE_SAVEPOINT}")
+
+
+def _statement_error_recovered(connection, exc) -> bool:
+    """
+    A DATABASE_ERROR that was one failed STATEMENT, already rolled back to the
+    stage savepoint on a connection that is still healthy. That is this
+    lecture's failure - a constraint it violates will not repeat for the next
+    lecture - so it is recorded and stepped over. A lost or broken connection
+    is still shared infrastructure and still stops the run.
+    """
+    cause = exc.__cause__
+    return (isinstance(connection, psycopg.Connection)
+            and not connection.closed
+            and connection.info.transaction_status == TransactionStatus.INTRANS
+            and isinstance(cause, psycopg.Error)
+            and not isinstance(cause, psycopg.OperationalError))

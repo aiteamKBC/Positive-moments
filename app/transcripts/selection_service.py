@@ -106,13 +106,22 @@ class TranscriptSelectionService:
             if persist:
                 selection_id = selection_identity(
                     lecture_id=lecture.lecture_id, selection_version=self.selection_version)
+                # COMBINE_FAILED selected nothing usable - typically a part whose
+                # content has not been fetched yet - so it is stored the way
+                # every other non-SELECTED answer is: no primary, no parts. The
+                # table's own CHECK requires exactly that, and storing the parts
+                # anyway failed the statement and, with it, the whole cycle.
+                failed = combine_error is not None
                 written = self.selection_repository.upsert_selection(
                     connection, selection_id, lecture.lecture_id,
                     selection_version=self.selection_version,
-                    primary_artifact_id=outcome.primary.candidate.artifact_id,
-                    primary_provider_transcript_id=outcome.primary.candidate.provider_transcript_id,
+                    primary_artifact_id=None if failed else outcome.primary.candidate.artifact_id,
+                    primary_provider_transcript_id=(
+                        None if failed else outcome.primary.candidate.provider_transcript_id),
                     selection_status=result["selection_status"],
-                    diagnostics=outcome.diagnostics, parts=part_rows, combined=combined)
+                    diagnostics=({**outcome.diagnostics, "combine_error": combine_error}
+                                 if failed else outcome.diagnostics),
+                    parts=[] if failed else part_rows, combined=combined)
                 counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
                 if combined:
                     stored = self.selection_repository.upsert_combined(

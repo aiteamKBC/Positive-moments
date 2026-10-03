@@ -194,6 +194,11 @@ class SchedulerDaemon:
             # The next scheduled cycle is a better recovery than a dead
             # process: the orchestrator is idempotent, so a failed cycle costs
             # the window and nothing else.
+            # The code and message are the platform's own words; the cause is
+            # named by class only, because a database error's DETAIL can carry
+            # row values.
             self.log.exception("scheduler cycle failed", extra={"fields": {
-                "service": "scheduler_daemon", "error": type(exc).__name__}})
+                "service": "scheduler_daemon", "error": type(exc).__name__,
+                "error_code": getattr(exc, "code", None), "error_message": str(exc),
+                "cause": type(exc.__cause__).__name__ if exc.__cause__ else None}})
             return {"outcome": "FAILED", "error": type(exc).__name__}
