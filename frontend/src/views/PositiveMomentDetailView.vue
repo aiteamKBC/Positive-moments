@@ -12,8 +12,8 @@
  * the only playable links are the durable stored SharePoint URLs the platform
  * already holds.
  */
-import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -24,10 +24,11 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { getLecture, getWatchUrl } from '../services/api'
 import type { DialogueLine, LectureDetail, PositiveClip } from '../types'
 import { businessDate, cairoDateTime } from '../utils/datetime'
-import { humanise } from '../utils/labels'
+import { MOMENT_CATEGORIES, humanise } from '../utils/labels'
 import { errorMessage, formatConfidence, openSafely } from '../utils/format'
 
 const route = useRoute()
+const router = useRouter()
 const lecture = ref<LectureDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -98,11 +99,35 @@ function verificationTone(verdict?: string) {
 }
 
 const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.clip_asset).length ?? 0)
+
+// --- category filter ------------------------------------------------------
+// Arrives from the list (?category=...) and stays in the URL. Each moment
+// keeps its original index: "Watch in full lecture" asks the API by it.
+const category = ref(typeof route.query.category === 'string' ? route.query.category : '')
+watch(category, (value) => {
+  void router.replace({ query: { ...route.query, category: value || undefined } })
+})
+
+const categoryOf = (clip: PositiveClip) => (clip.category ?? '').trim().toLowerCase()
+const categoryLabel = (value: string) => MOMENT_CATEGORIES[value] ?? humanise(value)
+
+const categoryCounts = computed(() => {
+  const counts = new Map<string, number>()
+  for (const clip of lecture.value?.clips ?? []) {
+    const key = categoryOf(clip)
+    if (key) counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+})
+
+const visibleClips = computed(() => (lecture.value?.clips ?? [])
+  .map((clip, index) => ({ clip, index }))
+  .filter(({ clip }) => !category.value || categoryOf(clip) === category.value))
 </script>
 
 <template>
   <div class="page stack">
-    <RouterLink class="btn-quiet" :to="{ name: 'positive-moments' }">
+    <RouterLink class="btn-quiet" :to="{ name: 'positive-moments', query: category ? { category } : {} }">
       <AppIcon name="chevronLeft" :size="14" /> Positive Moments
     </RouterLink>
 
@@ -162,15 +187,44 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
       />
 
       <div v-else class="stack">
+        <div v-if="categoryCounts.length" class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter moments by category">
+          <span class="filter-label">Category</span>
+          <button
+            type="button" class="chip cursor-pointer transition"
+            :class="{ '!bg-brand-600 !text-white': !category }" :aria-pressed="!category"
+            @click="category = ''"
+          >
+            All<span class="ml-1" :class="!category ? 'text-white/80' : 'text-brand-500'">{{ lecture.clips.length }}</span>
+          </button>
+          <button
+            v-for="[value, count] in categoryCounts" :key="value" type="button" class="chip cursor-pointer transition"
+            :class="{ '!bg-brand-600 !text-white': category === value }" :aria-pressed="category === value"
+            @click="category = category === value ? '' : value"
+          >
+            {{ categoryLabel(value) }}<span class="ml-1" :class="category === value ? 'text-white/80' : 'text-brand-500'">{{ count }}</span>
+          </button>
+        </div>
+
+        <EmptyState
+          v-if="!visibleClips.length"
+          class="surface"
+          tone="neutral"
+          icon="quote"
+          :title="`No ${categoryLabel(category)} moments in this lecture`"
+          message="This lecture's moments are in other categories."
+        >
+          <template #action><button type="button" class="btn-secondary" @click="category = ''">Show all moments</button></template>
+        </EmptyState>
+
         <article
-          v-for="(clip, index) in lecture.clips"
+          v-for="{ clip, index } in visibleClips"
           :key="`${clip.start}-${index}`"
           class="panel"
         >
           <div class="panel-head">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
               <span class="badge-neutral font-mono">{{ offset(clip.start ?? '') }} – {{ offset(clip.end ?? '') }}</span>
-              <span v-if="clip.category" class="chip">{{ humanise(clip.category) }}</span>
+              <span v-if="clip.category" class="chip">{{ categoryLabel(categoryOf(clip)) }}</span>
               <span v-if="clip.feedback_target" class="badge-info">About: {{ humanise(clip.feedback_target) }}</span>
             </div>
             <StatusBadge

@@ -13,7 +13,31 @@ def v5_lectures() -> QuerySet:
     return DoctorSession.objects.filter(clips_analysis_completeness=V5_FINAL)
 
 
-def with_positive_clips_length(queryset: QuerySet) -> QuerySet:
+def clip_category(params) -> str:
+    """The requested moment category, as the analysis spells it."""
+    return (params.get("category") or "").strip().lower()
+
+
+def _moments_in_category_sql():
+    """How many of a row's moments carry one category (one parameter)."""
+    if connection.vendor == "postgresql":
+        return (
+            "CASE WHEN jsonb_typeof(positive_clips) = 'array' THEN ("
+            "SELECT count(*) FROM jsonb_array_elements(positive_clips) AS clip "
+            "WHERE lower(btrim(clip ->> 'category')) = %s) ELSE 0 END"
+        )
+    return (
+        "CASE WHEN JSON_TYPE(positive_clips) = 'array' THEN ("
+        "SELECT count(*) FROM json_each(positive_clips) "
+        "WHERE lower(trim(json_extract(value, '$.category'))) = %s) ELSE 0 END"
+    )
+
+
+def with_positive_clips_length(queryset: QuerySet, category: str = "") -> QuerySet:
+    """Moments per lecture - only those of `category` when one is chosen."""
+    if category:
+        return queryset.annotate(positive_clips_length=RawSQL(
+            _moments_in_category_sql(), (category,), output_field=IntegerField()))
     if connection.vendor == "postgresql":
         sql = (
             "CASE WHEN jsonb_typeof(positive_clips) = 'array' "
@@ -70,6 +94,12 @@ def filtered_lectures(params) -> QuerySet:
         queryset = with_positive_clips_length(queryset)
         lookup = "positive_clips_length__gt" if positive == "true" else "positive_clips_length"
         queryset = queryset.filter(**{lookup: 0})
+    category = clip_category(params)
+    if category:
+        # Only lectures holding at least one moment of this category.
+        queryset = queryset.annotate(category_moments=RawSQL(
+            _moments_in_category_sql(), (category,), output_field=IntegerField(),
+        )).filter(category_moments__gt=0)
     production = params.get("clip_production_status", "all")
     if production == "ready":
         queryset = queryset.filter(has_ready_clips=True)

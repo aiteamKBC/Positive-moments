@@ -15,6 +15,7 @@
  * moment count to look finished. No future media capability is mocked here.
  */
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -28,7 +29,7 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { getLectures, getSummary } from '../services/api'
 import type { Lecture, PaginatedLectures, Summary } from '../types'
 import { businessDate } from '../utils/datetime'
-import { humanise } from '../utils/labels'
+import { MOMENT_CATEGORIES, humanise } from '../utils/labels'
 import { errorMessage, openSafely } from '../utils/format'
 
 const summary = ref<Summary | null>(null)
@@ -36,8 +37,13 @@ const data = ref<PaginatedLectures | null>(null)
 const loading = ref(true)
 const error = ref('')
 const searchInput = ref('')
+const route = useRoute()
+const router = useRouter()
 
 const filters = reactive({
+  // The category travels in the URL so a lecture's page, and the way back,
+  // keep the same filter.
+  category: typeof route.query.category === 'string' ? route.query.category : '',
   search: '', trainer: '', date_from: '', date_to: '',
   has_positive_clips: '', clip_production_status: '', recording_status: '', clips_status: '',
   page: 1, page_size: 20,
@@ -82,7 +88,7 @@ watch(searchInput, (value) => {
   searchTimer = setTimeout(() => { filters.search = value.trim(); filters.page = 1 }, 350)
 })
 
-watch(() => [filters.search, filters.trainer, filters.date_from, filters.date_to,
+watch(() => [filters.category, filters.search, filters.trainer, filters.date_from, filters.date_to,
   filters.has_positive_clips, filters.clip_production_status, filters.recording_status,
   filters.clips_status], () => {
   if (filters.page !== 1) filters.page = 1
@@ -93,14 +99,26 @@ onMounted(load)
 
 function reset() {
   Object.assign(filters, {
-    search: '', trainer: '', date_from: '', date_to: '',
+    category: '', search: '', trainer: '', date_from: '', date_to: '',
     has_positive_clips: '', clip_production_status: '', recording_status: '', clips_status: '',
     page: 1, page_size: 20,
   })
   searchInput.value = ''
 }
 
-const activeCount = computed(() => [filters.search, filters.trainer, filters.date_from, filters.date_to,
+watch(() => filters.category, (category) => {
+  void router.replace({ query: { ...route.query, category: category || undefined } })
+})
+
+const categoryOptions = computed(() => Object.entries(MOMENT_CATEGORIES))
+const categoryLabel = (value: string) => MOMENT_CATEGORIES[value] ?? humanise(value)
+
+/** A chip on a row filters the whole list to that category; again clears it. */
+function toggleCategory(category: string) {
+  filters.category = filters.category === category ? '' : category
+}
+
+const activeCount = computed(() => [filters.category, filters.search, filters.trainer, filters.date_from, filters.date_to,
   filters.has_positive_clips, filters.clip_production_status, filters.recording_status,
   filters.clips_status].filter(Boolean).length)
 const hiddenActive = computed(() => [filters.date_from, filters.date_to,
@@ -154,6 +172,14 @@ function changePage(page: number) {
         <AppIcon name="search" :size="16" class="pointer-events-none absolute left-3 top-2.5 text-faint" />
         <label class="sr-only" for="moment-search">Search</label>
         <input id="moment-search" v-model="searchInput" class="field pl-9" placeholder="Search lecture or trainer" />
+      </div>
+      <div class="filter-field">
+        <span class="filter-label">Category</span>
+        <label class="sr-only" for="moment-category">Moment category</label>
+        <select id="moment-category" v-model="filters.category" class="field !w-auto">
+          <option value="">All categories</option>
+          <option v-for="[value, label] in categoryOptions" :key="value" :value="value">{{ label }}</option>
+        </select>
       </div>
       <div class="filter-field">
         <span class="filter-label">Trainer</span>
@@ -249,7 +275,7 @@ function changePage(page: number) {
               <td class="max-w-[22rem]">
                 <RouterLink
                   class="row-link"
-                  :to="{ name: 'positive-moment-detail', params: { sessionKey: row.session_key } }"
+                  :to="{ name: 'positive-moment-detail', params: { sessionKey: row.session_key }, query: filters.category ? { category: filters.category } : {} }"
                 >
                   {{ row.subject || 'Untitled lecture' }}
                 </RouterLink>
@@ -264,9 +290,21 @@ function changePage(page: number) {
               </td>
               <td>
                 <div v-if="row.top_categories.length" class="flex flex-wrap gap-1">
-                  <span v-for="item in row.top_categories" :key="item.category" class="chip">
-                    {{ humanise(item.category) }}<span class="ml-1 text-brand-500">{{ item.count }}</span>
-                  </span>
+                  <button
+                    v-for="item in row.top_categories" :key="item.category" type="button"
+                    class="chip cursor-pointer transition hover:ring-1 hover:ring-brand-300"
+                    :class="{
+                      '!bg-brand-600 !text-white': filters.category === item.category,
+                      'opacity-45': filters.category && filters.category !== item.category,
+                    }"
+                    :aria-pressed="filters.category === item.category"
+                    :title="filters.category === item.category ? 'Show every category' : `Show only ${categoryLabel(item.category)}`"
+                    @click="toggleCategory(item.category)"
+                  >
+                    {{ categoryLabel(item.category) }}<span
+                      class="ml-1" :class="filters.category === item.category ? 'text-white/80' : 'text-brand-500'"
+                    >{{ item.count }}</span>
+                  </button>
                 </div>
                 <span v-else class="text-xs text-faint">No qualifying moments</span>
               </td>
@@ -285,7 +323,7 @@ function changePage(page: number) {
               <td class="whitespace-nowrap text-right">
                 <RouterLink
                   class="btn-quiet"
-                  :to="{ name: 'positive-moment-detail', params: { sessionKey: row.session_key } }"
+                  :to="{ name: 'positive-moment-detail', params: { sessionKey: row.session_key }, query: filters.category ? { category: filters.category } : {} }"
                   :aria-label="`View moments in ${row.subject}`"
                 >
                   View moments <AppIcon name="arrowRight" :size="13" />

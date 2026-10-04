@@ -113,7 +113,8 @@ class LectureListSerializer(serializers.ModelSerializer):
 
     def get_top_categories(self, obj):
         """
-        The categories present in this lecture's moments, most common first.
+        Every category present in this lecture's moments, most common first,
+        so a category filter always finds its chip on the row.
 
         Read from the `positive_clips` JSON the row already carries, so this
         costs no extra query. It counts what the analysis recorded; it does not
@@ -125,7 +126,7 @@ class LectureListSerializer(serializers.ModelSerializer):
             if category:
                 counts[category] = counts.get(category, 0) + 1
         ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-        return [{"category": name, "count": total} for name, total in ranked[:3]]
+        return [{"category": name, "count": total} for name, total in ranked]
 
     def get_moment_count(self, obj):
         return len(normalize_clips(obj.positive_clips))

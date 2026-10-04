@@ -248,7 +248,7 @@ class PositiveMentionsApiTests(TransactionTestCase):
 
     def test_the_list_reports_the_categories_recorded_in_the_analysis(self):
         """
-        Most common first, at most three, counted from the stored JSON.
+        Most common first, every category, counted from the stored JSON.
 
         It reports what the analysis wrote. It must not reclassify anything,
         and a lecture with no categories must come back with an empty list
@@ -275,6 +275,39 @@ class PositiveMentionsApiTests(TransactionTestCase):
         self.assertEqual(rows["categorised"]["moment_count"], 3)
         self.assertEqual(rows["uncategorised"]["top_categories"], [])
         self.assertEqual(rows["uncategorised"]["moment_count"], 1)
+
+    def test_a_category_filter_keeps_only_lectures_with_that_kind_of_moment(self):
+        self.make_lecture("mixed", positive_clips=[
+            {"start": "00:00:01", "category": "content"},
+            {"start": "00:00:02", "category": "Learning_Experience "},
+            {"start": "00:00:03", "category": "content"},
+            {"start": "00:00:04", "category": "content"},
+            {"start": "00:00:05", "category": "trainer"},
+        ])
+        self.make_lecture("experience-only", positive_clips=[
+            {"start": "00:00:01", "category": "learning_experience"},
+            {"start": "00:00:02", "category": "learning_experience"},
+        ])
+        self.make_lecture("content-only", positive_clips=[{"start": "00:00:01", "category": "content"}])
+        self.make_lecture("none", positive_clips=[])
+        self.make_lecture("not-a-list", positive_clips={"clips": "broken"})
+
+        listed = self.client.get("/api/positive-mentions/lectures/",
+                                 {"category": "learning_experience"}).data
+        self.assertEqual({row["session_id"] for row in listed["results"]},
+                         {"mixed", "experience-only"})
+        # The fourth category of a row is still shown, so the filter's chip is there.
+        mixed = next(row for row in listed["results"] if row["session_id"] == "mixed")
+        self.assertIn({"category": "trainer", "count": 1}, mixed["top_categories"])
+
+        summary = self.client.get("/api/positive-mentions/summary/",
+                                  {"category": "learning_experience"}).data
+        self.assertEqual(summary["processed_lectures"], 2)
+        self.assertEqual(summary["lectures_with_positive_clips"], 2)
+        self.assertEqual(summary["total_positive_clips"], 3)   # that category only
+
+        everything = self.client.get("/api/positive-mentions/summary/").data
+        self.assertEqual(everything["total_positive_clips"], 8)
 
     def test_summary_uses_the_same_filters_as_the_unpaginated_list_scope(self):
         self.make_lecture(

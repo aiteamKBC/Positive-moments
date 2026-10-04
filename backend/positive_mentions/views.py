@@ -17,6 +17,7 @@ from .models import DoctorSession
 from .pagination import LecturePagination
 from .serializers import LectureDetailSerializer, LectureListSerializer
 from .services import (
+    clip_category,
     filtered_lectures,
     v5_lectures,
     with_clip_production_status,
@@ -93,7 +94,9 @@ def me_view(request):
 
 class SummaryView(APIView):
     def get(self, request):
-        queryset = with_positive_clips_length(filtered_lectures(request.query_params))
+        # With a category chosen, "positive moments" counts that category only.
+        queryset = with_positive_clips_length(filtered_lectures(request.query_params),
+                                              clip_category(request.query_params))
         available = queryset.exclude(recording_url__isnull=True).exclude(recording_url="").count()
         totals = queryset.aggregate(
             processed=Count("session_id"),
