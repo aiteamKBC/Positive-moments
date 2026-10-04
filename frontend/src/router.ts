@@ -1,8 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasToken } from './services/api'
+import { hasToken, startMicrosoftSignIn } from './services/api'
 import LectureDetailView from './views/LectureDetailView.vue'
 import LecturesView from './views/LecturesView.vue'
 import LoginView from './views/LoginView.vue'
+import SsoCompleteView from './views/SsoCompleteView.vue'
 import OperationsDashboardView from './views/OperationsDashboardView.vue'
 import OperationsQueueView from './views/OperationsQueueView.vue'
 import OperationsBackfillView from './views/OperationsBackfillView.vue'
@@ -31,6 +32,7 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/operations' },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true, title: 'Sign in' } },
+    { path: '/sso/complete', name: 'sso-complete', component: SsoCompleteView, meta: { public: true, title: 'Signing in' } },
 
     // --- Operations ------------------------------------------------------
     { path: '/operations', name: 'operations', component: OperationsDashboardView, meta: { title: 'Operations' } },
@@ -85,7 +87,14 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
-  if (!to.meta.public && !hasToken()) return { name: 'login', query: { next: to.fullPath } }
+  if (!to.meta.public && !hasToken()) {
+    // Straight to Microsoft: someone signed in to the Communication Centre is
+    // already signed in there and comes back without seeing a login page.
+    // /login stays reachable for the local-account fallback and never
+    // redirects by itself, so a failed sign-in cannot loop.
+    startMicrosoftSignIn(to.fullPath)
+    return false
+  }
   if (to.name === 'login' && hasToken()) return { name: 'operations' }
 })
 

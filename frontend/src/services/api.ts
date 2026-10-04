@@ -3,9 +3,10 @@ import axios from 'axios'
 import type { LectureDetail, PaginatedLectures, Summary } from '../types'
 
 const TOKEN_KEY = 'positive_mentions_token'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: API_BASE,
   timeout: 20000,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -21,7 +22,9 @@ api.interceptors.response.use(
   (error: unknown) => {
     if (axios.isAxiosError(error) && error.response?.status === 401) {
       localStorage.removeItem(TOKEN_KEY)
-      if (window.location.pathname !== '/login') window.location.assign('/login')
+      if (window.location.pathname !== '/login') {
+        startMicrosoftSignIn(window.location.pathname + window.location.search)
+      }
     }
     return Promise.reject(error)
   },
@@ -42,6 +45,21 @@ export function clearToken() {
 export async function login(username: string, password: string) {
   const { data } = await api.post<{ token: string }>('/auth/login/', { username, password })
   setToken(data.token)
+}
+
+/**
+ * Sign in with Microsoft, the way the Communication Centre does. Someone
+ * already signed in there comes straight back without typing anything.
+ */
+export function startMicrosoftSignIn(returnTo = '/operations') {
+  window.location.assign(`${API_BASE}/auth/sso/start?${new URLSearchParams({ return_to: returnTo })}`)
+}
+
+/** Trade the one-time sign-in code for the API token. Returns where to go. */
+export async function completeMicrosoftSignIn(code: string) {
+  const { data } = await api.post<{ token: string; return_to: string }>('/auth/sso/exchange/', { code })
+  setToken(data.token)
+  return data.return_to
 }
 
 export async function logout() {

@@ -7,30 +7,47 @@
  * positive moments are one feature inside this platform rather than the
  * platform itself.
  *
- * Authentication is unchanged - the same token endpoint as before. No
- * credential of any kind appears in this file or anywhere else in the bundle.
+ * Microsoft 365 is the way in - the same account people use for the
+ * Communication Centre. The username/password form stays as a fallback for
+ * local accounts. No credential of any kind appears in this file or anywhere
+ * else in the bundle.
  */
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
 import BrandIdentity from '../components/BrandIdentity.vue'
-import { login } from '../services/api'
+import { login, startMicrosoftSignIn } from '../services/api'
 import { errorMessage } from '../utils/format'
+
+const SSO_ERRORS: Record<string, string> = {
+  not_configured: 'Microsoft sign-in is not set up on this server yet. Use a local account.',
+  wrong_tenant: 'That Microsoft account is not a Kent Business College account.',
+  account_disabled: 'This account has been switched off in Lecture Intelligence.',
+  microsoft_refused: 'Microsoft sign-in was cancelled or refused.',
+}
 
 const username = ref('')
 const password = ref('')
 const loading = ref(false)
-const error = ref('')
+const showLocal = ref(false)
 const router = useRouter()
 const route = useRoute()
+const ssoError = typeof route.query.sso_error === 'string' ? route.query.sso_error : ''
+const error = ref(ssoError ? (SSO_ERRORS[ssoError] ?? 'Microsoft sign-in did not complete. Please try again.') : '')
+const nextPath = typeof route.query.next === 'string' ? route.query.next : '/operations'
+
+function signInWithMicrosoft() {
+  loading.value = true
+  startMicrosoftSignIn(nextPath)
+}
 
 async function submit() {
   loading.value = true
   error.value = ''
   try {
     await login(username.value, password.value)
-    await router.replace(typeof route.query.next === 'string' ? route.query.next : '/operations')
+    await router.replace(nextPath)
   } catch (caught) {
     error.value = errorMessage(caught, 'Sign in failed. Check your credentials and try again.')
   } finally {
@@ -83,12 +100,29 @@ const HIGHLIGHTS = [
         <div class="mb-10 lg:hidden"><BrandIdentity size="md" /></div>
         <p class="kicker">Welcome back</p>
         <h2 class="mt-1.5 font-display text-3xl leading-tight text-ink">Sign in</h2>
-        <p class="mt-2 text-sm leading-6 text-muted">Use your existing internal workspace account.</p>
+        <p class="mt-2 text-sm leading-6 text-muted">
+          Use your Kent Business College Microsoft account - the same one as the Communication Centre.
+        </p>
 
-        <form class="mt-8 space-y-4" @submit.prevent="submit">
+        <button type="button" class="btn-primary mt-8 !h-11 w-full" :disabled="loading" @click="signInWithMicrosoft">
+          {{ loading && !showLocal ? 'Redirecting to Microsoft…' : 'Sign in with Microsoft' }}
+        </button>
+        <p v-if="error && !showLocal" class="notice-error mt-4" role="alert">
+          <AppIcon name="alert" :size="16" class="mt-0.5" />{{ error }}
+        </p>
+
+        <button
+          v-if="!showLocal" type="button"
+          class="mt-6 w-full text-center text-xs font-semibold text-muted underline-offset-4 hover:underline"
+          @click="showLocal = true; error = ''"
+        >
+          Sign in with a local account instead
+        </button>
+
+        <form v-else class="mt-8 space-y-4 border-t border-line pt-6" @submit.prevent="submit">
           <div>
             <label for="username" class="label">Username</label>
-            <input id="username" v-model="username" class="field !h-11" autocomplete="username" required autofocus />
+            <input id="username" v-model="username" class="field !h-11" autocomplete="username" required />
           </div>
           <div>
             <label for="password" class="label">Password</label>
@@ -97,7 +131,7 @@ const HIGHLIGHTS = [
           <p v-if="error" class="notice-error" role="alert">
             <AppIcon name="alert" :size="16" class="mt-0.5" />{{ error }}
           </p>
-          <button type="submit" class="btn-primary !h-11 w-full" :disabled="loading">
+          <button type="submit" class="btn-secondary !h-11 w-full" :disabled="loading">
             {{ loading ? 'Signing in…' : 'Sign in' }}
           </button>
         </form>

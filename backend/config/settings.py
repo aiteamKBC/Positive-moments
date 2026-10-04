@@ -48,6 +48,21 @@ ALLOWED_HOSTS = [value.strip() for value in os.getenv(
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
+# Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
+# app registration the platform already has for Graph; the redirect URI must
+# be registered on that app exactly as written here. Empty = SSO switched off.
+MICROSOFT_SSO_TENANT_ID = (os.getenv("MICROSOFT_SSO_TENANT_ID")
+                           or os.getenv("MICROSOFT_GRAPH_TENANT_ID", "")).strip()
+MICROSOFT_SSO_CLIENT_ID = (os.getenv("MICROSOFT_SSO_CLIENT_ID")
+                           or os.getenv("MICROSOFT_GRAPH_CLIENT_ID", "")).strip()
+MICROSOFT_SSO_CLIENT_SECRET = (os.getenv("MICROSOFT_SSO_CLIENT_SECRET")
+                               or os.getenv("MICROSOFT_GRAPH_CLIENT_SECRET", "")).strip()
+MICROSOFT_SSO_REDIRECT_URI = os.getenv("MICROSOFT_SSO_REDIRECT_URI", "").strip()
+# The sign-in round trip keeps its state in the Django session cookie.
+SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE",
+                                 MICROSOFT_SSO_REDIRECT_URI.startswith("https://"))
+SESSION_COOKIE_SAMESITE = "Lax"
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
