@@ -2,7 +2,7 @@
 /**
  * One product, one shell.
  *
- * Operations, Lectures and Positive Moments are three jobs inside a single
+ * Positive Moments, Operations and Lectures are three jobs inside a single
  * Kent Business College application, so they share one header, one navigation
  * and one type scale. Anything that made them look like three tools bolted
  * together belongs in here, once, rather than in each view.
@@ -24,9 +24,9 @@ const menuOpen = ref(false)
 const showShell = computed(() => route.meta.public !== true)
 
 const NAV = [
+  { label: 'Positive Moments', to: '/positive-moments', icon: 'moments', match: /^\/positive-moments/ },
   { label: 'Operations', to: '/operations', icon: 'operations', match: /^\/operations/ },
   { label: 'Lectures', to: '/lectures', icon: 'lectures', match: /^\/lectures/ },
-  { label: 'Positive Moments', to: '/positive-moments', icon: 'moments', match: /^\/positive-moments/ },
 ]
 
 const active = computed(() => NAV.find((item) => item.match.test(route.path))?.to ?? '')
@@ -45,7 +45,7 @@ async function signOut() {
   <div v-if="showShell" class="min-h-screen bg-canvas">
     <header class="on-plum sticky top-0 z-40 bg-brand-900 text-white">
       <div class="mx-auto flex h-14 w-full max-w-[1520px] items-center gap-6 px-4 sm:px-6 lg:px-8">
-        <RouterLink to="/operations" class="shrink-0" aria-label="Kent Business College Lecture Intelligence — Operations">
+        <RouterLink to="/positive-moments" class="shrink-0" aria-label="Kent Business College Lecture Intelligence — Positive Moments">
           <BrandIdentity size="sm" inverse />
         </RouterLink>
 

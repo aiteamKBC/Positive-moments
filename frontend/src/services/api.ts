@@ -51,7 +51,7 @@ export async function login(username: string, password: string) {
  * Sign in with Microsoft, the way the Communication Centre does. Someone
  * already signed in there comes straight back without typing anything.
  */
-export function startMicrosoftSignIn(returnTo = '/operations') {
+export function startMicrosoftSignIn(returnTo = '/positive-moments') {
   window.location.assign(`${API_BASE}/auth/sso/start?${new URLSearchParams({ return_to: returnTo })}`)
 }
 

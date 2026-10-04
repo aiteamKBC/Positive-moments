@@ -66,7 +66,7 @@ LOGIN_TTL_SECONDS = 600
 MAX_PENDING_LOGINS = 5
 HANDOFF_TTL_SECONDS = 120
 CLOCK_SKEW_SECONDS = 300
-DEFAULT_RETURN_TO = "/operations"
+DEFAULT_RETURN_TO = "/positive-moments"
 USERNAME_PREFIX = "entra-"
 GUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 

@@ -106,7 +106,7 @@ class MicrosoftSignInTests(TestCase):
     def test_only_a_safe_relative_return_path_is_kept(self):
         for unsafe in ("https://evil.example/x", "//evil.example", "/\\evil.example",
                        "javascript:alert(1)", "/api/auth/logout/", "", None, "/x\nSet-Cookie:a"):
-            self.assertEqual(sso.safe_return_path(unsafe), "/operations", unsafe)
+            self.assertEqual(sso.safe_return_path(unsafe), sso.DEFAULT_RETURN_TO, unsafe)
         self.assertEqual(sso.safe_return_path("/lectures?day=2026-09-30"), "/lectures?day=2026-09-30")
 
     # --- the full round trip ----------------------------------------------

@@ -39,7 +39,7 @@ const router = useRouter()
 const route = useRoute()
 const ssoError = typeof route.query.sso_error === 'string' ? route.query.sso_error : ''
 const error = ref(ssoError ? (SSO_ERRORS[ssoError] ?? 'Microsoft sign-in did not complete. Please try again.') : '')
-const nextPath = typeof route.query.next === 'string' ? route.query.next : '/operations'
+const nextPath = typeof route.query.next === 'string' ? route.query.next : '/positive-moments'
 
 function signInWithMicrosoft() {
   loading.value = true

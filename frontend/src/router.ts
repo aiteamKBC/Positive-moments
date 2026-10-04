@@ -30,7 +30,7 @@ const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/operations' },
+    { path: '/', redirect: '/positive-moments' },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true, title: 'Sign in' } },
     { path: '/sso/complete', name: 'sso-complete', component: SsoCompleteView, meta: { public: true, title: 'Signing in' } },
 
@@ -81,7 +81,7 @@ const router = createRouter({
     },
     { path: '/lectures/:sessionKey', redirect: (to) => ({ name: 'positive-moment-detail', params: to.params }) },
 
-    { path: '/:pathMatch(.*)*', redirect: '/operations' },
+    { path: '/:pathMatch(.*)*', redirect: '/positive-moments' },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })
@@ -95,7 +95,7 @@ router.beforeEach((to) => {
     startMicrosoftSignIn(to.fullPath)
     return false
   }
-  if (to.name === 'login' && hasToken()) return { name: 'operations' }
+  if (to.name === 'login' && hasToken()) return { name: 'positive-moments' }
 })
 
 router.afterEach((to) => {
