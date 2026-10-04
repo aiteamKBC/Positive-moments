@@ -198,9 +198,47 @@ class MicrosoftSignInTests(TestCase):
     def test_a_stale_sign_in_attempt_is_refused(self):
         query = self.start()
         session = self.client.session
-        session[sso.LOGIN_SESSION_KEY]["started_at"] -= sso.LOGIN_TTL_SECONDS + 1
+        for entry in session[sso.LOGIN_SESSION_KEY].values():
+            entry["started_at"] -= sso.LOGIN_TTL_SECONDS + 1
         session.save()
         self.assertEqual(self.refused_with(self.callback(query)[0]), "expired")
+
+    def test_an_older_tab_still_signs_in_after_a_newer_one_started(self):
+        # 2026-10-04 in production: three starts in one browser, the person
+        # approved the first on their phone, and it came back invalid_state.
+        first, second = self.start("/lectures"), self.start("/operations")
+        response, _ = self.callback(first)
+        self.assertTrue(response["Location"].startswith("/sso/complete#"), response["Location"])
+        self.client = APIClient()
+        self.assertEqual(self.refused_with(self.callback(second)[0]), "invalid_state")
+
+    def test_both_tabs_can_finish(self):
+        first, second = self.start(), self.start()
+        self.assertTrue(self.callback(second)[0]["Location"].startswith("/sso/complete#"))
+        self.assertTrue(self.callback(first)[0]["Location"].startswith("/sso/complete#"))
+
+    def test_only_the_newest_attempts_are_kept(self):
+        oldest = self.start()
+        for _ in range(sso.MAX_PENDING_LOGINS):
+            self.start()
+        self.assertEqual(self.refused_with(self.callback(oldest)[0]), "invalid_state")
+
+    def test_a_sign_in_started_before_this_release_is_simply_unknown(self):
+        session = self.client.session
+        session[sso.LOGIN_SESSION_KEY] = {"state": "old", "nonce": "n", "verifier": "v",
+                                          "return_to": "/", "started_at": time.time()}
+        session.save()
+        response = self.client.get("/api/auth/sso/callback", {"code": "x", "state": "old"})
+        self.assertEqual(self.refused_with(response), "invalid_state")
+        self.assertEqual(self.client.get("/api/auth/sso/start").status_code, 302)
+
+    def test_logging_out_in_one_tab_does_not_cancel_a_sign_in_in_another(self):
+        signed_in, _ = self.sign_in()
+        pending = self.start()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Token {signed_in.data['token']}")
+        self.client.post("/api/auth/logout/")
+        self.client.credentials()
+        self.assertTrue(self.callback(pending)[0]["Location"].startswith("/sso/complete#"))
 
     def test_an_expired_id_token_is_refused(self):
         response, _ = self.callback(self.start(), exp=int(time.time()) - 3600)

@@ -80,7 +80,6 @@ def login_view(request):
 def logout_view(request):
     if request.auth:
         request.auth.delete()
-    request.session.flush()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 

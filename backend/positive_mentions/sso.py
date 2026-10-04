@@ -61,6 +61,9 @@ SCOPES = "openid profile email"
 LOGIN_SESSION_KEY = "microsoft_sso_login"
 HANDOFF_SESSION_KEY = "microsoft_sso_handoff"
 LOGIN_TTL_SECONDS = 600
+# Sign-ins in flight per browser: a second tab, a refresh or a double click
+# must not invalidate the attempt the person is about to approve.
+MAX_PENDING_LOGINS = 5
 HANDOFF_TTL_SECONDS = 120
 CLOCK_SKEW_SECONDS = 300
 DEFAULT_RETURN_TO = "/operations"
@@ -113,11 +116,16 @@ def sso_start(request):
         return _login_page("not_configured")
     state, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
-    request.session[LOGIN_SESSION_KEY] = {
-        "state": state, "nonce": nonce, "verifier": verifier,
+    now = time.time()
+    pending = {key: entry for key, entry in _pending_logins(request).items()
+               if now - entry["started_at"] <= LOGIN_TTL_SECONDS}
+    pending[_digest(state)] = {
+        "nonce": nonce, "verifier": verifier,
         "return_to": safe_return_path(request.GET.get("return_to")),
-        "started_at": time.time(),
+        "started_at": now,
     }
+    newest = sorted(pending.items(), key=lambda item: item[1]["started_at"])[-MAX_PENDING_LOGINS:]
+    request.session[LOGIN_SESSION_KEY] = dict(newest)
     query = urllib.parse.urlencode({
         "client_id": settings.MICROSOFT_SSO_CLIENT_ID,
         "response_type": "code",
@@ -138,7 +146,12 @@ def sso_start(request):
 @permission_classes([AllowAny])
 def sso_callback(request):
     # Popped before anything else: a state is good for one attempt only.
-    pending = request.session.pop(LOGIN_SESSION_KEY, None)
+    pending = None
+    state = request.GET.get("state")
+    if isinstance(state, str):
+        logins = _pending_logins(request)
+        pending = logins.pop(_digest(state), None)
+        request.session[LOGIN_SESSION_KEY] = logins
     try:
         user, return_to = _complete_login(request, pending)
     except SsoError as refusal:
@@ -178,15 +191,21 @@ def sso_exchange(request):
     })
 
 
+def _pending_logins(request):
+    logins = request.session.get(LOGIN_SESSION_KEY)
+    # Sessions from before several sign-ins could be in flight held one
+    # attempt under "state"; such an entry is simply not a dict of them.
+    if not isinstance(logins, dict) or "state" in logins:
+        return {}
+    return dict(logins)
+
+
 def _complete_login(request, pending):
     if request.GET.get("error"):
         # Microsoft said no (cancelled, consent, disabled account...). Its
         # error text is not echoed: it is not ours to show.
         raise SsoError("microsoft_refused")
     if not pending:
-        raise SsoError("invalid_state")
-    state = request.GET.get("state")
-    if not isinstance(state, str) or not secrets.compare_digest(state, pending["state"]):
         raise SsoError("invalid_state")
     if time.time() - pending["started_at"] > LOGIN_TTL_SECONDS:
         raise SsoError("expired")

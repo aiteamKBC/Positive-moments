@@ -27,6 +27,8 @@ const SSO_ERRORS: Record<string, string> = {
   not_a_college_account: 'Sign in with your @kentbusinesscollege.com account.',
   account_conflict: 'Your Microsoft account does not match your Lecture Intelligence account. Ask an administrator.',
   microsoft_refused: 'Microsoft sign-in was cancelled or refused.',
+  invalid_state: 'That sign-in attempt is no longer valid. Click "Sign in with Microsoft" again.',
+  expired: 'That sign-in took too long. Click "Sign in with Microsoft" again.',
 }
 
 const username = ref('')
