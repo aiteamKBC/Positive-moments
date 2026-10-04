@@ -12,6 +12,7 @@ from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase, override_settings
 from rest_framework.authtoken.models import Token
 from rest_framework.test import APIClient
@@ -38,8 +39,26 @@ def id_token(**overrides):
 @override_settings(MICROSOFT_SSO_TENANT_ID=TENANT, MICROSOFT_SSO_CLIENT_ID=CLIENT,
                    MICROSOFT_SSO_CLIENT_SECRET=SECRET, MICROSOFT_SSO_REDIRECT_URI=REDIRECT)
 class MicrosoftSignInTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # Production's auth_user is shared with other college systems, which
+        # added these. Rolled back with the class transaction.
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER TABLE auth_user ADD COLUMN azure_oid varchar(36) UNIQUE")
+            cursor.execute("ALTER TABLE auth_user ADD CONSTRAINT auth_user_email_unique UNIQUE (email)")
+
     def setUp(self):
         self.client = APIClient()
+
+    def oid_of(self, user):
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT azure_oid FROM auth_user WHERE id = %s", [user.pk])
+            return cursor.fetchone()[0]
+
+    def link(self, user, oid):
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE auth_user SET azure_oid = %s WHERE id = %s", [oid, user.pk])
 
     # --- helpers ---------------------------------------------------------
     def start(self, return_to="/operations/backfill"):
@@ -95,22 +114,59 @@ class MicrosoftSignInTests(TestCase):
         response, _ = self.sign_in("/operations/backfill")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["return_to"], "/operations/backfill")
-        user = get_user_model().objects.get(username=f"entra-{OID}")
+        user = get_user_model().objects.get(username="sam.tutor@kentbusinesscollege.com")
         self.assertEqual(Token.objects.get(user=user).key, response.data["token"])
         self.assertEqual(user.email, "sam.tutor@kentbusinesscollege.com")
         self.assertEqual(user.first_name, "Sam Tutor")
+        self.assertEqual(self.oid_of(user), OID)
         self.assertFalse(user.has_usable_password())
         self.assertFalse(user.is_staff)
 
         self.client.credentials(HTTP_AUTHORIZATION=f"Token {response.data['token']}")
         self.assertEqual(self.client.get("/api/auth/me/").status_code, 200)
 
-    def test_the_same_person_is_the_same_account_and_their_details_follow_microsoft(self):
+    def test_the_same_person_is_the_same_account_even_after_an_email_change(self):
+        first, _ = self.sign_in()
+        self.client = APIClient()
+        second, _ = self.sign_in(preferred_username="sam.renamed@kentbusinesscollege.com")
+        self.assertEqual(first.data["token"], second.data["token"])
+        self.assertEqual(get_user_model().objects.count(), 1)
+
+    def test_an_existing_college_account_is_linked_not_duplicated(self):
+        # 2026-10-04 in production: the person already had a password account
+        # with this email; a second account broke the unique email and 500'd.
+        existing = get_user_model().objects.create_user(
+            "Sam.Tutor", email="Sam.Tutor@kentbusinesscollege.com", password="their-own",
+            is_staff=True, first_name="Samantha")
+        response, _ = self.sign_in()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(get_user_model().objects.count(), 1)
+        existing.refresh_from_db()
+        self.assertEqual(Token.objects.get(user=existing).key, response.data["token"])
+        self.assertEqual(self.oid_of(existing), OID)
+        # Their account is theirs: password, name and flags untouched.
+        self.assertTrue(existing.check_password("their-own"))
+        self.assertEqual((existing.first_name, existing.is_staff), ("Samantha", True))
+
+    def test_an_account_linked_to_someone_else_is_never_taken_over(self):
+        other = get_user_model().objects.create_user("sam", email="sam.tutor@kentbusinesscollege.com")
+        self.link(other, "99999999-9999-9999-9999-999999999999")
+        response, _ = self.callback(self.start())
+        self.assertEqual(self.refused_with(response), "account_conflict")
+        self.assertFalse(Token.objects.exists())
+
+    def test_a_sign_in_name_outside_the_college_domains_is_refused(self):
+        response, _ = self.callback(self.start(), preferred_username="guest@gmail.com")
+        self.assertEqual(self.refused_with(response), "not_a_college_account")
+        self.assertFalse(get_user_model().objects.exists())
+
+    def test_people_without_an_existing_account_do_not_collide_with_each_other(self):
         self.sign_in()
         self.client = APIClient()
-        self.sign_in(name="Sam Renamed", preferred_username="sam.renamed@kentbusinesscollege.com")
-        (user,) = get_user_model().objects.filter(username__startswith="entra-")
-        self.assertEqual((user.first_name, user.email), ("Sam Renamed", "sam.renamed@kentbusinesscollege.com"))
+        response, _ = self.sign_in(oid="12345678-1234-1234-1234-123456789012", name="Alex",
+                                   preferred_username="alex@kentbusinesscollege.com")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(get_user_model().objects.count(), 2)
 
     def test_the_code_is_redeemed_server_to_server_with_the_pkce_verifier(self):
         query = self.start()
@@ -159,7 +215,7 @@ class MicrosoftSignInTests(TestCase):
         response, _ = self.callback(self.start(), tid=other,
                                     iss=f"https://login.microsoftonline.com/{other}/v2.0")
         self.assertEqual(self.refused_with(response), "wrong_tenant")
-        self.assertFalse(get_user_model().objects.filter(username__startswith="entra-").exists())
+        self.assertFalse(get_user_model().objects.exists())
 
     def test_a_mismatched_nonce_is_refused(self):
         response, _ = self.callback(self.start(), nonce="another-nonce")
@@ -172,7 +228,9 @@ class MicrosoftSignInTests(TestCase):
         self.assertEqual(self.refused_with(response), "microsoft_refused")
 
     def test_a_switched_off_account_cannot_sign_in(self):
-        get_user_model().objects.create(username=f"entra-{OID}", is_active=False)
+        user = get_user_model().objects.create(username="sam", email="sam.tutor@kentbusinesscollege.com",
+                                               is_active=False)
+        self.link(user, OID)
         response, _ = self.callback(self.start())
         self.assertEqual(self.refused_with(response), "account_disabled")
         self.assertFalse(Token.objects.exists())

@@ -58,6 +58,10 @@ MICROSOFT_SSO_CLIENT_ID = (os.getenv("MICROSOFT_SSO_CLIENT_ID")
 MICROSOFT_SSO_CLIENT_SECRET = (os.getenv("MICROSOFT_SSO_CLIENT_SECRET")
                                or os.getenv("MICROSOFT_GRAPH_CLIENT_SECRET", "")).strip()
 MICROSOFT_SSO_REDIRECT_URI = os.getenv("MICROSOFT_SSO_REDIRECT_URI", "").strip()
+# Only sign-in names on these domains are matched to accounts.
+MICROSOFT_SSO_EMAIL_DOMAINS = [value.strip().lower() for value in os.getenv(
+    "MICROSOFT_SSO_EMAIL_DOMAINS", "kentbusinesscollege.com,kentbusinesscollege.org"
+).split(",") if value.strip()]
 # The sign-in round trip keeps its state in the Django session cookie.
 SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE",
                                  MICROSOFT_SSO_REDIRECT_URI.startswith("https://"))

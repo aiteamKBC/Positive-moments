@@ -24,6 +24,8 @@ const SSO_ERRORS: Record<string, string> = {
   not_configured: 'Microsoft sign-in is not set up on this server yet. Use a local account.',
   wrong_tenant: 'That Microsoft account is not a Kent Business College account.',
   account_disabled: 'This account has been switched off in Lecture Intelligence.',
+  not_a_college_account: 'Sign in with your @kentbusinesscollege.com account.',
+  account_conflict: 'Your Microsoft account does not match your Lecture Intelligence account. Ask an administrator.',
   microsoft_refused: 'Microsoft sign-in was cancelled or refused.',
 }
 

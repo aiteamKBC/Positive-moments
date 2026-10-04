@@ -45,6 +45,7 @@ import urllib.request
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError, connection, transaction
 from django.http import HttpResponseRedirect
 from django.utils import timezone
 from rest_framework import status
@@ -255,24 +256,72 @@ def validated_claims(id_token, expected_nonce, now=None):
     return claims
 
 
+def college_email(claims):
+    """The sign-in name, if it is on a college domain. Guests and service
+    accounts have other domains and are not linked to anyone's account."""
+    email = (claims.get("preferred_username") or claims.get("email") or "").strip().lower()
+    domain = email.rpartition("@")[2]
+    return email if "@" in email and domain in settings.MICROSOFT_SSO_EMAIL_DOMAINS else ""
+
+
 def user_for(claims):
     """
-    One local account per Entra object id - immutable, unlike email or UPN.
-    Name and email are refreshed from Microsoft on every sign-in. An account
-    switched off here stays switched off.
+    The person's account, found by their Entra object id.
+
+    `auth_user` is shared with other college systems, which already keep the
+    object id in `auth_user.azure_oid` (unique) and allow one account per
+    email (unique). So:
+
+      1. the account whose azure_oid is this person        -> that account
+      2. otherwise the one account with their college email -> link it
+      3. otherwise                                          -> a new account
+
+    An account linked to a DIFFERENT object id is never taken over. Existing
+    accounts keep their name, email, password and flags; only the link and
+    last_login are written.
     """
-    email = (claims.get("email") or claims.get("preferred_username") or "").strip().lower()
-    name = (claims.get("name") or "").strip()
-    user, _ = get_user_model().objects.get_or_create(
-        username=f"{USERNAME_PREFIX}{claims['oid'].lower()}",
-        defaults={"is_active": True, "is_staff": False},
-    )
-    if not user.is_active:
-        raise SsoError("account_disabled")
-    if user.has_usable_password():
-        user.set_unusable_password()            # Microsoft only, never a password
-    user.email = email[:254]
-    user.first_name = name[:150]
-    user.last_login = timezone.now()
-    user.save()
-    return user
+    oid = claims["oid"].lower()
+    User = get_user_model()
+    try:
+        with transaction.atomic():
+            user = _user_with_oid(oid)
+            if user is None:
+                email = college_email(claims)
+                if not email:
+                    raise SsoError("not_a_college_account")
+                matches = list(User.objects.filter(email__iexact=email)[:2])
+                if len(matches) > 1:
+                    raise SsoError("account_conflict")
+                if matches:
+                    user = matches[0]
+                else:
+                    taken = User.objects.filter(username__iexact=email).exists()
+                    user = User(username=f"{USERNAME_PREFIX}{oid}" if taken else email,
+                                email=email, first_name=(claims.get("name") or "").strip()[:150],
+                                is_active=True, is_staff=False)
+                    user.set_unusable_password()        # Microsoft only, never a password
+                    user.save()
+                _link(user, oid)
+            if not user.is_active:
+                raise SsoError("account_disabled")
+            user.last_login = timezone.now()
+            user.save(update_fields=["last_login"])
+            return user
+    except IntegrityError:
+        raise SsoError("account_conflict") from None
+
+
+def _user_with_oid(oid):
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT id FROM auth_user WHERE lower(azure_oid) = %s", [oid])
+        row = cursor.fetchone()
+    return get_user_model().objects.get(pk=row[0]) if row else None
+
+
+def _link(user, oid):
+    """Fill the link once. A row already linked to someone else is refused."""
+    with connection.cursor() as cursor:
+        cursor.execute("UPDATE auth_user SET azure_oid = %s WHERE id = %s AND azure_oid IS NULL",
+                       [oid, user.pk])
+        if cursor.rowcount != 1:
+            raise SsoError("account_conflict")
