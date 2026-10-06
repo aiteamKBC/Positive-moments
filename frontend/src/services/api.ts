@@ -80,6 +80,17 @@ export async function getLecture(sessionKey: string) {
   )).data
 }
 
+/**
+ * Ask for one moment to be cut into a clip. Accepted means "requested": the
+ * clip itself appears later, once it has been produced.
+ */
+export async function requestClip(sessionKey: string, startCue: number, endCue: number) {
+  await api.post(
+    `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/clip-requests/`,
+    { start_cue: startCue, end_cue: endCue },
+  )
+}
+
 export async function getWatchUrl(sessionKey: string, clipIndex: number) {
   return (await api.get<{ url: string }>(
     `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/clips/${clipIndex}/watch/`,

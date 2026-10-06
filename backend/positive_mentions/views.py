@@ -1,5 +1,9 @@
 import hashlib
+import json
+import logging
 import secrets
+import urllib.error
+import urllib.request
 
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
@@ -15,7 +19,7 @@ from rest_framework.views import APIView
 
 from .models import DoctorSession
 from .pagination import LecturePagination
-from .serializers import LectureDetailSerializer, LectureListSerializer
+from .serializers import LectureDetailSerializer, LectureListSerializer, attach_ready_clip_assets
 from .services import (
     clip_category,
     filtered_lectures,
@@ -26,6 +30,7 @@ from .services import (
 from .utils import decode_session_id, normalize_clips, timestamp_to_seconds, timestamped_sharepoint_url
 
 WATCH_PREROLL_SECONDS = 60
+logger = logging.getLogger(__name__)
 
 
 def environment_dashboard_user(username, password):
@@ -183,3 +188,77 @@ class WatchMomentView(APIView):
         return Response({
             "url": timestamped_sharepoint_url(lecture.recording_url, playback_seconds)
         })
+
+
+def _cue(value):
+    """A cue number from the request: an int (or a whole float), never a bool."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
+
+
+class ClipRequestView(APIView):
+    """
+    Ask the n8n "clip on demand" flow to cut ONE positive moment.
+
+    The moment is identified by session_id + start_cue + end_cue, and the
+    pair must belong to this lecture: the values sent to n8n are the stored
+    ones, not whatever the browser posted. n8n answers as soon as it has
+    accepted the job, so a success here means "requested", not "ready"; the
+    finished clip appears in qa_positive_clip_assets and on the page.
+    """
+
+    def post(self, request, session_key):
+        lecture = lecture_from_key(session_key)
+        if lecture is None:
+            return Response({"code": "invalid_session_id",
+                             "detail": "The lecture identifier is invalid."},
+                            status=status.HTTP_404_NOT_FOUND)
+        start_cue, end_cue = _cue(request.data.get("start_cue")), _cue(request.data.get("end_cue"))
+        if start_cue is None or end_cue is None:
+            return Response({"code": "invalid_cues",
+                             "detail": "start_cue and end_cue must be numbers."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        clips = attach_ready_clip_assets(lecture.session_id, normalize_clips(lecture.positive_clips))
+        matches = [clip for clip in clips
+                   if _cue(clip.get("start_cue")) == start_cue and _cue(clip.get("end_cue")) == end_cue]
+        if len(matches) != 1:
+            return Response({"code": "clip_not_found",
+                             "detail": "This positive moment is not part of the lecture."},
+                            status=status.HTTP_404_NOT_FOUND)
+        (clip,) = matches
+        if clip["clip_asset"]:
+            return Response({"code": "clip_already_produced",
+                             "detail": "This clip has already been produced.",
+                             "clip_asset": clip["clip_asset"]},
+                            status=status.HTTP_409_CONFLICT)
+        payload = {"session_id": lecture.session_id,
+                   "start_cue": clip["start_cue"], "end_cue": clip["end_cue"]}
+        try:
+            send_clip_request(payload)
+        except ClipRequestFailed:
+            return Response({"code": "clip_request_failed",
+                             "detail": "The clip service did not accept the request. Try again."},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response({"status": "requested"}, status=status.HTTP_202_ACCEPTED)
+
+
+class ClipRequestFailed(Exception):
+    pass
+
+
+def send_clip_request(payload):
+    """POST the identity to n8n. Its reply body is not needed and not logged."""
+    req = urllib.request.Request(
+        settings.CLIP_ON_DEMAND_WEBHOOK_URL, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            if not 200 <= response.status < 300:
+                raise ClipRequestFailed(response.status)
+    except urllib.error.HTTPError as exc:
+        logger.warning("clip on demand refused: HTTP %s", exc.code)
+        raise ClipRequestFailed(exc.code) from None
+    except (urllib.error.URLError, OSError) as exc:
+        logger.warning("clip on demand unreachable: %s", type(exc).__name__)
+        raise ClipRequestFailed(type(exc).__name__) from None

@@ -16,6 +16,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
+import ClipRequestButton from '../components/ClipRequestButton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
@@ -260,7 +261,13 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
                 :href="clip.clip_asset.url"
                 target="_blank"
                 rel="noopener noreferrer"
-              ><AppIcon name="external" :size="14" /> Open the produced clip</a>
+              ><AppIcon name="external" :size="14" /> View clip</a>
+              <ClipRequestButton
+                v-else-if="typeof clip.start_cue === 'number' && typeof clip.end_cue === 'number'"
+                :session-key="lecture.session_key"
+                :start-cue="clip.start_cue"
+                :end-cue="clip.end_cue"
+              />
             </div>
 
             <details class="group mt-4 rounded-lg border border-line bg-[#fbfafc]">

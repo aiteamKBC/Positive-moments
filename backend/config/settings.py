@@ -48,6 +48,11 @@ ALLOWED_HOSTS = [value.strip() for value in os.getenv(
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
+# "Clip" on a positive moment: the n8n flow that cuts one clip on demand.
+CLIP_ON_DEMAND_WEBHOOK_URL = os.getenv(
+    "CLIP_ON_DEMAND_WEBHOOK_URL",
+    "https://n8n.srv943390.hstgr.cloud/webhook/qa-clip-on-demand").strip()
+
 # Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
 # app registration the platform already has for Graph; the redirect URI must
 # be registered on that app exactly as written here. Empty = SSO switched off.
