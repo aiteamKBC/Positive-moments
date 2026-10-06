@@ -11,6 +11,7 @@ from app.transcripts.webvtt import PARSER_VERSION
 from app.config.settings import Settings
 from app.db.connection import database_connection, readonly_database_connection
 from app.db.repositories.aptem import AptemRepository
+from app.db.repositories.lms import LmsModuleRepository
 from app.db.repositories.discovery_runs import DiscoveryRunRepository
 from app.db.repositories.lecture_sessions import LectureSessionRepository
 from app.db.repositories.perfect_lectures import (
@@ -497,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
                 lecture_repository=LectureSessionRepository(),
                 run_repository=DiscoveryRunRepository(),
                 qa_validation_repository=QaValidationRepository(),
+                lms_repository=(LmsModuleRepository(settings.lms_database_url)
+                                if settings.lms_database_url else None),
             )
             with database_connection(settings.database_url) as kbc_connection:
                 with readonly_database_connection(settings.aptem_database_url) as aptem_connection:

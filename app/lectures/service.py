@@ -11,7 +11,7 @@ from app.graph.meetings import (
     ORGANIZER_ID_UNAVAILABLE,
     RESOLVED,
 )
-from app.lectures.matching import match_active_group, normalize_group
+from app.lectures.matching import APTEM, BOTH, LMS, index_module_names, match_module, normalize_group
 from app.lectures.models import Lecture
 
 
@@ -25,19 +25,25 @@ class LectureDiscoveryService:
 
         * not cancelled,
         * carries a Teams JoinWebUrl, and
-        * whose normalized subject exactly matches an active Aptem group.
+        * whose normalized subject exactly matches an active Aptem group
+          OR a module title in the LMS (curriculum.modules).
+
+    Both sources go through the same normalization and the same exact
+    match; a subject either knows is eligible, once.
 
     Every other calendar occurrence is audit evidence: it is counted and
     described in the discovery run's diagnostics and never becomes a row.
     """
 
-    def __init__(self, *, calendar, meetings, aptem_repository, lecture_repository, run_repository, qa_validation_repository=None):
+    def __init__(self, *, calendar, meetings, aptem_repository, lecture_repository, run_repository, qa_validation_repository=None,
+                 lms_repository=None):
         self.calendar = calendar
         self.meetings = meetings
         self.aptem_repository = aptem_repository
         self.lecture_repository = lecture_repository
         self.run_repository = run_repository
         self.qa_validation_repository = qa_validation_repository
+        self.lms_repository = lms_repository
         self.log = logging.getLogger(__name__)
 
     def discover_day(self, kbc_connection, aptem_connection, target_date: date, *, persist: bool = True) -> dict:
@@ -61,6 +67,11 @@ class LectureDiscoveryService:
                 NO_ACTIVE_APTEM_GROUPS,
                 "correct Aptem source database returned zero active groups; discovery stopped",
             )
+        lms_titles, lms_source = self._load_lms_titles()
+        # Normalized once per day, not once per event.
+        aptem_index, lms_index = index_module_names(groups), index_module_names(lms_titles)
+        match_sources = {APTEM: 0, LMS: 0, BOTH: 0}
+        lms_only_matches: list[dict] = []
         batch = self.calendar.discover_calendar_events(target_date)
         lectures: list[Lecture] = []
         non_canonical: list[dict] = []
@@ -68,18 +79,25 @@ class LectureDiscoveryService:
         forbidden_contexts: list[dict] = []
 
         for event in batch.eligible_events:
-            module = match_active_group(event.subject, groups)
-            if module is None:
+            match = match_module(event.subject, aptem_index, lms_index)
+            module = match.module
+            if not match.eligible:
                 # Audit evidence only. No Graph call, no registry row.
                 non_canonical.append({
                     "subject": event.subject,
                     "normalized_subject": normalize_group(event.subject),
                     "exclusion_reason": "NOT_AN_ACTIVE_APTEM_GROUP",
+                    "matched_source": match.matched_source,
+                    "lms_source_status": lms_source["status"],
                     "session_date": cairo_business_date(event.meeting_start).isoformat(),
                     "is_all_day": event.is_all_day,
                     "occurrence_type": event.occurrence_type,
                 })
                 continue
+
+            match_sources[match.matched_source] += 1
+            if match.matched_source == LMS:
+                lms_only_matches.append({"subject": event.subject, "lms_module": module})
 
             resolution = self.meetings.resolve(event.join_url, event.calendar_organizer_address)
             if resolution.status == "FORBIDDEN_FOR_ORGANIZER":
@@ -199,7 +217,11 @@ class LectureDiscoveryService:
             "calendar_events_found": batch.calendar_events_found,
             "teams_events_found": len(batch.eligible_events),
             "active_aptem_groups_loaded": len(groups),
-            "aptem_matched_candidates": matched,
+            "aptem_matched_candidates": match_sources[APTEM] + match_sources[BOTH],
+            # eligible = matched in Aptem OR matched in the LMS, once.
+            "lms_module_source": lms_source,
+            "module_match_sources": match_sources,
+            "lms_only_matches": lms_only_matches,
             "canonical_lecture_candidates": matched,
             "non_canonical_calendar_events": len(non_canonical),
             "meeting_lookups_attempted": matched,
@@ -224,6 +246,8 @@ class LectureDiscoveryService:
             "metadata": {
                 "write_policy": "new_tables_only",
                 "canonical_registry_rule": "ACTIVE_APTEM_MATCHED_TEAMS_OCCURRENCES_ONLY",
+                "lms_module_source": lms_source,
+                "module_match_sources": match_sources,
                 "business_date_rule": BUSINESS_DATE_RULE,
                 "registry_rows_created": created, "registry_rows_updated": updated,
                 "qa_comparison": qa_comparison,
@@ -242,6 +266,22 @@ class LectureDiscoveryService:
             "status": summary["status"], "duration_ms": summary["duration_ms"],
         }})
         return summary
+
+    def _load_lms_titles(self) -> tuple[list[str], dict]:
+        """
+        The LMS is an ADDITIONAL source. If it cannot be read, discovery goes
+        on with Aptem alone and the run says so: FAILED is never reported as
+        an empty LMS. Nothing is lost - discovery only adds or updates rows -
+        and the next cycle's lookback picks up an LMS-only lecture.
+        """
+        if self.lms_repository is None:
+            return [], {"status": "NOT_CONFIGURED", "titles_loaded": 0}
+        try:
+            titles = self.lms_repository.load_module_titles()
+        except PlatformError as exc:
+            self.log.warning("LMS module source unavailable: %s", exc.code)
+            return [], {"status": "FAILED", "titles_loaded": 0, "error_code": exc.code}
+        return titles, {"status": "LOADED", "titles_loaded": len(titles)}
 
 
 def select_single_lecture(rows: list[dict], start: str | None = None) -> dict:

@@ -28,6 +28,8 @@ class Settings:
     qa_model_api_key: str = ""
     qa_model_name: str = LEGACY_QA_MODEL
     qa_model_base_url: str = "https://api.openai.com/v1"
+    # Optional second eligibility source (curriculum.modules). Empty = Aptem only.
+    lms_database_url: str = ""
     # RECORDING_LINK. "observe" (default) keeps the stage exactly as it was:
     # report the gap, call nothing, write nothing. "write" lets the scheduler
     # and backfill evaluate and link recordings through app/recordings.
@@ -84,6 +86,7 @@ class Settings:
             graph_scope=os.getenv("MICROSOFT_GRAPH_SCOPE", "https://graph.microsoft.com/.default").strip(),
             graph_base_url=os.getenv("MICROSOFT_GRAPH_BASE_URL", "https://graph.microsoft.com/v1.0").strip(),
             calendar_user_upn=os.getenv("KBC_LECTURE_CALENDAR_USER_UPN", "").strip(),
+            lms_database_url=os.getenv("LMS_DATABASE_URL", "").strip(),
             qa_model_api_key=os.getenv("QA_MODEL_API_KEY", "").strip(),
             # Defaults to the legacy model. Overriding it changes the prompt
             # hash and therefore the QA provenance, so parity is never

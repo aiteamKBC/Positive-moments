@@ -72,7 +72,14 @@ def build_discovery_service(settings):
         aptem_repository=AptemRepository(),
         lecture_repository=LectureSessionRepository(),
         run_repository=DiscoveryRunRepository(),
-        qa_validation_repository=QaValidationRepository())
+        qa_validation_repository=QaValidationRepository(),
+        lms_repository=_lms_repository(settings))
+
+
+def _lms_repository(settings):
+    from app.db.repositories.lms import LmsModuleRepository
+    url = getattr(settings, "lms_database_url", "")
+    return LmsModuleRepository(url) if url else None
 
 
 def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = True,
