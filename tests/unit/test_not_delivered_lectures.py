@@ -12,14 +12,17 @@ from datetime import timedelta
 
 from app.orchestration.reconciliation import DayReconciliation
 from app.orchestration.stages import (
+    ACQUIRE_TRANSCRIPT,
     ATTENDANCE,
     CANONICAL_CUES,
+    COMPLETE,
     MISSING,
     NOT_APPLICABLE,
     NOTHING_TO_DO,
     QA_EVALUATION,
     SELECT_TRANSCRIPT,
     SELECTION,
+    TRANSCRIPT,
 )
 from app.orchestration.state import (
     EMPTY_TRANSCRIPT_FOR_OCCURRENCE,
@@ -150,3 +153,56 @@ def test_8_an_empty_transcript_before_the_grace_is_still_retried():
         failure="TRANSCRIPT_UNUSABLE", selected_at=SCHEDULED_END + timedelta(hours=1)))
     assert result["stages"][SELECTION]["state"] == MISSING
     assert result["not_delivered"] is False
+
+
+# --- a meeting that never had any transcript at all ------------------------------
+#
+# M1, 2026-10-06: Teams held no transcript for this meeting on any day, so the
+# TRANSCRIPT stage itself stayed MISSING and re-fetched every cycle - one stage
+# before the selection-level close-out above could ever see it.
+
+def never_transcribed_rows(*, swept_at, now_after_grace=True):
+    return complete_rows(
+        artifacts=[(0, 0, 0, None)],
+        selection=[selection_row(status="NO_CANDIDATES", duration_minutes=None,
+                                 actual_start=None, actual_end=None,
+                                 updated_at=SCHEDULED_END + timedelta(hours=1))],
+        acquisition=[(swept_at,)],
+        documents=[], speakers=[], evaluations=[], attempts=[], rendered=[],
+        coverage=[])
+
+
+def test_9_never_transcribed_after_a_clean_sweep_past_the_grace_is_not_delivered():
+    result = resolve(never_transcribed_rows(
+        swept_at=SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(minutes=1)))
+    assert result["stages"][TRANSCRIPT]["state"] == NOT_APPLICABLE
+    assert result["stages"][TRANSCRIPT]["reason"] == NO_TRANSCRIPT_FOR_OCCURRENCE
+    assert result["stages"][SELECTION]["state"] == NOT_APPLICABLE
+    for stage in NO_TRANSCRIPT_DEPENDENT_STAGES:
+        assert result["stages"][stage]["state"] == NOT_APPLICABLE, stage
+    assert result["next_executable_action"] == NOTHING_TO_DO
+    assert result["not_delivered_reason"] == NO_TRANSCRIPT_FOR_OCCURRENCE
+
+
+def test_10_a_sweep_before_the_grace_does_not_close_it():
+    result = resolve(never_transcribed_rows(swept_at=SCHEDULED_END + timedelta(hours=2)))
+    assert result["stages"][TRANSCRIPT]["state"] == MISSING
+    assert result["stages"][TRANSCRIPT]["action"] == ACQUIRE_TRANSCRIPT
+    assert result["not_delivered"] is False
+
+
+def test_11_no_clean_sweep_at_all_does_not_close_it():
+    """A sweep with errors or blocked meetings is not counted (the query
+    filters them), which reads here as no clean sweep."""
+    result = resolve(never_transcribed_rows(swept_at=None))
+    assert result["stages"][TRANSCRIPT]["state"] == MISSING
+    assert result["not_delivered"] is False
+
+
+def test_12_a_transcript_that_arrives_later_reopens_the_lecture():
+    rows = never_transcribed_rows(
+        swept_at=SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(minutes=1))
+    rows["artifacts"] = [(1, 1, 0, SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(hours=1))]
+    result = resolve(rows)
+    assert result["stages"][TRANSCRIPT]["state"] == COMPLETE
+    assert result["stages"][TRANSCRIPT].get("reason") != NO_TRANSCRIPT_FOR_OCCURRENCE

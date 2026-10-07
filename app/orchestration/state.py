@@ -231,6 +231,17 @@ SELECT count(*)::int AS total,
  WHERE c.lecture_id = %s
 """
 
+# The newest clean transcript sweep of a day: every ready meeting was asked
+# Graph for its transcripts, and none of those questions failed or was blocked.
+CLEAN_ACQUISITION_FOR_DAY = """
+SELECT max(r.completed_at)
+  FROM public.lecture_transcript_acquisition_runs r
+ WHERE r.target_date = %s
+   AND r.status = 'COMPLETED'
+   AND r.error_count = 0
+   AND r.admin_blocked_count = 0
+"""
+
 # The schedule the selector judged this occurrence against. Separate from
 # LECTURE so the selection-relevance question reads exactly the fields the
 # selector itself is given.
@@ -466,6 +477,9 @@ class PipelineStateResolver:
                                                       legacy_session_id)
         stages[EXCEL_SYNC] = self._excel_sync(connection, perfect_result, perfect_key)
         if lecture.get("_not_delivered") in NOT_DELIVERED_SELECTION_REASONS:
+            if stages[TRANSCRIPT]["state"] == NOT_APPLICABLE:
+                # Nothing was ever there to select from.
+                stages[SELECTION] = _stage(NOT_APPLICABLE, reason=lecture["_not_delivered"])
             for stage in NO_TRANSCRIPT_DEPENDENT_STAGES:
                 stages[stage] = _stage(NOT_APPLICABLE, reason=lecture["_not_delivered"])
         elif (stages[QA_EVALUATION]["state"] == COMPLETE
@@ -672,7 +686,27 @@ class PipelineStateResolver:
             return _stage(COMPLETE, **artifacts), artifacts
         if row[2]:
             return _stage(FAILED, action=ACQUIRE_TRANSCRIPT, **artifacts), artifacts
+        if not row[0] and self._swept_clean_after_grace(connection, lecture):
+            # The meeting has never had a transcript - not for this day, not
+            # for any other day of its series - and Teams was asked again
+            # after the grace. Without this, such a meeting re-fetched every
+            # cycle and stayed "in progress" for ever, one stage before the
+            # selection-level close-out could see it (M1, 2026-10-06).
+            lecture["_not_delivered"] = NO_TRANSCRIPT_FOR_OCCURRENCE
+            return _stage(NOT_APPLICABLE, reason=NO_TRANSCRIPT_FOR_OCCURRENCE,
+                          **artifacts), artifacts
         return _stage(MISSING, action=ACQUIRE_TRANSCRIPT, **artifacts), artifacts
+
+    def _swept_clean_after_grace(self, connection, lecture) -> bool:
+        occurrence = lecture.get("_occurrence")
+        if not occurrence or occurrence[1] is None or occurrence[3] is None:
+            return False                        # no schedule, or no meeting to ask
+        settled_after = occurrence[1] + NO_TRANSCRIPT_GRACE
+        if self._now() < settled_after:
+            return False
+        swept = _fetch(connection, CLEAN_ACQUISITION_FOR_DAY, (occurrence[2],))
+        swept_at = swept[0][0] if swept else None
+        return swept_at is not None and swept_at >= settled_after
 
     def _selection(self, connection, lecture, artifacts):
         rows = _fetch(connection, SELECTION_ROW,
