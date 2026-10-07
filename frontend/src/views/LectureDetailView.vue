@@ -72,11 +72,16 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
+    // The plan needs only the id, so it is asked for alongside the lecture
+    // rather than after it; the directory needs the lecture's date.
+    const plan = getRecoverAttendancePlan(lectureId.value).catch(() => null)
     const detail = await getLecture(lectureId.value)
     lecture.value = detail
-    const directory = await getDirectory(detail.session_date, detail.session_date)
+    const [directory, recover] = await Promise.all([
+      getDirectory(detail.session_date, detail.session_date), plan,
+    ])
     entry.value = directory.lectures.find((row) => row.lecture_id === detail.lecture_id) ?? null
-    recoverPlan.value = await getRecoverAttendancePlan(lectureId.value).catch(() => null)
+    recoverPlan.value = recover
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'This lecture could not be loaded.'
   } finally {

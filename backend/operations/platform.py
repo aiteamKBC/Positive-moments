@@ -27,15 +27,72 @@ auth tables; the lecture platform owns its schema through psycopg, and mixing
 the two would put pipeline reads behind Django's transaction handling for no
 benefit.
 """
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
+import psycopg
+
 from app.config.settings import Settings
-from app.db.connection import database_connection, readonly_database_connection
+from app.db.connection import database_connection
 from app.orchestration.factory import build_operations
 
 
 def settings() -> Settings:
     return Settings.from_environment()
+
+
+# --- read connections are reused ---------------------------------------------
+#
+# The database is remote, so opening a connection (TLS + auth) costs several
+# network round trips - more than most of the queries a page then runs. Read
+# connections are therefore kept for a short while and handed to the next
+# request. Every one is still read-only (`read_only` makes psycopg open each
+# transaction with BEGIN READ ONLY), and every request still gets its own
+# transaction, rolled back at the end, exactly as before.
+#
+# Statements are never server-prepared: the database sits behind a pooler, and
+# a prepared statement made on one backend does not exist on the next.
+
+READ_POOL_SIZE = 12
+READ_IDLE_SECONDS = 60
+_idle: list[tuple[float, psycopg.Connection]] = []
+_idle_lock = threading.Lock()
+
+
+def _usable(connection) -> bool:
+    return not connection.closed and not connection.broken
+
+
+def _checkout(database_url) -> psycopg.Connection:
+    now = time.monotonic()
+    while True:
+        with _idle_lock:
+            if not _idle:
+                break
+            parked_at, connection = _idle.pop()
+        if now - parked_at < READ_IDLE_SECONDS and _usable(connection):
+            return connection
+        connection.close()
+    connection = psycopg.connect(database_url, prepare_threshold=None)
+    connection.read_only = True
+    return connection
+
+
+def _checkin(connection) -> None:
+    try:
+        connection.rollback()
+    except psycopg.Error:
+        connection.close()
+        return
+    if not _usable(connection):
+        return
+    with _idle_lock:
+        if len(_idle) < READ_POOL_SIZE:
+            _idle.append((time.monotonic(), connection))
+            return
+    connection.close()
 
 
 @contextmanager
@@ -50,8 +107,37 @@ def reading():
     """
     config = settings()
     config.require_database()
-    with readonly_database_connection(config.database_url) as connection:
+    connection = _checkout(config.database_url)
+    try:
         yield connection
+    finally:
+        _checkin(connection)
+
+
+# --- the day report, one lecture per thread ---------------------------------
+#
+# Resolving a lecture is ~20 small sequential queries, and a day is resolved
+# one lecture after another, so a day's cost is (lectures x 20) round trips.
+# Each lecture's answer depends on that lecture's rows only, so the lectures
+# are resolved side by side, each on its own read connection, with the same
+# resolver and the same day summary - the report is identical, just sooner.
+
+_day_workers = ThreadPoolExecutor(max_workers=8, thread_name_prefix="day-report")
+
+
+def day_report(session_date) -> dict:
+    """What `OperationsService.day_reconciliation` returns, resolved in parallel."""
+    reconciliation = operations().reconciliation
+    resolver = reconciliation.resolver
+    with reading() as connection:
+        lecture_ids = resolver.lecture_ids_for_day(connection, session_date)
+
+    def resolve(lecture_id):
+        with reading() as connection:
+            return resolver.for_lecture(connection, lecture_id)
+
+    states = list(_day_workers.map(resolve, lecture_ids))
+    return reconciliation.from_states(session_date, states)
 
 
 @contextmanager
