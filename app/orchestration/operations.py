@@ -235,15 +235,12 @@ class OperationsService:
     # -- the operator's working lists ---------------------------------------
 
     def pending_attendance(self, connection, session_date: _date) -> list[dict]:
-        report = self.reconciliation.for_day(connection, session_date)
-        return [row for row in report["lectures"]
-                if not row["attendance_source_authoritative"]
-                and not row.get("not_delivered")]
+        return pending_attendance_rows(
+            self.reconciliation.for_day(connection, session_date))
 
     def review_required(self, connection, session_date: _date) -> list[dict]:
-        report = self.reconciliation.for_day(connection, session_date)
-        return [row for row in report["lectures"]
-                if row["bucket"] in ("review", "failed")]
+        return review_required_rows(
+            self.reconciliation.for_day(connection, session_date))
 
     def error_reasons(self, connection, session_date: _date) -> list[dict]:
         report = self.reconciliation.for_day(connection, session_date)
@@ -329,3 +326,18 @@ def force_reprocess_eligibility(state) -> dict:
             # show it rather than assume it.
             "available_to_scheduler": False,
             "requires_explicit_operator_action": True}
+
+
+# The two working lists, as filters over a day report. Kept apart from the
+# report itself so the Operations API can apply them to a report it resolved
+# however it likes (it resolves lectures in parallel) without restating them.
+
+def pending_attendance_rows(report: dict) -> list[dict]:
+    return [row for row in report["lectures"]
+            if not row["attendance_source_authoritative"]
+            and not row.get("not_delivered")]
+
+
+def review_required_rows(report: dict) -> list[dict]:
+    return [row for row in report["lectures"]
+            if row["bucket"] in ("review", "failed")]

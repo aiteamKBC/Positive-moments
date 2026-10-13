@@ -25,6 +25,7 @@ from rest_framework.response import Response
 
 from app.common.errors import PlatformError
 from app.common.time import CAIRO
+from app.orchestration.operations import pending_attendance_rows, review_required_rows
 
 from positive_mentions.utils import encode_session_id
 
@@ -268,8 +269,7 @@ def pending_attendance_view(request):
     non-authoritative source means the platform has not been told yet.
     """
     session_date = _date_param(request)
-    with reading() as connection:
-        rows = operations().pending_attendance(connection, session_date)
+    rows = pending_attendance_rows(day_report(session_date))
     return Response({"session_date": session_date.isoformat(),
                      "count": len(rows), "lectures": rows})
 
@@ -278,8 +278,7 @@ def pending_attendance_view(request):
 @_handle
 def review_required_view(request):
     session_date = _date_param(request)
-    with reading() as connection:
-        rows = operations().review_required(connection, session_date)
+    rows = review_required_rows(day_report(session_date))
     return Response({"session_date": session_date.isoformat(),
                      "count": len(rows), "lectures": rows})
 
