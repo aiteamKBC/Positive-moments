@@ -276,6 +276,40 @@ class PositiveMentionsApiTests(TransactionTestCase):
         self.assertEqual(rows["uncategorised"]["top_categories"], [])
         self.assertEqual(rows["uncategorised"]["moment_count"], 1)
 
+    def test_the_list_counts_moments_exactly_as_the_full_record_does(self):
+        """
+        The list reads a slimmed copy of `positive_clips` (category only). For
+        every shape the column can hold, its moment count and categories must
+        equal what the detail page derives from the full value.
+        """
+        shapes = {
+            "array": [{"start": "00:00:02", "category": " trainer ", "dialogue": ["x"]},
+                      "not-a-moment", {"start": "00:00:01"}, {"category": ""}],
+            "wrapped-clips": {"clips": [{"category": "content"}, {"category": "content"}]},
+            "wrapped-positive": {"positive_clips": [{"category": "learning_experience"}]},
+            "clips-wins": {"clips": [{"category": "content"}],
+                           "positive_clips": [{"category": "trainer"}, {}]},
+            "clips-null": {"clips": None, "positive_clips": [{"category": "trainer"}]},
+            "not-a-list": {"clips": "broken"},
+            "scalar": "text",
+            "empty": [],
+        }
+        for key, value in shapes.items():
+            self.make_lecture(key, positive_clips=value)
+        self.make_lecture("null", positive_clips=None)
+
+        listed = {row["session_id"]: row for row in self.client.get(
+            "/api/positive-mentions/lectures/", {"page_size": 100}).data["results"]}
+        for key in [*shapes, "null"]:
+            with self.subTest(shape=key):
+                detail = self.client.get(
+                    f"/api/positive-mentions/lectures/{encode_session_id(key)}/").data
+                self.assertEqual(listed[key]["moment_count"], detail["moment_count"])
+                self.assertEqual(listed[key]["top_categories"], detail["top_categories"])
+                self.assertEqual(detail["moment_count"], len(detail["clips"]))
+        self.assertEqual(listed["array"]["moment_count"], 3)
+        self.assertEqual(listed["clips-wins"]["moment_count"], 1)
+
     def test_a_category_filter_keeps_only_lectures_with_that_kind_of_moment(self):
         self.make_lecture("mixed", positive_clips=[
             {"start": "00:00:01", "category": "content"},

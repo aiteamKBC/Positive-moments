@@ -1,5 +1,5 @@
 from django.db import connection
-from django.db.models import Count, Exists, IntegerField, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models import Count, Exists, IntegerField, JSONField, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce
 
@@ -51,6 +51,35 @@ def with_positive_clips_length(queryset: QuerySet, category: str = "") -> QueryS
     return queryset.annotate(
         positive_clips_length=RawSQL(sql, (), output_field=IntegerField())
     )
+
+
+# The lecture LIST needs two things from `positive_clips`: how many moments
+# there are and which categories they carry. The column also holds every
+# moment's quotes, dialogue and verification, ~37 KB per lecture, so the list
+# asks PostgreSQL for the same structure with only `category` left in each
+# moment. `normalize_clips` reads it exactly as it reads the full value.
+_SLIM_ELEMENTS = (
+    "(SELECT COALESCE(jsonb_agg(CASE WHEN jsonb_typeof(e) = 'object' "
+    "THEN jsonb_build_object('category', e -> 'category') ELSE 'null'::jsonb END "
+    "ORDER BY i), '[]'::jsonb) FROM jsonb_array_elements({0}) WITH ORDINALITY AS t(e, i))"
+)
+_SLIM_CLIPS_SQL = (
+    "CASE jsonb_typeof(positive_clips) "
+    "WHEN 'array' THEN " + _SLIM_ELEMENTS.format("positive_clips") + " "
+    "WHEN 'object' THEN (SELECT CASE WHEN jsonb_typeof(c) = 'array' THEN "
+    + _SLIM_ELEMENTS.format("c") + " ELSE 'null'::jsonb END FROM (SELECT CASE "
+    "WHEN positive_clips ? 'clips' THEN positive_clips -> 'clips' "
+    "ELSE COALESCE(positive_clips -> 'positive_clips', '[]'::jsonb) END AS c) AS picked) "
+    "ELSE 'null'::jsonb END"
+)
+
+
+def with_slim_positive_clips(queryset: QuerySet) -> QuerySet:
+    """List rows without the bulky moment detail; other databases keep the column."""
+    if connection.vendor != "postgresql":
+        return queryset
+    return queryset.defer("positive_clips").annotate(
+        positive_clips_slim=RawSQL(_SLIM_CLIPS_SQL, (), output_field=JSONField()))
 
 
 def ready_clip_assets() -> QuerySet:

@@ -93,6 +93,15 @@ def attach_ready_clip_assets(session_id, clips):
     return clips
 
 
+_NOT_SLIMMED = object()
+
+
+def _clips_for_summary(obj):
+    """The slim moments the list fetched, or the full column (detail page)."""
+    slim = getattr(obj, "positive_clips_slim", _NOT_SLIMMED)
+    return obj.positive_clips if slim is _NOT_SLIMMED else slim
+
+
 class LectureListSerializer(serializers.ModelSerializer):
     session_key = serializers.SerializerMethodField()
     recording_available = serializers.SerializerMethodField()
@@ -121,7 +130,7 @@ class LectureListSerializer(serializers.ModelSerializer):
         reclassify anything.
         """
         counts = {}
-        for clip in normalize_clips(obj.positive_clips):
+        for clip in normalize_clips(_clips_for_summary(obj)):
             category = (clip.get("category") or "").strip()
             if category:
                 counts[category] = counts.get(category, 0) + 1
@@ -129,7 +138,7 @@ class LectureListSerializer(serializers.ModelSerializer):
         return [{"category": name, "count": total} for name, total in ranked]
 
     def get_moment_count(self, obj):
-        return len(normalize_clips(obj.positive_clips))
+        return len(normalize_clips(_clips_for_summary(obj)))
 
     def get_session_key(self, obj):
         return encode_session_id(obj.session_id)

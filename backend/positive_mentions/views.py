@@ -26,6 +26,7 @@ from .services import (
     v5_lectures,
     with_clip_production_status,
     with_positive_clips_length,
+    with_slim_positive_clips,
 )
 from .utils import decode_session_id, normalize_clips, timestamp_to_seconds, timestamped_sharepoint_url
 
@@ -130,7 +131,7 @@ class SummaryView(APIView):
 
 class LectureListView(APIView):
     def get(self, request):
-        queryset = filtered_lectures(request.query_params)
+        queryset = with_slim_positive_clips(filtered_lectures(request.query_params))
         paginator = LecturePagination()
         page = paginator.paginate_queryset(queryset, request)
         data = LectureListSerializer(page, many=True).data
