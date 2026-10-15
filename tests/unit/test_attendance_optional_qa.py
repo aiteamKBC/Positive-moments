@@ -331,7 +331,7 @@ def test_16_invalid_evidence_still_blocks_as_real_qa_review():
     state = resolve_fresh(
         evaluations=[evaluation(status=INVALID_EVIDENCE)],
         attempts=[(FINGERPRINT, 1, 1, NOW, NOW, [INVALID_EVIDENCE], [""], ["true"],
-                   ["1"], None)])
+                   ["1"], None, [""], [""], [""], [""])])
     qa = state["stages"][QA_EVALUATION]
     assert qa["state"] == REVIEW_REQUIRED
     assert state["requires_review"] is True
@@ -380,7 +380,7 @@ class World:
         self.provider_calls += 1
         self.rows["evaluations"] = [evaluation()]
         self.rows["attempts"] = [(FINGERPRINT, 1, 1, NOW, NOW, [COMPLETED], [""],
-                                  ["true"], ["1"], None)]
+                                  ["true"], ["1"], None, [""], [""], [""], [""])]
         return 1
 
     def _render_qa(self):

@@ -39,7 +39,12 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # about the lecture, it will repeat identically for every lecture until an
 # operator fixes the credential, and charging it to the lecture's budget is
 # how one rotated key walked five lectures towards manual review.
-PROVIDER_FAILURE_POLICY_VERSION = "provider_failure_classification_v1"
+#
+# v2: an account out of money is the same kind of refusal. On 2026-10-12..14
+# the key's project was over its spend limit, OpenAI answered every call with
+# 429 `project_spend_limit_exceeded`, and twelve such refusals exhausted four
+# lectures that no model ever saw.
+PROVIDER_FAILURE_POLICY_VERSION = "provider_failure_classification_v2"
 PROVIDER_CONFIGURATION_ERROR = "PROVIDER_CONFIGURATION_ERROR"
 GENERATION_FAILURE = "GENERATION_FAILURE"
 # Not a failure of this lecture: the cycle's provider circuit was already open,
@@ -56,6 +61,13 @@ AUTH_FAILURE_ERROR_CODES = frozenset({
     "invalid_api_key", "invalid_organization", "insufficient_permissions"})
 AUTH_FAILURE_ERROR_TYPES = frozenset({"authentication_error", "permission_error"})
 
+# HTTP 429 is mostly ordinary rate limiting (`rate_limit_exceeded`), which a
+# later call clears and which stays a generation failure. Only the provider's
+# own quota / spend-limit code or type marks the ACCOUNT as unable to pay.
+QUOTA_FAILURE_ERROR_CODES = frozenset({
+    "insufficient_quota", "project_spend_limit_exceeded", "billing_hard_limit_reached"})
+QUOTA_FAILURE_ERROR_TYPES = frozenset({"insufficient_quota"})
+
 _STRUCTURED_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 
 
@@ -66,6 +78,9 @@ def classify_provider_failure(*, http_status=None, provider_error_code=None,
         return PROVIDER_CONFIGURATION_ERROR
     if http_status == 403 and (provider_error_code in AUTH_FAILURE_ERROR_CODES
                                or provider_error_type in AUTH_FAILURE_ERROR_TYPES):
+        return PROVIDER_CONFIGURATION_ERROR
+    if http_status == 429 and (provider_error_code in QUOTA_FAILURE_ERROR_CODES
+                               or provider_error_type in QUOTA_FAILURE_ERROR_TYPES):
         return PROVIDER_CONFIGURATION_ERROR
     return GENERATION_FAILURE
 
@@ -184,8 +199,11 @@ class OpenAIChatProvider:
             except ProviderError as error:
                 last = error
                 # 4xx other than rate limiting will not succeed on a retry.
-                retryable = error.http_status is None or error.http_status in (408, 409, 429) \
-                    or (error.http_status or 0) >= 500
+                # An account refusal (out of quota) is a 429 too, and will
+                # not clear in five seconds either.
+                retryable = (error.http_status is None or error.http_status in (408, 409, 429)
+                             or (error.http_status or 0) >= 500) \
+                    and not error.is_configuration_failure
                 if not retryable or attempt == self.max_tries:
                     error.attempts = attempt
                     raise

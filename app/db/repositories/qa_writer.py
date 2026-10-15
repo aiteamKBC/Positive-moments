@@ -415,7 +415,9 @@ class GenerationAttemptRepository:
         try:
             rows = connection.execute("""
             SELECT a.outcome, a.error_code, a.metadata ->> 'consumes_generation_budget',
-                   a.metadata ->> 'generation_budget_used'
+                   a.metadata ->> 'generation_budget_used', a.metadata ->> 'http_status',
+                   a.metadata ->> 'provider_error_code', a.metadata ->> 'provider_error_type',
+                   a.metadata ->> 'generation_budget_policy_version'
               FROM public.lecture_qa_generation_attempts a
              WHERE a.source_fingerprint = %s
              ORDER BY a.generation_number

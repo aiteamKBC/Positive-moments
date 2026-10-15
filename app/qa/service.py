@@ -71,7 +71,7 @@ from app.qa.prompt import (
     build_user_message,
     prompt_sha256,
 )
-from app.qa.generation_budget import generation_budget
+from app.qa.generation_budget import GENERATION_BUDGET_POLICY_VERSION, generation_budget
 from app.qa.inputs import ATTENDANCE_DERIVED_FIELDS, attendance_flag
 from app.qa.provider import (
     PROVIDER_CONFIGURATION_BLOCKED,
@@ -931,6 +931,9 @@ class ShadowQaService:
             "metadata": {"generation_number": records + 1,
                          "consumes_generation_budget": consumes,
                          "generation_budget_used": used_after,
+                         # Which rule produced that total, so a later policy
+                         # knows whether it still needs correcting.
+                         "generation_budget_policy_version": GENERATION_BUDGET_POLICY_VERSION,
                          **failure},
         })
         outcome["generation_budget_used"] = used_after

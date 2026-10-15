@@ -29,6 +29,14 @@ policy records the total it implies, so a later answer overwriting the
 evaluation cannot un-make it. Its worst case is bounded - a legacy transport
 failure that was really a 5xx followed by 401s gets one extra generation,
 never an unbounded number - and nothing is rewritten.
+
+v3: a row is ALSO free when its own recorded evidence (HTTP status and the
+provider's structured code/type) classifies as an account refusal under the
+current provider policy, whatever the flag it was written with. That is how
+the 429 `project_spend_limit_exceeded` refusals of 2026-10-12..14, recorded
+as spent under provider policy v1, stop counting. A recorded total is still
+the anchor; it is only corrected by the rows it counted that the evidence now
+shows were refusals. No row is rewritten.
 """
 from app.qa.provider import (
     PROVIDER_CONFIGURATION_ERROR,
@@ -37,7 +45,7 @@ from app.qa.provider import (
 )
 
 
-GENERATION_BUDGET_POLICY_VERSION = "generation_budget_v2_configuration_failures_free"
+GENERATION_BUDGET_POLICY_VERSION = "generation_budget_v3_recorded_refusals_free"
 
 MODEL_ERROR = "MODEL_ERROR"
 LEGACY_TRANSPORT_ERROR_CODE = "provider_http_error"
@@ -57,12 +65,28 @@ def evaluation_proves_configuration_failure(evaluation) -> bool:
     return classify_provider_failure(http_status=status) == PROVIDER_CONFIGURATION_ERROR
 
 
+def recorded_refusal(row) -> bool:
+    """Does this attempt's own evidence show the provider refused the account?"""
+    try:
+        status = int(row.get("http_status"))
+    except (TypeError, ValueError):
+        return False
+    return classify_provider_failure(
+        http_status=status, provider_error_code=row.get("provider_error_code"),
+        provider_error_type=row.get("provider_error_type")) == PROVIDER_CONFIGURATION_ERROR
+
+
+def _free(row) -> bool:
+    return row.get("consumes_generation_budget") is False or recorded_refusal(row)
+
+
 def generation_budget(attempts, evaluation=None, *, max_generations: int) -> dict:
     """
     `attempts`: this fingerprint's rows in generation order, each with
     `outcome`, `error_code`, `consumes_generation_budget` (True, False, or None
-    for a row recorded before this policy) and `generation_budget_used` (the
-    total that row recorded, or None).
+    for a row recorded before this policy), `generation_budget_used` (the
+    total that row recorded, or None) and, when recorded, the provider's
+    `http_status`, `provider_error_code` and `provider_error_type`.
     `evaluation`: `error_code`, `http_status`, `has_model_output` of the
     fingerprint's evaluation row, or None.
     """
@@ -71,18 +95,25 @@ def generation_budget(attempts, evaluation=None, *, max_generations: int) -> dic
                    if rows[index].get("generation_budget_used") is not None), None)
     if anchor is not None:
         # Everything up to the anchor was already judged when it was written.
+        # A total written before v3 still counts the account refusals it was
+        # told were generations; one written under v3 already excludes them.
+        miscounted = 0
+        if rows[anchor].get("generation_budget_policy_version") != GENERATION_BUDGET_POLICY_VERSION:
+            miscounted = sum(1 for row in rows[:anchor + 1]
+                             if row.get("consumes_generation_budget") is True
+                             and recorded_refusal(row))
         tail = rows[anchor + 1:]
-        used = int(rows[anchor]["generation_budget_used"]) + sum(
-            1 for row in tail if row.get("consumes_generation_budget") is not False)
+        used = max(int(rows[anchor]["generation_budget_used"]) - miscounted, 0) + sum(
+            1 for row in tail if not _free(row))
         return _summary(rows, used, max_generations, inferred=0,
-                        last_free=rows[-1].get("consumes_generation_budget") is False)
+                        last_free=_free(rows[-1]))
 
-    free = [row.get("consumes_generation_budget") is False for row in rows]
+    free = [_free(row) for row in rows]
     inferred = 0
     if evaluation_proves_configuration_failure(evaluation):
         for index in range(len(rows) - 1, -1, -1):
             row = rows[index]
-            if row.get("consumes_generation_budget") is False:
+            if free[index]:
                 continue            # a recorded refusal keeps the run unbroken
             if (row.get("consumes_generation_budget") is None
                     and row.get("outcome") == MODEL_ERROR
@@ -130,8 +161,14 @@ def recorded_total(value):
         return None
 
 
-def attempt_row(outcome, error_code, consumes, total) -> dict:
+def attempt_row(outcome, error_code, consumes, total, http_status=None,
+                provider_error_code=None, provider_error_type=None,
+                budget_policy_version=None) -> dict:
     """One attempt, as the policy reads it, from its stored columns."""
     return {"outcome": outcome, "error_code": error_code or None,
             "consumes_generation_budget": consumes_flag(consumes),
-            "generation_budget_used": recorded_total(total)}
+            "generation_budget_used": recorded_total(total),
+            "http_status": http_status or None,
+            "provider_error_code": provider_error_code or None,
+            "provider_error_type": provider_error_type or None,
+            "generation_budget_policy_version": budget_policy_version or None}

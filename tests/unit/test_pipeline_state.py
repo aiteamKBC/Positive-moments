@@ -312,7 +312,7 @@ def complete_rows(**overrides) -> dict:
                          "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
                          SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
                          DEFAULT_EVIDENCE_POLICY, True)],
-        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [""], [""], [""], None)],
+        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [""], [""], [""], None, [""], [""], [""], [""])],
         "rendered": [(RENDER_ID, "RENDERED", RENDERER_VERSION, FINGERPRINT,
                       11, 0, 0, EVALUATION_ID, LEGACY_SESSION_ID)],
         "qa_writes": [(WRITE_ID, "WRITTEN", WRITER_VERSION, LEGACY_SESSION_ID)],
@@ -751,7 +751,7 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
                       DEFAULT_EVIDENCE_POLICY, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
                    ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3,
-                   [""] * 3, [""] * 3, None)])
+                   [""] * 3, [""] * 3, None, [""] * 3, [""] * 3, [""] * 3, [""] * 3)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["attempts_remaining"] == 0
     assert result["stages"][QA_EVALUATION]["reason"] == \
@@ -1173,7 +1173,8 @@ def test_an_exhausted_budget_still_wins_over_a_superseded_policy():
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
                       EVIDENCE_POLICY_V1, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
-                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3, [""] * 3, [""] * 3, None)])
+                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3, [""] * 3, [""] * 3, None,
+                   [""] * 3, [""] * 3, [""] * 3, [""] * 3)])
     result = resolve(rows)
     assert result["next_action"] == MANUAL_REVIEW_REQUIRED
 

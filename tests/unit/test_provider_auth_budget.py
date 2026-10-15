@@ -510,7 +510,7 @@ def test_8_the_resolver_hands_the_2026_09_23_shape_back_as_retryable_work():
                    datetime(2026, 9, 23, 20, tzinfo=timezone.utc),
                    [MODEL_ERROR] * 2, ["provider_http_error"] * 2, [""] * 2, [""] * 2,
                    {"error_code": "provider_http_error", "http_status": "401",
-                    "has_model_output": False})],
+                    "has_model_output": False}, [""] * 2, [""] * 2, [""] * 2, [""] * 2)],
         rendered=[], qa_writes=[], legacy_writes_state=[], perfect_results=[],
         perfect_writes=[], perfect_writes_state=[])
     state = resolve(rows)
@@ -536,7 +536,7 @@ def test_8_three_real_failures_are_still_exhausted_in_the_resolver():
                    datetime(2026, 9, 23, tzinfo=timezone.utc),
                    [MODEL_ERROR] * 3, ["provider_http_error"] * 3, [""] * 3, [""] * 3,
                    {"error_code": "provider_http_error", "http_status": "500",
-                    "has_model_output": False})],
+                    "has_model_output": False}, [""] * 3, [""] * 3, [""] * 3, [""] * 3)],
         rendered=[], qa_writes=[], legacy_writes_state=[])
     qa = resolve(rows)["stages"][QA_EVALUATION]
     assert qa["action"] == MANUAL_REVIEW_REQUIRED

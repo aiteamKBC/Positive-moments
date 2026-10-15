@@ -114,7 +114,15 @@ SELECT a.source_fingerprint, count(*)::int, max(a.generation_number),
                                   'http_status', q.metadata ->> 'http_status',
                                   'has_model_output', q.ai_raw_output IS NOT NULL)
           FROM public.lecture_qa_evaluations AS q
-         WHERE q.source_fingerprint = a.source_fingerprint)
+         WHERE q.source_fingerprint = a.source_fingerprint),
+       -- The provider's own evidence per attempt (generation_budget v3).
+       array_agg(coalesce(a.metadata ->> 'http_status', '') ORDER BY a.generation_number),
+       array_agg(coalesce(a.metadata ->> 'provider_error_code', '')
+                 ORDER BY a.generation_number),
+       array_agg(coalesce(a.metadata ->> 'provider_error_type', '')
+                 ORDER BY a.generation_number),
+       array_agg(coalesce(a.metadata ->> 'generation_budget_policy_version', '')
+                 ORDER BY a.generation_number)
   FROM public.lecture_qa_generation_attempts a
  WHERE a.lecture_id = %s
  GROUP BY a.source_fingerprint
@@ -220,7 +228,8 @@ def recovery_state(connection, lecture_id, *,
     attempts_by_fingerprint = {}
     for row in _rows(connection, ATTEMPTS, lecture_id):
         budget = generation_budget(
-            [attempt_row(*values) for values in zip(row[5], row[6], row[7], row[8])],
+            [attempt_row(*values) for values in zip(row[5], row[6], row[7], row[8],
+                                                    row[10], row[11], row[12], row[13])],
             row[9], max_generations=max_model_generations)
         attempts_by_fingerprint[row[0]] = {
             "attempt_records": row[1],
