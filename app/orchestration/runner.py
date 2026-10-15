@@ -121,7 +121,7 @@ from app.orchestration.stages import (
     SYNC_PERFECT,
 )
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION
-from app.common.errors import PlatformError
+from app.common.errors import DATABASE_ERROR, PlatformError
 from app.qa.provider import (
     PROVIDER_CONFIGURATION_ERROR_CODE,
     OpenAIChatProvider,
@@ -179,6 +179,42 @@ PROVIDER_ACTIONS = frozenset({RUN_QA})
 # recoverable, a corrupted production row shared with a live n8n pipeline
 # is not.
 LEGACY_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT, LINK_RECORDING})
+
+# Slack on top of the provider's own worst case (every try timing out, plus
+# the waits between them), so the database never gives up before the HTTP
+# client does.
+PROVIDER_IDLE_MARGIN_SECONDS = 120
+
+
+def allow_idle_through_provider_call(connection, provider) -> int:
+    """
+    Keep the cycle's transaction alive while the model is thinking.
+
+    The QA call is made inside the cycle's open transaction: it holds the
+    lecture lock and a savepoint, and the answer is written in the same
+    transaction. Production ends any session idle in a transaction for 5
+    minutes, and a gpt-5.2 call can take longer. On 2026-10-15 a paid answer
+    came back to a connection the server had already closed, and the whole
+    backfill day rolled back with nothing recorded.
+
+    `set_config(..., true)` is SET LOCAL: it ends with this transaction, so it
+    never reaches the next client of a pooled backend. Returns the seconds
+    granted, 0 for an in-memory run that has no database session.
+    """
+    if connection is None:
+        return 0
+    tries = max(1, int(getattr(provider, "max_tries", 1)))
+    seconds = (int(getattr(provider, "timeout", 300)) * tries
+               + int(getattr(provider, "wait_between_tries_ms", 0)) * (tries - 1) // 1000
+               + PROVIDER_IDLE_MARGIN_SECONDS)
+    try:
+        connection.execute(
+            "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+            (f"{seconds}s",))
+    except Exception as exc:
+        raise PlatformError(DATABASE_ERROR,
+                            "could not extend the idle limit for the QA call") from exc
+    return seconds
 
 
 class StageNotAutomatable(RuntimeError):
@@ -330,6 +366,7 @@ class StageRunner:
             # on this code exactly as it does on a refused credential.
             raise PlatformError(PROVIDER_CONFIGURATION_ERROR_CODE,
                                 "QA model provider is not configured") from exc
+        allow_idle_through_provider_call(connection, provider)
         service = self._qa_service(provider=provider, lecture_ids=[str(lecture_id)])
         outcome = service.run_day(connection, session_date, execute=self.persist)
         result = _outcome(outcome, provider_calls=outcome.get("provider_calls", 0))
