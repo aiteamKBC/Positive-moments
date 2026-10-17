@@ -100,6 +100,7 @@ from app.qa.evidence_policy import (
     EVIDENCE_POLICY_V1,
     EVIDENCE_POLICY_VERSIONS,
     assess as assess_evidence,
+    reads_minutes_seconds,
 )
 from app.transcripts.webvtt import PARSER_VERSION
 
@@ -1353,8 +1354,9 @@ class ShadowQaService:
         rows, invalid = [], 0
         for found in collect_clips(output):
             clip = found["clip"]
-            verdict = validate_clip(clip, document_start_ms=start_ms,
-                                    document_end_ms=end_ms, cues=cues)
+            verdict = validate_clip(
+                clip, document_start_ms=start_ms, document_end_ms=end_ms, cues=cues,
+                allow_minutes_seconds=reads_minutes_seconds(self.evidence_policy_version))
             if verdict["status"] != VALID:
                 invalid += 1
             rows.append({

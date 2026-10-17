@@ -35,6 +35,13 @@ KSB_TYPES = ("Knowledge", "Skill", "Behaviour")
 
 # HH:MM:SS.mmm, the only format the system message allows.
 TIMESTAMP = re.compile(r"^(\d{2,}):([0-5]\d):([0-5]\d)(?:\.(\d{1,3}))?$")
+# MM:SS.mmm: the same instant with the zero hour left off, as WebVTT itself
+# permits. On 2026-10-16 gpt-5.2 wrote every sub-hour clip of the Ray MSP
+# lecture this way (`49:05.214`) and every one of them was a real cue time.
+# The decimal point is required: it is what makes two groups unambiguous -
+# `49:05` alone could be hours and minutes. Read only when the evidence policy
+# says so (see app/qa/evidence_policy.py), never by default.
+MINUTES_SECONDS = re.compile(r"^([0-5]\d):([0-5]\d)\.(\d{1,3})$")
 
 VALID = "VALID"
 OUT_OF_RANGE = "OUT_OF_TRANSCRIPT_RANGE"
@@ -79,12 +86,20 @@ def checklist_item_whitespace_variants(payload) -> list[int]:
     ]
 
 
-def parse_timestamp_ms(value) -> int | None:
-    """HH:MM:SS(.mmm) -> milliseconds. Hours may exceed 24, as in WebVTT."""
-    match = TIMESTAMP.match(str(value or "").strip())
-    if not match:
+def parse_timestamp_ms(value, *, allow_minutes_seconds: bool = False) -> int | None:
+    """
+    HH:MM:SS(.mmm) -> milliseconds. Hours may exceed 24, as in WebVTT.
+
+    With `allow_minutes_seconds`, MM:SS.mmm is also read, as hour zero.
+    """
+    text = str(value or "").strip()
+    match = TIMESTAMP.match(text)
+    if match:
+        hours, minutes, seconds, millis = match.groups()
+    elif allow_minutes_seconds and (short := MINUTES_SECONDS.match(text)):
+        hours, (minutes, seconds, millis) = "0", short.groups()
+    else:
         return None
-    hours, minutes, seconds, millis = match.groups()
     total = ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000
     return total + int((millis or "0").ljust(3, "0"))
 
@@ -195,17 +210,21 @@ def _clip_errors(clips, where: str) -> list[str]:
     return errors
 
 
-def validate_clip(clip, *, document_start_ms: int, document_end_ms: int, cues) -> dict:
+def validate_clip(clip, *, document_start_ms: int, document_end_ms: int, cues,
+                  allow_minutes_seconds: bool = False) -> dict:
     """
     Check one evidence clip against the canonical transcript.
 
     `cues` is a sorted sequence of (start_ms, end_ms). A clip is valid when it
     parses, ends after it starts, lasts at least two seconds, sits inside the
     document range and overlaps at least one real cue. Invalid clips are
-    reported with a status and never rewritten.
+    reported with a status and never rewritten. A MM:SS.mmm timestamp read
+    under `allow_minutes_seconds` faces every one of those checks.
     """
-    start_ms = parse_timestamp_ms((clip or {}).get("start"))
-    end_ms = parse_timestamp_ms((clip or {}).get("end"))
+    start_ms = parse_timestamp_ms((clip or {}).get("start"),
+                                  allow_minutes_seconds=allow_minutes_seconds)
+    end_ms = parse_timestamp_ms((clip or {}).get("end"),
+                                allow_minutes_seconds=allow_minutes_seconds)
     result = {"start_ms": start_ms, "end_ms": end_ms, "status": VALID,
               "overlapping_cue_count": 0}
     if start_ms is None or end_ms is None:

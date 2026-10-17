@@ -20,8 +20,10 @@ from app.qa.evidence_policy import (
     DEGENERATE_STATUSES,
     EVIDENCE_POLICY_V1,
     EVIDENCE_POLICY_V2,
+    EVIDENCE_POLICY_V3,
     EVIDENCE_POLICY_VERSIONS,
     FABRICATED_STATUSES,
+    UNREADABLE_STATUSES,
     assess,
     is_fatal,
     is_renderable,
@@ -130,8 +132,9 @@ def test_one_fabricated_clip_condemns_an_otherwise_degenerate_set():
     assert result["excluded_clip_count"] == 2
 
 
-def test_the_two_categories_are_disjoint_and_cover_every_invalid_status():
+def test_the_categories_are_disjoint_and_cover_every_invalid_status():
     assert not (FABRICATED_STATUSES & DEGENERATE_STATUSES)
+    assert not (UNREADABLE_STATUSES & (FABRICATED_STATUSES | DEGENERATE_STATUSES))
     every = {OUT_OF_RANGE, NO_CUE_OVERLAP, UNPARSEABLE, NOT_POSITIVE, TOO_SHORT}
     assert CLASSIFIED_STATUSES == every
 
@@ -182,9 +185,10 @@ def test_is_fatal_agrees_with_the_full_assessment():
 
 # --- versioning ---------------------------------------------------------------
 
-def test_the_default_is_the_phase_4b_policy_and_v1_remains_selectable():
-    assert DEFAULT_EVIDENCE_POLICY == EVIDENCE_POLICY_V2
+def test_the_default_is_v3_and_older_policies_remain_selectable():
+    assert DEFAULT_EVIDENCE_POLICY == EVIDENCE_POLICY_V3
     assert EVIDENCE_POLICY_V1 in EVIDENCE_POLICY_VERSIONS
+    assert EVIDENCE_POLICY_V2 in EVIDENCE_POLICY_VERSIONS
     # v1 still means exactly what it always meant.
     assert assess(G2_JULIANE, policy=EVIDENCE_POLICY_V1)["evaluation_usable"] is False
 
