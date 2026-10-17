@@ -8,24 +8,31 @@
  * lecture lives at /lectures/:lectureId and is the only place that describes
  * stages, retries and sync.
  *
- * Nothing here fabricates media. A moment with no produced clip says so, and
- * the only playable links are the durable stored SharePoint URLs the platform
- * already holds.
+ * Nothing here fabricates media or words. A moment with no produced clip says
+ * so, the only playable links are the durable stored SharePoint URLs the
+ * platform already holds, and a clip with no stored quotation says that
+ * instead of showing one.
+ *
+ * Every classification - evidence type, AI verdict, social formats - arrives
+ * from the API. The filters here only select on it.
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
+import ClipEvidenceDetails from '../components/ClipEvidenceDetails.vue'
 import ClipRequestButton from '../components/ClipRequestButton.vue'
+import ClipReviewControl from '../components/ClipReviewControl.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import PageHeader from '../components/PageHeader.vue'
+import StatTile from '../components/StatTile.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { getLecture, getWatchUrl } from '../services/api'
-import type { DialogueLine, LectureDetail, PositiveClip } from '../types'
+import type { ClipReview, DialogueLine, LectureDetail, PositiveClip } from '../types'
 import { businessDate, cairoDateTime } from '../utils/datetime'
-import { MOMENT_CATEGORIES, humanise } from '../utils/labels'
+import { MOMENT_CATEGORIES, evidenceType, humanise } from '../utils/labels'
 import { errorMessage, formatConfidence, openSafely } from '../utils/format'
 
 const route = useRoute()
@@ -69,14 +76,12 @@ function line(item: DialogueLine | string) {
   return { speaker: item.speaker ?? '', text: item.text ?? item.quote ?? '', start: item.start ?? '' }
 }
 
+/** The stored dialogue, else the stored quotation. Never a made-up line. */
 function transcript(clip: PositiveClip) {
   const lines = clip.dialogue.map(line).filter((entry) => entry.text.trim())
   if (lines.length) return lines
-  return [{
-    speaker: clip.speaker ?? '',
-    text: clip.positive_quote || clip.quote || 'Positive learner feedback',
-    start: clip.start ?? '',
-  }]
+  const stored = clip.positive_quote || clip.quote
+  return stored ? [{ speaker: clip.speaker ?? '', text: stored, start: clip.start ?? '' }] : []
 }
 
 /** Transcript offsets are cue timestamps, not wall-clock times. */
@@ -90,24 +95,58 @@ function clipDuration(value: number) {
   return `${Math.floor(value / 60)}m ${String(Math.round(value % 60)).padStart(2, '0')}s`
 }
 
-/**
- * The verifier's own vocabulary. Only its explicit approvals read as green;
- * anything else stays neutral rather than being guessed at by substring.
- */
-const APPROVED = new Set(['accept', 'accepted', 'confirmed', 'confirm', 'pass', 'passed'])
-function verificationTone(verdict?: string) {
-  return APPROVED.has((verdict ?? '').trim().toLowerCase()) ? 'ok' as const : 'neutral' as const
+const isCaseStudy = (clip: PositiveClip) => clip.final_evidence_type === 'OFSTED_CASE_STUDY'
+
+function onReviewed(index: number, review: ClipReview) {
+  const clip = lecture.value?.clips[index]
+  if (clip) clip.review = review
 }
 
 const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.clip_asset).length ?? 0)
-
-// --- category filter ------------------------------------------------------
-// Arrives from the list (?category=...) and stays in the URL. Each moment
-// keeps its original index: "Watch in full lecture" asks the API by it.
-const category = ref(typeof route.query.category === 'string' ? route.query.category : '')
-watch(category, (value) => {
-  void router.replace({ query: { ...route.query, category: value || undefined } })
+const reviewCounts = computed(() => {
+  const counts = { pending: 0, approved: 0, rejected: 0 }
+  for (const clip of lecture.value?.clips ?? []) if (clip.review) counts[clip.review.status] += 1
+  return counts
 })
+
+// --- filters ----------------------------------------------------------------
+// Three independent selections, each kept in the URL. Each moment keeps its
+// original index: "Watch in full lecture" asks the API by it.
+function fromQuery(name: string) {
+  return typeof route.query[name] === 'string' ? String(route.query[name]) : ''
+}
+const category = ref(fromQuery('category'))
+const evidence = ref(fromQuery('evidence'))
+const verdict = ref(fromQuery('ai'))
+watch([category, evidence, verdict], ([categoryValue, evidenceValue, verdictValue]) => {
+  void router.replace({ query: {
+    ...route.query,
+    category: categoryValue || undefined, evidence: evidenceValue || undefined, ai: verdictValue || undefined,
+  } })
+})
+
+const EVIDENCE_FILTERS = [
+  { value: '', label: 'All evidence' },
+  { value: 'POSITIVE_MOMENT', label: 'Positive Moments' },
+  { value: 'OFSTED_CASE_STUDY', label: 'OFSTED Case Studies' },
+  { value: 'social', label: 'Social Media candidates' },
+]
+const VERDICT_FILTERS = [
+  { value: '', label: 'Any AI verdict' },
+  { value: 'accepted', label: 'AI accepted' },
+  { value: 'rejected', label: 'AI rejected' },
+  { value: 'not_verified', label: 'Not verified' },
+]
+
+function matchesEvidence(clip: PositiveClip, value: string) {
+  if (!value) return true
+  if (value === 'social') return clip.is_social_candidate
+  return clip.final_evidence_type === value
+}
+const matchesVerdict = (clip: PositiveClip, value: string) => !value || clip.semantic_status === value
+
+const evidenceCount = (value: string) => (lecture.value?.clips ?? []).filter((clip) => matchesEvidence(clip, value)).length
+const verdictCount = (value: string) => (lecture.value?.clips ?? []).filter((clip) => matchesVerdict(clip, value)).length
 
 const categoryOf = (clip: PositiveClip) => (clip.category ?? '').trim().toLowerCase()
 const categoryLabel = (value: string) => MOMENT_CATEGORIES[value] ?? humanise(value)
@@ -121,9 +160,17 @@ const categoryCounts = computed(() => {
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
 })
 
+const filtering = computed(() => Boolean(category.value || evidence.value || verdict.value))
+function clearFilters() {
+  category.value = ''
+  evidence.value = ''
+  verdict.value = ''
+}
+
 const visibleClips = computed(() => (lecture.value?.clips ?? [])
   .map((clip, index) => ({ clip, index }))
-  .filter(({ clip }) => !category.value || categoryOf(clip) === category.value))
+  .filter(({ clip }) => (!category.value || categoryOf(clip) === category.value)
+    && matchesEvidence(clip, evidence.value) && matchesVerdict(clip, verdict.value)))
 </script>
 
 <template>
@@ -150,7 +197,7 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
             </span>
           </div>
           <div class="mt-3 flex flex-wrap gap-2">
-            <StatusBadge :label="`${lecture.clips.length} positive moment${lecture.clips.length === 1 ? '' : 's'}`" tone="brand" />
+            <StatusBadge :label="`${lecture.clips.length} candidate${lecture.clips.length === 1 ? '' : 's'}`" tone="brand" />
             <StatusBadge
               :label="readyClips ? `${readyClips} of ${lecture.clips.length} clips produced` : 'No clips produced yet'"
               :tone="readyClips ? 'ok' : 'waiting'"
@@ -158,6 +205,11 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
             <StatusBadge
               :label="lecture.recording_available ? 'Recording available' : 'Recording link pending'"
               :tone="lecture.recording_available ? 'ok' : 'waiting'"
+            />
+            <StatusBadge
+              v-if="lecture.clips.length"
+              :label="`${reviewCounts.approved} approved · ${reviewCounts.rejected} rejected · ${reviewCounts.pending} awaiting review`"
+              tone="neutral"
             />
           </div>
         </template>
@@ -188,6 +240,43 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
       />
 
       <div v-else class="stack">
+        <div v-if="lecture.evidence_summary" class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5" data-test="evidence-summary">
+          <StatTile label="Candidates" :value="lecture.evidence_summary.total" />
+          <StatTile label="AI accepted" :value="lecture.evidence_summary.ai_accepted" tone="ok" />
+          <StatTile label="AI rejected" :value="lecture.evidence_summary.ai_rejected" tone="review" />
+          <StatTile label="Positive Moments" :value="lecture.evidence_summary.positive_moments" />
+          <StatTile label="OFSTED Case Studies" :value="lecture.evidence_summary.ofsted_case_studies" />
+          <StatTile label="Social Media" :value="lecture.evidence_summary.social_candidates" note="candidates, each counted once" />
+          <StatTile label="Reels" :value="lecture.evidence_summary.reel" />
+          <StatTile label="Carousels" :value="lecture.evidence_summary.carousel" />
+          <StatTile label="Quote posts" :value="lecture.evidence_summary.quote_post" />
+          <StatTile label="Not verified" :value="lecture.evidence_summary.not_verified" />
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by evidence type">
+          <span class="filter-label">Evidence</span>
+          <button
+            v-for="option in EVIDENCE_FILTERS" :key="option.value" type="button" class="chip cursor-pointer transition"
+            :data-test="`evidence-filter-${option.value || 'all'}`"
+            :class="{ '!bg-brand-600 !text-white': evidence === option.value }" :aria-pressed="evidence === option.value"
+            @click="evidence = option.value"
+          >
+            {{ option.label }}<span class="ml-1" :class="evidence === option.value ? 'text-white/80' : 'text-brand-500'">{{ evidenceCount(option.value) }}</span>
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by AI verdict">
+          <span class="filter-label">AI verdict</span>
+          <button
+            v-for="option in VERDICT_FILTERS" :key="option.value" type="button" class="chip cursor-pointer transition"
+            :data-test="`verdict-filter-${option.value || 'all'}`"
+            :class="{ '!bg-brand-600 !text-white': verdict === option.value }" :aria-pressed="verdict === option.value"
+            @click="verdict = option.value"
+          >
+            {{ option.label }}<span class="ml-1" :class="verdict === option.value ? 'text-white/80' : 'text-brand-500'">{{ verdictCount(option.value) }}</span>
+          </button>
+        </div>
+
         <div v-if="categoryCounts.length" class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter moments by category">
           <span class="filter-label">Category</span>
           <button
@@ -211,20 +300,27 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
           class="surface"
           tone="neutral"
           icon="quote"
-          :title="`No ${categoryLabel(category)} moments in this lecture`"
-          message="This lecture's moments are in other categories."
+          title="No candidates match these filters"
+          message="This lecture's candidates are of other kinds."
         >
-          <template #action><button type="button" class="btn-secondary" @click="category = ''">Show all moments</button></template>
+          <template #action><button v-if="filtering" type="button" class="btn-secondary" @click="clearFilters">Show all candidates</button></template>
         </EmptyState>
 
         <article
           v-for="{ clip, index } in visibleClips"
           :key="`${clip.start}-${index}`"
           class="panel"
+          data-test="evidence-card"
         >
           <div class="panel-head">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <StatusBadge
+                :label="evidenceType(clip.final_evidence_type).label"
+                :tone="evidenceType(clip.final_evidence_type).tone"
+                data-test="evidence-type"
+              />
               <span class="badge-neutral font-mono">{{ offset(clip.start ?? '') }} – {{ offset(clip.end ?? '') }}</span>
+              <span v-if="typeof clip.duration_seconds === 'number'" class="text-xs text-muted">{{ clipDuration(clip.duration_seconds) }}</span>
               <span v-if="clip.category" class="chip">{{ categoryLabel(categoryOf(clip)) }}</span>
               <span v-if="clip.feedback_target" class="badge-info">About: {{ humanise(clip.feedback_target) }}</span>
             </div>
@@ -235,14 +331,16 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
           </div>
 
           <div class="panel-body">
-            <blockquote class="max-w-4xl border-l-[3px] border-brand-300 pl-4">
-              <p class="font-display text-lg leading-relaxed text-ink">
-                “{{ clip.positive_quote || clip.quote || 'Positive learner feedback' }}”
+            <p v-if="isCaseStudy(clip)" class="eyebrow mb-1.5" data-test="quote-label">Case study explanation, as said in the lecture</p>
+            <blockquote v-if="clip.positive_quote || clip.quote" class="max-w-4xl border-l-[3px] border-brand-300 pl-4">
+              <p class="font-display text-lg leading-relaxed text-ink" data-test="quotation">
+                “{{ clip.positive_quote || clip.quote }}”
               </p>
               <footer v-if="clip.speaker" class="mt-1.5 text-xs font-semibold uppercase tracking-kicker text-muted">
                 {{ clip.speaker }}
               </footer>
             </blockquote>
+            <p v-else class="text-sm text-muted" data-test="no-quotation">No quotation stored for this candidate.</p>
 
             <div class="mt-4 flex flex-wrap gap-2">
               <button
@@ -287,36 +385,26 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
                     <p class="text-sm leading-6 text-body">{{ entry.text }}</p>
                   </div>
                 </div>
+                <p v-if="!transcript(clip).length" class="text-sm text-muted">No transcript lines stored for this candidate.</p>
               </div>
             </details>
 
-            <dl
-              v-if="clip.reason || typeof clip.confidence === 'number' || clip.semantic_verification.verdict"
-              class="mt-4 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-3"
-            >
-              <div v-if="typeof clip.confidence === 'number'">
-                <dt class="eyebrow">Confidence</dt>
-                <dd class="mt-0.5 font-semibold text-ink">{{ formatConfidence(clip.confidence) }}</dd>
-              </div>
-              <div v-if="clip.semantic_verification.verdict">
-                <dt class="eyebrow">Semantic check</dt>
-                <dd class="mt-0.5">
-                  <StatusBadge
-                    :label="humanise(clip.semantic_verification.verdict)"
-                    :tone="verificationTone(clip.semantic_verification.verdict)"
-                  />
-                </dd>
-              </div>
-              <div v-if="typeof clip.semantic_verification.confidence === 'number'">
-                <dt class="eyebrow">Verification confidence</dt>
-                <dd class="mt-0.5 font-semibold text-ink">{{ formatConfidence(clip.semantic_verification.confidence) }}</dd>
-              </div>
-            </dl>
-
-            <div v-if="clip.reason || clip.semantic_verification.reason" class="mt-3 space-y-1.5 text-sm leading-6 text-muted">
-              <p v-if="clip.reason"><span class="font-semibold text-body">Why it qualified:</span> {{ clip.reason }}</p>
-              <p v-if="clip.semantic_verification.reason"><span class="font-semibold text-body">Verification:</span> {{ clip.semantic_verification.reason }}</p>
+            <div v-if="clip.reason || typeof clip.confidence === 'number'" class="mt-3 space-y-1.5 text-sm leading-6 text-muted">
+              <p v-if="clip.reason"><span class="font-semibold text-body">Why it was selected:</span> {{ clip.reason }}</p>
+              <p v-if="typeof clip.confidence === 'number'"><span class="font-semibold text-body">Selector confidence:</span> {{ formatConfidence(clip.confidence) }}</p>
             </div>
+
+            <ClipEvidenceDetails :clip="clip" />
+
+            <ClipReviewControl
+              v-if="clip.review && typeof clip.start_cue === 'number' && typeof clip.end_cue === 'number'"
+              :session-key="lecture.session_key"
+              :start-cue="clip.start_cue"
+              :end-cue="clip.end_cue"
+              :review="clip.review"
+              :can-review="lecture.can_review"
+              @reviewed="(review) => onReviewed(index, review)"
+            />
           </div>
         </article>
       </div>

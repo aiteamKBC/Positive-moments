@@ -378,6 +378,38 @@ export const MOMENT_CATEGORIES: Record<string, string> = {
   learning_experience: 'Learning experience',
 }
 
+/** Positive clip evidence. The type itself is decided by the API, never here. */
+export const EVIDENCE_TYPES: Record<string, { label: string; tone: Tone }> = {
+  POSITIVE_MOMENT: { label: 'Positive Moment', tone: 'brand' },
+  OFSTED_CASE_STUDY: { label: 'OFSTED Case Study', tone: 'info' },
+  REJECT: { label: 'Rejected as evidence', tone: 'review' },
+}
+
+export function evidenceType(value?: string | null) {
+  return value ? EVIDENCE_TYPES[value] ?? { label: humanise(value), tone: 'neutral' as Tone }
+    : { label: 'Type not recorded', tone: 'quiet' as Tone }
+}
+
+/** The semantic verifier is advisory: its verdict is shown, never treated as approval. */
+export const SEMANTIC_STATUS: Record<string, { label: string; tone: Tone }> = {
+  accepted: { label: 'AI accepted', tone: 'ok' },
+  rejected: { label: 'AI rejected', tone: 'review' },
+  not_verified: { label: 'Not verified', tone: 'quiet' },
+  unrecognised: { label: 'AI verdict unrecognised', tone: 'neutral' },
+}
+
+export const SOCIAL_FORMATS: Record<string, string> = {
+  quote_post: 'Quote post',
+  reel: 'Reel',
+  carousel: 'Carousel',
+}
+
+export const REVIEW_STATUS: Record<string, { label: string; tone: Tone }> = {
+  pending: { label: 'Awaiting human review', tone: 'waiting' },
+  approved: { label: 'Approved by reviewer', tone: 'ok' },
+  rejected: { label: 'Rejected by reviewer', tone: 'error' },
+}
+
 export const RUN_MODE: Record<string, string> = {
   PREVIEW: 'Preview',
   ANALYZE: 'Analysis',

@@ -4,6 +4,8 @@ import re
 from datetime import date
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
+from .evidence import describe as describe_evidence
+
 TIMESTAMP_PATTERN = re.compile(
     r"^(?P<hours>\d+):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d(?:\.\d+)?)$"
 )
@@ -120,6 +122,8 @@ def normalize_clips(value) -> list[dict]:
                 clip[list_key] = []
         if not isinstance(clip["semantic_verification"], dict):
             clip["semantic_verification"] = {}
+        # Read from the stored candidate, which holds keys `allowed` drops.
+        clip.update(describe_evidence(candidate))
         clip["original_index"] = original_index
         normalized.append(clip)
     return sorted(

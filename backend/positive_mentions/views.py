@@ -9,7 +9,9 @@ from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import Coalesce
+from django.db import transaction
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import api_view, permission_classes
@@ -17,7 +19,8 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import DoctorSession
+from . import reviews
+from .models import ClipReview, DoctorSession
 from .pagination import LecturePagination
 from .serializers import LectureDetailSerializer, LectureListSerializer, attach_ready_clip_assets
 from .services import (
@@ -157,7 +160,7 @@ class LectureDetailView(APIView):
                 {"code": "invalid_session_id", "detail": "The lecture identifier is invalid."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        return Response(LectureDetailSerializer(lecture).data)
+        return Response(LectureDetailSerializer(lecture, context={"request": request}).data)
 
 
 class WatchMomentView(APIView):
@@ -263,3 +266,53 @@ def send_clip_request(payload):
     except (urllib.error.URLError, OSError) as exc:
         logger.warning("clip on demand unreachable: %s", type(exc).__name__)
         raise ClipRequestFailed(type(exc).__name__) from None
+
+
+class ClipReviewView(APIView):
+    """
+    Record a person's decision on ONE clip: pending, approved or rejected.
+
+    The clip is named by its cues and must belong to this lecture. The decision
+    is written to `positive_clip_reviews` only; the stored AI evidence is read,
+    never written. Who may decide is `reviews.can_review`.
+    """
+
+    def put(self, request, session_key):
+        if not reviews.can_review(request.user):
+            return Response({"code": "review_not_permitted",
+                             "detail": "Your account cannot review clips."},
+                            status=status.HTTP_403_FORBIDDEN)
+        lecture = lecture_from_key(session_key)
+        if lecture is None:
+            return Response({"code": "invalid_session_id",
+                             "detail": "The lecture identifier is invalid."},
+                            status=status.HTTP_404_NOT_FOUND)
+        decision = request.data.get("status")
+        if decision not in ClipReview.STATUSES:
+            return Response({"code": "invalid_status",
+                             "detail": "status must be pending, approved or rejected."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        note = request.data.get("note", "")
+        if not isinstance(note, str) or len(note) > 2000:
+            return Response({"code": "invalid_note",
+                             "detail": "note must be text of at most 2000 characters."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        cues = reviews.clip_cues({"start_cue": _cue(request.data.get("start_cue")),
+                                  "end_cue": _cue(request.data.get("end_cue"))})
+        if cues is None:
+            return Response({"code": "invalid_cues",
+                             "detail": "start_cue and end_cue must be whole numbers."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        matches = [clip for clip in normalize_clips(lecture.positive_clips)
+                   if reviews.clip_cues(clip) == cues]
+        if len(matches) != 1:
+            return Response({"code": "clip_not_found",
+                             "detail": "This clip is not part of the lecture."},
+                            status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            review, _ = ClipReview.objects.update_or_create(
+                session_id=lecture.session_id, start_cue=cues[0], end_cue=cues[1],
+                defaults={"status": decision, "note": note.strip(), "reviewer": request.user,
+                          "reviewer_name": reviews.reviewer_name(request.user),
+                          "reviewed_at": timezone.now()})
+        return Response(reviews.payload(review))

@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from . import evidence, reviews
 from .models import DoctorSession
 from .services import ready_clip_assets
 from .utils import encode_session_id, normalize_clips
@@ -149,15 +150,34 @@ class LectureListSerializer(serializers.ModelSerializer):
 
 class LectureDetailSerializer(LectureListSerializer):
     clips = serializers.SerializerMethodField()
+    evidence_summary = serializers.SerializerMethodField()
+    review_summary = serializers.SerializerMethodField()
+    can_review = serializers.SerializerMethodField()
 
     class Meta(LectureListSerializer.Meta):
         fields = LectureListSerializer.Meta.fields + (
             "meeting_id", "clips_analyzed_at", "clips_analysis_completeness",
             "clips_error", "recording_filename", "recording_link_updated_at", "clips",
+            "evidence_summary", "review_summary", "can_review",
         )
 
+    def _clips(self, obj):
+        # Built once per lecture: three fields read the same list.
+        cache = self.context.setdefault("_clips", {})
+        if obj.session_id not in cache:
+            clips = attach_ready_clip_assets(obj.session_id, normalize_clips(obj.positive_clips))
+            cache[obj.session_id] = reviews.attach_reviews(obj.session_id, clips)
+        return cache[obj.session_id]
+
     def get_clips(self, obj):
-        return attach_ready_clip_assets(
-            obj.session_id,
-            normalize_clips(obj.positive_clips),
-        )
+        return self._clips(obj)
+
+    def get_evidence_summary(self, obj):
+        return evidence.summarise(self._clips(obj))
+
+    def get_review_summary(self, obj):
+        return reviews.summarise(self._clips(obj))
+
+    def get_can_review(self, obj):
+        request = self.context.get("request")
+        return reviews.can_review(getattr(request, "user", None))

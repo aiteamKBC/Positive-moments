@@ -78,6 +78,78 @@ export interface PositiveClip {
   start_cue?: number
   end_cue?: number
   clip_asset: ClipAsset | null
+
+  // --- evidence, as the API read it from the stored clip ----------------
+  /** The type stored as `evidence_type`, if any. */
+  evidence_type: EvidenceType | null
+  /** The verified final type, falling back to `evidence_type`, then a legacy reason prefix. */
+  final_evidence_type: EvidenceType | null
+  evidence_type_source: 'verified' | 'evidence_type' | 'reason_prefix' | null
+  selector_evidence_type: EvidenceType | null
+  evidence_type_reclassified: boolean | null
+  selector_reason: string | null
+  semantic_verdict: string | null
+  semantic_status: SemanticStatus
+  semantic_confidence: number | null
+  semantic_reason: string | null
+  semantic_advisory_pass: boolean | null
+  feedback_scope: string | null
+  conversation_type: string | null
+  trainer_included: boolean | null
+
+  // --- social media: a proposal, never a publishing approval -------------
+  social_media_primary_format: string | null
+  social_media_formats: string[] | null
+  /** The recognised formats (quote_post, reel, carousel) this clip supports. */
+  social_formats: SocialFormat[]
+  is_social_candidate: boolean
+  social_media_ready: boolean | null
+  social_media_rationale: string | null
+  social_verification_status: string | null
+  social_verifier_confidence: number | null
+  social_verifier_reason: string | null
+  reel_edit_mode: string | null
+  reel_segments: ReelSegment[] | null
+  reel_estimated_duration_seconds: number | null
+  carousel_slide_outline: string[] | null
+
+  /** null when the clip has no cues and so cannot be reviewed. */
+  review: ClipReview | null
+}
+
+export type EvidenceType = 'POSITIVE_MOMENT' | 'OFSTED_CASE_STUDY' | 'REJECT'
+export type SemanticStatus = 'accepted' | 'rejected' | 'not_verified' | 'unrecognised'
+export type SocialFormat = 'quote_post' | 'reel' | 'carousel'
+export type ReviewStatus = 'pending' | 'approved' | 'rejected'
+
+export interface ReelSegment {
+  start_cue: number | null
+  end_cue: number | null
+  /** From the clip's stored dialogue; null when no line carries the cue. */
+  start: string | null
+  end: string | null
+}
+
+export interface ClipReview {
+  status: ReviewStatus
+  reviewer: string | null
+  reviewed_at: string | null
+  note: string
+}
+
+export interface EvidenceSummary {
+  total: number
+  ai_accepted: number
+  ai_rejected: number
+  not_verified: number
+  positive_moments: number
+  ofsted_case_studies: number
+  rejected_as_evidence: number
+  unclassified: number
+  social_candidates: number
+  reel: number
+  carousel: number
+  quote_post: number
 }
 
 export interface LectureDetail extends Lecture {
@@ -88,6 +160,10 @@ export interface LectureDetail extends Lecture {
   recording_filename: string | null
   recording_link_updated_at: string | null
   clips: PositiveClip[]
+  evidence_summary: EvidenceSummary
+  review_summary: Record<ReviewStatus, number>
+  /** May the signed-in person approve or reject clips? */
+  can_review: boolean
 }
 
 export interface PaginatedLectures {
