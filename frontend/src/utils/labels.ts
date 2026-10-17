@@ -404,12 +404,6 @@ export const SOCIAL_FORMATS: Record<string, string> = {
   carousel: 'Carousel',
 }
 
-export const REVIEW_STATUS: Record<string, { label: string; tone: Tone }> = {
-  pending: { label: 'Awaiting human review', tone: 'waiting' },
-  approved: { label: 'Approved by reviewer', tone: 'ok' },
-  rejected: { label: 'Rejected by reviewer', tone: 'error' },
-}
-
 export const RUN_MODE: Record<string, string> = {
   PREVIEW: 'Preview',
   ANALYZE: 'Analysis',

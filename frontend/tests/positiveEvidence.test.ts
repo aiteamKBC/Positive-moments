@@ -1,26 +1,23 @@
 /**
- * Verified evidence, social-media proposals and human review on the Positive
- * Moments lecture page.
+ * Verified evidence and social-media proposals on the Positive Moments
+ * lecture page.
  *
  * The API module is mocked with the fields the backend derives. What matters
- * here is that the page shows them as given, filters on them independently,
- * never invents a quotation, and keeps human review apart from the AI fields.
+ * here is that the page shows them as given, filters on them independently
+ * and never invents a quotation.
  */
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import PositiveMomentDetailView from '../src/views/PositiveMomentDetailView.vue'
-import { getLecture, reviewClip } from '../src/services/api'
+import { getLecture } from '../src/services/api'
 
 vi.mock('../src/services/api', () => ({
   getLecture: vi.fn(),
   getWatchUrl: vi.fn(),
   requestClip: vi.fn(),
-  reviewClip: vi.fn(),
 }))
-
-const PENDING = { status: 'pending', reviewer: null, reviewed_at: null, note: '' }
 
 /** A legacy clip as the API now returns it: new fields present but unknown. */
 function legacy(overrides: object = {}) {
@@ -38,7 +35,7 @@ function legacy(overrides: object = {}) {
     is_social_candidate: false, social_media_ready: null, social_media_rationale: null,
     social_verification_status: null, social_verifier_confidence: null, social_verifier_reason: null,
     reel_edit_mode: null, reel_segments: null, reel_estimated_duration_seconds: null,
-    carousel_slide_outline: null, review: PENDING,
+    carousel_slide_outline: null,
     ...overrides,
   }
 }
@@ -79,8 +76,7 @@ async function render(clips: object[], extra: object = {}) {
   vi.mocked(getLecture).mockResolvedValue({
     session_id: 's', session_key: 'KEY-s', subject: 'Lecture', trainer: 'Trainer', date: '2026-10-01',
     recording_available: true, recording_url: 'https://tenant.sharepoint.com/r.mp4',
-    clips, evidence_summary: SUMMARY, review_summary: { pending: clips.length, approved: 0, rejected: 0 },
-    can_review: false, ...extra,
+    clips, evidence_summary: SUMMARY, ...extra,
   } as never)
   const router = createRouter({
     history: createMemoryHistory(),
@@ -165,7 +161,7 @@ describe('Verified evidence on the lecture page', () => {
   it('8b. an API without the new fields still renders the page', async () => {
     const old = { start: '00:01:00.000', end: '00:01:10.000', positive_quote: 'Old', dialogue: [],
       positive_speakers: [], other_speakers: [], semantic_verification: {}, clip_asset: null }
-    const wrapper = await render([old], { evidence_summary: undefined, can_review: undefined })
+    const wrapper = await render([old], { evidence_summary: undefined })
     expect(cards(wrapper)).toHaveLength(1)
     expect(wrapper.find('[data-test="evidence-summary"]').exists()).toBe(false)
   })
@@ -178,8 +174,8 @@ describe('Verified evidence on the lecture page', () => {
 
   it('10. "AI marked ready" is never shown as approved', async () => {
     const wrapper = await render([caseStudy()])
-    expect(wrapper.find('[data-test="readiness"]').text()).toContain('Not approved for publishing')
-    expect(wrapper.find('[data-test="review-status"]').text()).toBe('Awaiting human review')
+    expect(wrapper.find('[data-test="readiness"]').text()).toContain('not approval to publish')
+    expect(wrapper.text()).not.toMatch(/approved/i)
   })
 
   it('11. the evidence and verdict filters combine independently', async () => {
@@ -188,11 +184,34 @@ describe('Verified evidence on the lecture page', () => {
     expect(cards(wrapper)).toHaveLength(2)
     await wrapper.find('[data-test="verdict-filter-not_verified"]').trigger('click')
     expect(cards(wrapper)).toHaveLength(1)
-    await wrapper.find('[data-test="evidence-filter-social"]').trigger('click')
+    await wrapper.find('[data-test="social-filter-candidate"]').trigger('click')
     expect(cards(wrapper)).toHaveLength(0)
+    await wrapper.find('[data-test="evidence-filter-all"]').trigger('click')
     await wrapper.find('[data-test="verdict-filter-all"]').trigger('click')
     expect(cards(wrapper)).toHaveLength(1)
     expect(types(wrapper)).toEqual(['OFSTED Case Study'])
+  })
+
+  it('11b. the social media filter selects by each format and by any candidate', async () => {
+    const quotePost = legacy({ start: '00:45:00.000', start_cue: 450, end_cue: 452,
+      social_formats: ['quote_post'], is_social_candidate: true })
+    const wrapper = await render([legacy(), caseStudy(), quotePost])
+    const counts = async (value: string) => {
+      await wrapper.find(`[data-test="social-filter-${value}"]`).trigger('click')
+      return cards(wrapper).length
+    }
+    expect(await counts('reel')).toBe(1)
+    expect(await counts('carousel')).toBe(1)
+    expect(await counts('quote_post')).toBe(1)
+    expect(await counts('candidate')).toBe(2)          // reel+carousel clip counted once
+    expect(await counts('all')).toBe(3)
+  })
+
+  it('11c. there are no review or approval controls', async () => {
+    const wrapper = await render([legacy(), caseStudy()])
+    expect(wrapper.find('[data-test="review"]').exists()).toBe(false)
+    expect(wrapper.findAll('button').map((button) => button.text()))
+      .not.toContain('Approve')
   })
 
   it('12. shows the lecture totals from the API', async () => {
@@ -201,40 +220,8 @@ describe('Verified evidence on the lecture page', () => {
     expect(summary).toContain('OFSTED Case Studies1')
     expect(summary).toContain('Social Media1')
   })
-})
 
-describe('Human review on the lecture page', () => {
-  afterEach(() => vi.clearAllMocks())
-
-  it('13. someone who is not a reviewer sees the decision but no buttons', async () => {
-    const wrapper = await render([caseStudy({ review: { status: 'approved', reviewer: 'Rae Viewer', reviewed_at: '2026-10-17T10:00:00Z', note: '' } })])
-    expect(wrapper.find('[data-test="review-status"]').text()).toBe('Approved by reviewer')
-    expect(wrapper.find('[data-test="review"]').text()).toContain('Rae Viewer')
-    expect(wrapper.find('[data-test="review-approve"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="review-reject"]').exists()).toBe(false)
-  })
-
-  it("14. a reviewer's approval is sent for that clip's cues and shown", async () => {
-    vi.mocked(reviewClip).mockResolvedValue({ status: 'approved', reviewer: 'Rae Viewer', reviewed_at: '2026-10-17T10:00:00Z', note: '' })
-    const wrapper = await render([legacy(), caseStudy()], { can_review: true })
-    await cards(wrapper)[1].find('[data-test="review-approve"]').trigger('click')
-    await flushPromises()
-    expect(reviewClip).toHaveBeenCalledExactlyOnceWith('KEY-s', 200, 210, 'approved')
-    expect(cards(wrapper)[1].find('[data-test="review-status"]').text()).toBe('Approved by reviewer')
-    expect(cards(wrapper)[0].find('[data-test="review-status"]').text()).toBe('Awaiting human review')
-  })
-
-  it('15. a refused decision leaves the status and shows the error', async () => {
-    vi.mocked(reviewClip).mockRejectedValue(Object.assign(new Error('x'), {
-      response: { status: 403, data: { detail: 'Your account cannot review clips.' } } }))
-    const wrapper = await render([caseStudy()], { can_review: true })
-    await wrapper.find('[data-test="review-reject"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('[data-test="review-status"]').text()).toBe('Awaiting human review')
-    expect(wrapper.find('[data-test="review"] [role="alert"]').text()).toContain('cannot review clips')
-  })
-
-  it('16. the recording and produced clip links are still there', async () => {
+  it('13. the recording and produced clip links are still there', async () => {
     const produced = { url: 'https://tenant.sharepoint.com/clip.mp4', duration_seconds: 65 }
     const wrapper = await render([caseStudy({ clip_asset: produced })])
     expect(wrapper.find('a[href="https://tenant.sharepoint.com/clip.mp4"]').exists()).toBe(true)

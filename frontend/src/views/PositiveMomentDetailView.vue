@@ -22,7 +22,6 @@ import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import ClipEvidenceDetails from '../components/ClipEvidenceDetails.vue'
 import ClipRequestButton from '../components/ClipRequestButton.vue'
-import ClipReviewControl from '../components/ClipReviewControl.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
@@ -30,7 +29,7 @@ import PageHeader from '../components/PageHeader.vue'
 import StatTile from '../components/StatTile.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { getLecture, getWatchUrl } from '../services/api'
-import type { ClipReview, DialogueLine, LectureDetail, PositiveClip } from '../types'
+import type { DialogueLine, LectureDetail, PositiveClip } from '../types'
 import { businessDate, cairoDateTime } from '../utils/datetime'
 import { MOMENT_CATEGORIES, evidenceType, humanise } from '../utils/labels'
 import { errorMessage, formatConfidence, openSafely } from '../utils/format'
@@ -97,20 +96,10 @@ function clipDuration(value: number) {
 
 const isCaseStudy = (clip: PositiveClip) => clip.final_evidence_type === 'OFSTED_CASE_STUDY'
 
-function onReviewed(index: number, review: ClipReview) {
-  const clip = lecture.value?.clips[index]
-  if (clip) clip.review = review
-}
-
 const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.clip_asset).length ?? 0)
-const reviewCounts = computed(() => {
-  const counts = { pending: 0, approved: 0, rejected: 0 }
-  for (const clip of lecture.value?.clips ?? []) if (clip.review) counts[clip.review.status] += 1
-  return counts
-})
 
 // --- filters ----------------------------------------------------------------
-// Three independent selections, each kept in the URL. Each moment keeps its
+// Four independent selections, each kept in the URL. Each moment keeps its
 // original index: "Watch in full lecture" asks the API by it.
 function fromQuery(name: string) {
   return typeof route.query[name] === 'string' ? String(route.query[name]) : ''
@@ -118,10 +107,12 @@ function fromQuery(name: string) {
 const category = ref(fromQuery('category'))
 const evidence = ref(fromQuery('evidence'))
 const verdict = ref(fromQuery('ai'))
-watch([category, evidence, verdict], ([categoryValue, evidenceValue, verdictValue]) => {
+const social = ref(fromQuery('social'))
+watch([category, evidence, verdict, social], ([categoryValue, evidenceValue, verdictValue, socialValue]) => {
   void router.replace({ query: {
     ...route.query,
-    category: categoryValue || undefined, evidence: evidenceValue || undefined, ai: verdictValue || undefined,
+    category: categoryValue || undefined, evidence: evidenceValue || undefined,
+    ai: verdictValue || undefined, social: socialValue || undefined,
   } })
 })
 
@@ -129,24 +120,32 @@ const EVIDENCE_FILTERS = [
   { value: '', label: 'All evidence' },
   { value: 'POSITIVE_MOMENT', label: 'Positive Moments' },
   { value: 'OFSTED_CASE_STUDY', label: 'OFSTED Case Studies' },
-  { value: 'social', label: 'Social Media candidates' },
 ]
 const VERDICT_FILTERS = [
-  { value: '', label: 'Any AI verdict' },
+  { value: '', label: 'All' },
   { value: 'accepted', label: 'AI accepted' },
   { value: 'rejected', label: 'AI rejected' },
   { value: 'not_verified', label: 'Not verified' },
 ]
+const SOCIAL_FILTERS = [
+  { value: '', label: 'All' },
+  { value: 'reel', label: 'Reel' },
+  { value: 'carousel', label: 'Carousel' },
+  { value: 'quote_post', label: 'Quote post' },
+  { value: 'candidate', label: 'Social candidates' },
+]
 
-function matchesEvidence(clip: PositiveClip, value: string) {
-  if (!value) return true
-  if (value === 'social') return clip.is_social_candidate
-  return clip.final_evidence_type === value
-}
+const matchesEvidence = (clip: PositiveClip, value: string) => !value || clip.final_evidence_type === value
 const matchesVerdict = (clip: PositiveClip, value: string) => !value || clip.semantic_status === value
+function matchesSocial(clip: PositiveClip, value: string) {
+  if (!value) return true
+  if (value === 'candidate') return Boolean(clip.is_social_candidate)
+  return (clip.social_formats ?? []).includes(value as never)
+}
 
 const evidenceCount = (value: string) => (lecture.value?.clips ?? []).filter((clip) => matchesEvidence(clip, value)).length
 const verdictCount = (value: string) => (lecture.value?.clips ?? []).filter((clip) => matchesVerdict(clip, value)).length
+const socialCount = (value: string) => (lecture.value?.clips ?? []).filter((clip) => matchesSocial(clip, value)).length
 
 const categoryOf = (clip: PositiveClip) => (clip.category ?? '').trim().toLowerCase()
 const categoryLabel = (value: string) => MOMENT_CATEGORIES[value] ?? humanise(value)
@@ -160,17 +159,19 @@ const categoryCounts = computed(() => {
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
 })
 
-const filtering = computed(() => Boolean(category.value || evidence.value || verdict.value))
+const filtering = computed(() => Boolean(category.value || evidence.value || verdict.value || social.value))
 function clearFilters() {
   category.value = ''
   evidence.value = ''
   verdict.value = ''
+  social.value = ''
 }
 
 const visibleClips = computed(() => (lecture.value?.clips ?? [])
   .map((clip, index) => ({ clip, index }))
   .filter(({ clip }) => (!category.value || categoryOf(clip) === category.value)
-    && matchesEvidence(clip, evidence.value) && matchesVerdict(clip, verdict.value)))
+    && matchesEvidence(clip, evidence.value) && matchesVerdict(clip, verdict.value)
+    && matchesSocial(clip, social.value)))
 </script>
 
 <template>
@@ -205,11 +206,6 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
             <StatusBadge
               :label="lecture.recording_available ? 'Recording available' : 'Recording link pending'"
               :tone="lecture.recording_available ? 'ok' : 'waiting'"
-            />
-            <StatusBadge
-              v-if="lecture.clips.length"
-              :label="`${reviewCounts.approved} approved · ${reviewCounts.rejected} rejected · ${reviewCounts.pending} awaiting review`"
-              tone="neutral"
             />
           </div>
         </template>
@@ -265,8 +261,8 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
           </button>
         </div>
 
-        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by AI verdict">
-          <span class="filter-label">AI verdict</span>
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by AI status">
+          <span class="filter-label">AI status</span>
           <button
             v-for="option in VERDICT_FILTERS" :key="option.value" type="button" class="chip cursor-pointer transition"
             :data-test="`verdict-filter-${option.value || 'all'}`"
@@ -274,6 +270,18 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
             @click="verdict = option.value"
           >
             {{ option.label }}<span class="ml-1" :class="verdict === option.value ? 'text-white/80' : 'text-brand-500'">{{ verdictCount(option.value) }}</span>
+          </button>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by social media format">
+          <span class="filter-label">Social media</span>
+          <button
+            v-for="option in SOCIAL_FILTERS" :key="option.value" type="button" class="chip cursor-pointer transition"
+            :data-test="`social-filter-${option.value || 'all'}`"
+            :class="{ '!bg-brand-600 !text-white': social === option.value }" :aria-pressed="social === option.value"
+            @click="social = option.value"
+          >
+            {{ option.label }}<span class="ml-1" :class="social === option.value ? 'text-white/80' : 'text-brand-500'">{{ socialCount(option.value) }}</span>
           </button>
         </div>
 
@@ -395,16 +403,6 @@ const visibleClips = computed(() => (lecture.value?.clips ?? [])
             </div>
 
             <ClipEvidenceDetails :clip="clip" />
-
-            <ClipReviewControl
-              v-if="clip.review && typeof clip.start_cue === 'number' && typeof clip.end_cue === 'number'"
-              :session-key="lecture.session_key"
-              :start-cue="clip.start_cue"
-              :end-cue="clip.end_cue"
-              :review="clip.review"
-              :can-review="lecture.can_review"
-              @reviewed="(review) => onReviewed(index, review)"
-            />
           </div>
         </article>
       </div>

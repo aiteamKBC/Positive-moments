@@ -12,7 +12,7 @@ Neither implies the other: an OFSTED case study can be a reel without being a
 positive moment. Nothing here reclassifies anything. Every value is read from
 the clip as stored; a field the clip does not carry stays None, never False,
 because "the workflow did not say" is not "the workflow said no". Nothing here
-writes to the clip either: human review lives in its own table.
+writes to the clip either.
 
 Where the stored shape and the field names in use differ, both are read. The
 verifier writes its verdict inside `semantic_verification` and its social

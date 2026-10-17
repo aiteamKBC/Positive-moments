@@ -112,15 +112,11 @@ export interface PositiveClip {
   reel_segments: ReelSegment[] | null
   reel_estimated_duration_seconds: number | null
   carousel_slide_outline: string[] | null
-
-  /** null when the clip has no cues and so cannot be reviewed. */
-  review: ClipReview | null
 }
 
 export type EvidenceType = 'POSITIVE_MOMENT' | 'OFSTED_CASE_STUDY' | 'REJECT'
 export type SemanticStatus = 'accepted' | 'rejected' | 'not_verified' | 'unrecognised'
 export type SocialFormat = 'quote_post' | 'reel' | 'carousel'
-export type ReviewStatus = 'pending' | 'approved' | 'rejected'
 
 export interface ReelSegment {
   start_cue: number | null
@@ -128,13 +124,6 @@ export interface ReelSegment {
   /** From the clip's stored dialogue; null when no line carries the cue. */
   start: string | null
   end: string | null
-}
-
-export interface ClipReview {
-  status: ReviewStatus
-  reviewer: string | null
-  reviewed_at: string | null
-  note: string
 }
 
 export interface EvidenceSummary {
@@ -161,9 +150,6 @@ export interface LectureDetail extends Lecture {
   recording_link_updated_at: string | null
   clips: PositiveClip[]
   evidence_summary: EvidenceSummary
-  review_summary: Record<ReviewStatus, number>
-  /** May the signed-in person approve or reject clips? */
-  can_review: boolean
 }
 
 export interface PaginatedLectures {

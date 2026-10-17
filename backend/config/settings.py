@@ -53,12 +53,6 @@ CLIP_ON_DEMAND_WEBHOOK_URL = os.getenv(
     "CLIP_ON_DEMAND_WEBHOOK_URL",
     "https://n8n.srv943390.hstgr.cloud/webhook/qa-clip-on-demand").strip()
 
-# Who may approve or reject a positive clip, by email. Staff accounts may too.
-# Empty = staff only. The shared dashboard account is never a reviewer unless
-# its address is listed: a decision has to name the person who made it.
-POSITIVE_CLIP_REVIEWERS = [value.strip().lower() for value in os.getenv(
-    "POSITIVE_CLIP_REVIEWERS", "").split(",") if value.strip()]
-
 # Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
 # app registration the platform already has for Graph; the redirect URI must
 # be registered on that app exactly as written here. Empty = SSO switched off.

@@ -39,7 +39,7 @@ function seconds(value: number) {
 }
 
 const readiness = computed(() => {
-  if (props.clip.social_media_ready === true) return 'AI marked ready. Not approved for publishing until a reviewer approves it.'
+  if (props.clip.social_media_ready === true) return 'AI marked ready. This is a suggestion, not approval to publish.'
   if (props.clip.social_media_ready === false) return 'AI marked not ready.'
   return null
 })

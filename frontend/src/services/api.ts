@@ -1,6 +1,6 @@
 import axios from 'axios'
 
-import type { ClipReview, LectureDetail, PaginatedLectures, ReviewStatus, Summary } from '../types'
+import type { LectureDetail, PaginatedLectures, Summary } from '../types'
 
 const TOKEN_KEY = 'positive_mentions_token'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
@@ -95,17 +95,4 @@ export async function getWatchUrl(sessionKey: string, clipIndex: number) {
   return (await api.get<{ url: string }>(
     `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/clips/${clipIndex}/watch/`,
   )).data.url
-}
-
-/**
- * Record a person's decision on one clip. Stored apart from the AI evidence;
- * the clip itself is never changed.
- */
-export async function reviewClip(
-  sessionKey: string, startCue: number, endCue: number, status: ReviewStatus, note = '',
-) {
-  return (await api.put<ClipReview>(
-    `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/clip-reviews/`,
-    { start_cue: startCue, end_cue: endCue, status, note },
-  )).data
 }
