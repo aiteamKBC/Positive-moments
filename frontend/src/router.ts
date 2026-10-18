@@ -11,6 +11,8 @@ import OperationsMediaView from './views/OperationsMediaView.vue'
 import OperationsRunsView from './views/OperationsRunsView.vue'
 import PositiveMomentDetailView from './views/PositiveMomentDetailView.vue'
 import PositiveMomentsView from './views/PositiveMomentsView.vue'
+import SocialMediaDetailView from './views/SocialMediaDetailView.vue'
+import SocialMediaView from './views/SocialMediaView.vue'
 
 /**
  * Three areas, one product.
@@ -18,6 +20,7 @@ import PositiveMomentsView from './views/PositiveMomentsView.vue'
  *   /operations        what needs attention today
  *   /lectures          the lecture workspace, and one lecture in full
  *   /positive-moments  the learner-moments feature
+ *   /social-media      AI-suggested social media opportunities
  *
  * The canonical lecture detail is keyed by `lecture_id`, which is always a
  * UUID. The constraint on the parameter is what lets the old bookmark shape
@@ -72,6 +75,13 @@ const router = createRouter({
     {
       path: '/positive-moments/:sessionKey', name: 'positive-moment-detail',
       component: PositiveMomentDetailView, meta: { title: 'Positive Moments' },
+    },
+
+    // --- Social Media ----------------------------------------------------
+    { path: '/social-media', name: 'social-media', component: SocialMediaView, meta: { title: 'Social Media' } },
+    {
+      path: '/social-media/:sessionKey', name: 'social-media-detail',
+      component: SocialMediaDetailView, meta: { title: 'Social Media' },
     },
 
     // --- kept so existing bookmarks do not break -------------------------

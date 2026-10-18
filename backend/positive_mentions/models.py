@@ -47,3 +47,38 @@ class PositiveClipAsset(models.Model):
     class Meta:
         managed = False
         db_table = "qa_positive_clip_assets"
+
+
+class SocialMediaOpportunity(models.Model):
+    """
+    One AI-suggested social media opportunity found in a lecture.
+
+    Written by the Social Media pipeline, read here only. `session_id` points at
+    qa_doctors_sessions; it is a plain column rather than a ForeignKey so the
+    existing lecture model gains no reverse relation.
+    """
+    opportunity_id = models.BigIntegerField(primary_key=True)
+    session_id = models.TextField()
+    opportunity_key = models.TextField()
+    start_cue = models.IntegerField()
+    end_cue = models.IntegerField()
+    start_time = models.TextField(null=True, blank=True)
+    end_time = models.TextField(null=True, blank=True)
+    duration_seconds = models.DecimalField(max_digits=12, decimal_places=3, null=True, blank=True)
+    speaker = models.TextField(null=True, blank=True)
+    quote = models.TextField(null=True, blank=True)
+    content_angle = models.TextField(null=True, blank=True)
+    why_selected = models.TextField(null=True, blank=True)
+    primary_format = models.TextField(null=True, blank=True)
+    formats = models.JSONField(default=list)
+    verification_status = models.TextField()
+    verification_reason = models.TextField(null=True, blank=True)
+    discovery_source = models.TextField()
+    evidence_type = models.TextField(null=True, blank=True)
+    opportunity_data = models.JSONField(default=dict)
+    analyzed_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        managed = False
+        db_table = "qa_social_media_opportunities"

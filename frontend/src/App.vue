@@ -25,6 +25,7 @@ const showShell = computed(() => route.meta.public !== true)
 
 const NAV = [
   { label: 'Positive Moments', to: '/positive-moments', icon: 'moments', match: /^\/positive-moments/ },
+  { label: 'Social Media', to: '/social-media', icon: 'sparkle', match: /^\/social-media/ },
   { label: 'Operations', to: '/operations', icon: 'operations', match: /^\/operations/ },
   { label: 'Lectures', to: '/lectures', icon: 'lectures', match: /^\/lectures/ },
 ]

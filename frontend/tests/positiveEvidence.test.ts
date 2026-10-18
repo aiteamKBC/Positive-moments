@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 import PositiveMomentDetailView from '../src/views/PositiveMomentDetailView.vue'
-import { getLecture } from '../src/services/api'
+import { getLecture, getWatchUrl } from '../src/services/api'
 
 vi.mock('../src/services/api', () => ({
   getLecture: vi.fn(),
@@ -113,12 +113,26 @@ describe('Verified evidence on the lecture page', () => {
       .toContain('The Selector proposed Positive Moment; the verifier classified it as OFSTED Case Study')
   })
 
-  it('3. keeps AI-rejected candidates visible, and filters to them', async () => {
+  it('3. shows accepted evidence by default and rejected candidates only on request', async () => {
     const wrapper = await render([legacy(), caseStudy(), rejected()])
-    expect(cards(wrapper)).toHaveLength(3)
-    await wrapper.find('[data-test="verdict-filter-rejected"]').trigger('click')
+    expect(cards(wrapper)).toHaveLength(2)
+    expect(types(wrapper)).toEqual(['Positive Moment', 'OFSTED Case Study'])
+    expect(wrapper.text()).not.toContain('Not about the training.')
+    const toggle = wrapper.find('[data-test="evidence-filter-rejected"]')
+    expect(toggle.text()).toBe('Show rejected candidates (1)')
+    await toggle.trigger('click')
     expect(cards(wrapper)).toHaveLength(1)
-    expect(cards(wrapper)[0].text()).toContain('AI rejected')
+    expect(types(wrapper)).toEqual(['Rejected as evidence'])
+    expect(wrapper.find('[data-test="rejected-notice"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="rejection-reason"]').text()).toContain('Not about the training.')
+    await wrapper.find('[data-test="evidence-filter-rejected"]').trigger('click')
+    expect(cards(wrapper)).toHaveLength(2)
+  })
+
+  it('3b. a REJECT evidence type is rejected even when the verdict was not recorded', async () => {
+    const wrapper = await render([legacy(), legacy({ start_cue: 500, end_cue: 501, final_evidence_type: 'REJECT' })])
+    expect(cards(wrapper)).toHaveLength(1)
+    expect(wrapper.find('[data-test="evidence-filter-rejected"]').text()).toContain('(1)')
   })
 
   it('4. an OFSTED case study shows both its reel and its carousel', async () => {
@@ -163,7 +177,7 @@ describe('Verified evidence on the lecture page', () => {
       positive_speakers: [], other_speakers: [], semantic_verification: {}, clip_asset: null }
     const wrapper = await render([old], { evidence_summary: undefined })
     expect(cards(wrapper)).toHaveLength(1)
-    expect(wrapper.find('[data-test="evidence-summary"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="evidence-filter-rejected"]').exists()).toBe(false)
   })
 
   it('9. an OFSTED explanation is labelled as a case study, not a learner testimonial', async () => {
@@ -178,33 +192,37 @@ describe('Verified evidence on the lecture page', () => {
     expect(wrapper.text()).not.toMatch(/approved/i)
   })
 
-  it('11. the evidence and verdict filters combine independently', async () => {
+  it('11. the evidence filter separates Positive Moments from OFSTED Case Studies', async () => {
     const wrapper = await render([legacy(), caseStudy(), rejected()])
     await wrapper.find('[data-test="evidence-filter-POSITIVE_MOMENT"]').trigger('click')
-    expect(cards(wrapper)).toHaveLength(2)
-    await wrapper.find('[data-test="verdict-filter-not_verified"]').trigger('click')
-    expect(cards(wrapper)).toHaveLength(1)
-    await wrapper.find('[data-test="social-filter-candidate"]').trigger('click')
-    expect(cards(wrapper)).toHaveLength(0)
-    await wrapper.find('[data-test="evidence-filter-all"]').trigger('click')
-    await wrapper.find('[data-test="verdict-filter-all"]').trigger('click')
-    expect(cards(wrapper)).toHaveLength(1)
+    expect(types(wrapper)).toEqual(['Positive Moment'])
+    await wrapper.find('[data-test="evidence-filter-OFSTED_CASE_STUDY"]').trigger('click')
     expect(types(wrapper)).toEqual(['OFSTED Case Study'])
+    await wrapper.find('[data-test="evidence-filter-all"]').trigger('click')
+    expect(cards(wrapper)).toHaveLength(2)
+    expect(wrapper.find('[data-test="evidence-filter-POSITIVE_MOMENT"]').text()).toBe('Positive Moments1')
   })
 
-  it('11b. the social media filter selects by each format and by any candidate', async () => {
-    const quotePost = legacy({ start: '00:45:00.000', start_cue: 450, end_cue: 452,
-      social_formats: ['quote_post'], is_social_candidate: true })
-    const wrapper = await render([legacy(), caseStudy(), quotePost])
-    const counts = async (value: string) => {
-      await wrapper.find(`[data-test="social-filter-${value}"]`).trigger('click')
-      return cards(wrapper).length
+  it('11b. the main card is evidence-first; AI and social details are collapsed', async () => {
+    const wrapper = await render([caseStudy()])
+    const card = cards(wrapper)[0]
+    expect(card.find('[data-test="quotation"]').text()).toContain('Here is how the case unfolded.')
+    expect(card.find('[data-test="speaker"]').text()).toBe('Trainer')
+    expect(card.find('[data-test="timestamps"]').text()).toBe('00:20:00 – 00:21:05')
+    // The workflow's "OFSTED_CASE_STUDY:" prefix is not repeated to the reader.
+    expect(card.find('[data-test="rationale"]').text()).toBe('Why it matters: the tutor explains a workplace case.')
+    const details = card.find('[data-test="ai-details"]')
+    expect(details.element.tagName).toBe('DETAILS')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(details.find('[data-test="semantic"]').exists()).toBe(true)
+    expect(details.find('[data-test="social"]').exists()).toBe(true)
+    // Nothing social or diagnostic sits outside the collapsed section.
+    for (const name of ['semantic', 'social', 'reel', 'carousel']) {
+      expect(card.findAll(`[data-test="${name}"]`).every((node) => details.element.contains(node.element))).toBe(true)
     }
-    expect(await counts('reel')).toBe(1)
-    expect(await counts('carousel')).toBe(1)
-    expect(await counts('quote_post')).toBe(1)
-    expect(await counts('candidate')).toBe(2)          // reel+carousel clip counted once
-    expect(await counts('all')).toBe(3)
+    expect(wrapper.find('[data-test="evidence-summary"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="verdict-filter-all"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="social-filter-all"]').exists()).toBe(false)
   })
 
   it('11c. there are no review or approval controls', async () => {
@@ -214,18 +232,34 @@ describe('Verified evidence on the lecture page', () => {
       .not.toContain('Approve')
   })
 
-  it('12. shows the lecture totals from the API', async () => {
-    const wrapper = await render([legacy(), caseStudy(), rejected()])
-    const summary = wrapper.find('[data-test="evidence-summary"]').text()
-    expect(summary).toContain('OFSTED Case Studies1')
-    expect(summary).toContain('Social Media1')
+  it('12. the header counts accepted evidence and its produced clips', async () => {
+    const produced = { url: 'https://tenant.sharepoint.com/clip.mp4', duration_seconds: 65 }
+    const wrapper = await render([legacy(), caseStudy({ clip_asset: produced }), rejected()])
+    const badges = wrapper.find('[data-test="header-badges"]').text()
+    expect(badges).toContain('2 accepted moments')
+    expect(badges).toContain('1 of 2 clips produced')
   })
 
-  it('13. the recording and produced clip links are still there', async () => {
+  it('13. the recording, produced clip and Create Clip are still there', async () => {
     const produced = { url: 'https://tenant.sharepoint.com/clip.mp4', duration_seconds: 65 }
-    const wrapper = await render([caseStudy({ clip_asset: produced })])
-    expect(wrapper.find('a[href="https://tenant.sharepoint.com/clip.mp4"]').exists()).toBe(true)
+    const wrapper = await render([caseStudy({ clip_asset: produced }), legacy()])
+    const [withClip, withoutClip] = cards(wrapper)
+    expect(withClip.findAll('a[href="https://tenant.sharepoint.com/clip.mp4"]')).toHaveLength(1)
+    expect(withClip.find('[data-test="clip-request"]').exists()).toBe(false)
+    expect(withoutClip.find('[data-test="clip-request"]').exists()).toBe(true)
+    expect(withoutClip.find('a[href^="https://tenant.sharepoint.com"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('Watch full lecture')
     expect(wrapper.text()).toContain('Watch in full lecture')
+  })
+
+  it('14. Watch in full lecture and Create Clip still use the original moment index and cues', async () => {
+    vi.mocked(getWatchUrl).mockResolvedValue('https://tenant.sharepoint.com/r.mp4?nav=x')
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const wrapper = await render([rejected(), legacy()])
+    await cards(wrapper)[0].find('button').trigger('click')
+    await flushPromises()
+    // The rejected candidate is hidden, but the accepted one keeps its index 1.
+    expect(getWatchUrl).toHaveBeenCalledWith('KEY-s', 1)
+    open.mockRestore()
   })
 })
