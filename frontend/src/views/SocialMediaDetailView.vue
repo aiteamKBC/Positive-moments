@@ -19,6 +19,7 @@ import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import PageHeader from '../components/PageHeader.vue'
 import SocialOpportunityCard from '../components/SocialOpportunityCard.vue'
+import SocialReanalysis from '../components/SocialReanalysis.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { getSocialClips, getSocialLecture } from '../services/social'
 import type { SocialClip, SocialFormat, SocialLectureDetail } from '../types/social'
@@ -56,6 +57,18 @@ async function load() {
 }
 onMounted(load)
 onBeforeUnmount(() => clearTimeout(pollTimer))
+
+/** After a reanalysis completes: re-read the opportunities in place, keeping the page. */
+async function refreshOpportunities() {
+  try {
+    lecture.value = await getSocialLecture(sessionKey.value)
+    expanded.value = new Set()
+    pollsLeft = MAX_POLLS
+    schedulePoll()
+  } catch (caught) {
+    error.value = errorMessage(caught, 'The refreshed opportunities could not be loaded.')
+  }
+}
 
 const format = ref(typeof route.query.format === 'string' ? route.query.format : '')
 watch(format, (value) => {
@@ -161,6 +174,11 @@ async function poll() {
         <AppIcon name="info" :size="16" class="mt-0.5" />
         <span><strong>{{ NOT_APPROVED }}.</strong> Every opportunity on this page is an AI suggestion. Check it against the recording before any use.</span>
       </p>
+
+      <SocialReanalysis
+        :session-key="lecture.session_key" :opportunity-count="lecture.opportunity_count"
+        @completed="refreshOpportunities"
+      />
 
       <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by format">

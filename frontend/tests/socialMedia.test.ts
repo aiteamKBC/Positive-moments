@@ -26,6 +26,13 @@ vi.mock('../src/services/social', () => ({
   getSocialLectures: vi.fn(),
   getSocialSummary: vi.fn(),
   requestSocialClip: vi.fn(),
+  // The reanalysis panel on the lecture page: no runs yet (tested in socialOperations.test.ts).
+  getAnalysisRuns: vi.fn(() => Promise.resolve([])),
+  requestReanalysis: vi.fn(),
+  getPrompt: vi.fn(),
+  getPromptVersion: vi.fn(),
+  savePrompt: vi.fn(),
+  restorePrompt: vi.fn(),
 }))
 
 const COUNTS = { reel: 24, carousel: 19, quote_post: 7, educational_post: 3, other: 0 }

@@ -120,3 +120,17 @@ export function contextLabel(clip: Pick<EvidenceClip, 'context_before_seconds' |
   if (before === after) return `±${before} s context`
   return `+${before} s before, +${after} s after`
 }
+
+/** An API refusal as the backend sends it: status, `code`, `detail` and any extra fields. */
+export function apiError(error: unknown, fallback: string) {
+  const response = typeof error === 'object' && error !== null && 'response' in error
+    ? (error as { response?: { status?: number; data?: unknown } }).response
+    : undefined
+  const data = response?.data && typeof response.data === 'object' ? response.data as Record<string, unknown> : {}
+  return {
+    status: response?.status ?? 0,
+    code: typeof data.code === 'string' ? data.code : '',
+    detail: typeof data.detail === 'string' && data.detail ? data.detail : fallback,
+    data,
+  }
+}

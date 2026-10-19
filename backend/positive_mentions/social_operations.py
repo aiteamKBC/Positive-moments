@@ -19,8 +19,11 @@ RUNS
 ----
   queued -> running -> completed | failed       (queued -> completed/failed too)
 
-A request creates a `queued` run; Django does not call n8n yet, so
-`dispatched_at` stays empty. `completed` is accepted only when the number of
+A request creates a `queued` run and POSTs {session_id, mode: "reanalyze"} to
+the n8n webhook; n8n's acknowledgement sets `dispatched_at` and nothing else.
+The run becomes `running`, `completed` or `failed` only when n8n reports it
+(one active run per lecture, so n8n can address it by session_id).
+`completed` is accepted only when the number of
 opportunity rows n8n reports equals the rows PostgreSQL holds for the lecture
 with `analyzed_at` at or after the run's creation. Otherwise the run keeps its
 state and the report is refused. A queued/running run older than
@@ -38,6 +41,8 @@ price missing, and then there is no cost value at all.
 import hashlib
 import json
 import logging
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
@@ -68,6 +73,7 @@ COST_PLACES = Decimal("0.00000001")
 PRICE_PLACES, PRICE_LIMIT = Decimal("0.000001"), Decimal(1_000_000)
 MILLION = Decimal(1_000_000)
 MIN_SERVICE_TOKEN = 32
+WEBHOOK_TIMEOUT_SECONDS = 20
 
 
 class Refused(Exception):
@@ -199,6 +205,68 @@ def create_run(session_id, trigger, user=None, n8n_execution_id=None):
             session_id=session_id, status__in=ACTIVE_RUN_STATUSES).first()
         raise Refused("analysis_in_progress", "This lecture is already being analysed.",
                       run_id=str(active.run_id) if active else None) from None
+
+
+def is_stale(run, now=None) -> bool:
+    """Still queued/running past the time allowed: no result has arrived."""
+    now = now or timezone.now()
+    return run.status in ACTIVE_RUN_STATUSES and run.created_at < now - ACTIVE_RUN_TIMEOUT
+
+
+# --- dispatch to n8n --------------------------------------------------------------------
+
+def _webhook():
+    """(url, header name, header value), or None when reanalysis is not configured."""
+    url = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL
+    name = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME
+    value = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE
+    if not (url.startswith("https://") and name and value):
+        return None
+    return url, name, value
+
+
+def _post_webhook(webhook, payload) -> bool:
+    """POST to n8n. True on a 2xx acknowledgement. Never logs the URL or the credential."""
+    url, header_name, header_value = webhook
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/json", "Accept": "application/json",
+                 header_name: header_value})
+    try:
+        with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECONDS) as response:
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        logger.warning("social media reanalysis webhook refused: HTTP %s", exc.code)
+    except (urllib.error.URLError, OSError) as exc:
+        logger.warning("social media reanalysis webhook unreachable: %s", type(exc).__name__)
+    return False
+
+
+def request_reanalysis(session_id, user):
+    """
+    Queue a run and ask n8n to analyse the lecture again.
+
+    n8n answers at once; its 2xx only means "received", so the run stays
+    `queued` with `dispatched_at` set. Only n8n's own report moves it on. If
+    n8n does not accept the request, the run is failed (`dispatch_failed`) so
+    the lecture is free to be requested again.
+    """
+    webhook = _webhook()
+    if webhook is None:
+        raise Refused("reanalysis_not_configured", "Reanalysis is not available yet.", 503)
+    run = create_run(session_id, "on_demand", user=user)
+    accepted = _post_webhook(webhook, {"run_id": str(run.run_id), "session_id": session_id, "mode": "reanalyze"})
+    now = timezone.now()
+    queued = SocialMediaAnalysisRun.objects.filter(run_id=run.run_id, status="queued")
+    if not accepted:
+        queued.update(status="failed", error_code="dispatch_failed",
+                      error_message="The analysis service did not accept the request.",
+                      finished_at=now, updated_at=now)
+        raise Refused("reanalysis_request_failed",
+                      "The analysis service did not accept the request. Try again.", 502)
+    queued.filter(dispatched_at__isnull=True).update(dispatched_at=now, updated_at=now)
+    run.refresh_from_db()
+    return run
 
 
 def text_field(data, name, limit=MAX_TEXT, required=False):

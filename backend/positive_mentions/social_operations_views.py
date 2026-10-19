@@ -64,6 +64,7 @@ def run_payload(run, with_cost=True) -> dict:
         "error_code": run.error_code, "error_message": run.error_message,
         "created_at": _when(run.created_at), "dispatched_at": _when(run.dispatched_at),
         "started_at": _when(run.started_at), "finished_at": _when(run.finished_at),
+        "stale": ops.is_stale(run),
     }
     if with_cost:
         body["cost"] = ops.cost_summary({name: getattr(run, name) for name in ops.COST_AGGREGATES})
@@ -145,12 +146,13 @@ class PromptRollbackView(DashboardView):
 
 class ReanalysisView(DashboardView):
     """
-    Ask for one lecture to be analysed again. 202 means a run was queued, not
-    that anything was analysed: the run completes only on a verified result.
+    Ask for one lecture to be analysed again. 202 means n8n received the
+    request, not that anything was analysed: the run completes only when n8n
+    reports a verified result.
     """
 
     def post(self, request, session_key):
-        run = ops.create_run(_session_id(session_key), "on_demand", user=request.user)
+        run = ops.request_reanalysis(_session_id(session_key), request.user)
         return Response({"run": run_payload(run, with_cost=False)}, status=status.HTTP_202_ACCEPTED)
 
 

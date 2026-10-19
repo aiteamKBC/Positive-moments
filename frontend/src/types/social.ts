@@ -114,3 +114,47 @@ export interface SocialLectureDetail extends SocialLecture {
   recording_link_status: string | null
   opportunities: SocialOpportunity[]
 }
+
+/** The two AI System Messages the n8n workflows read from PostgreSQL. */
+export type PromptKey = 'social_discovery' | 'social_verification'
+
+/** One saved prompt version. `content` is present on the active one and on a single-version read. */
+export interface PromptVersion {
+  prompt_key: PromptKey
+  version: number
+  content_sha256: string
+  restored_from_version: number | null
+  created_by: string
+  created_at: string
+  content?: string
+}
+
+export interface PromptDetail {
+  prompt_key: PromptKey
+  active: (PromptVersion & { content: string }) | null
+  versions: PromptVersion[]
+}
+
+/**
+ * One reanalysis attempt, as Django records it. n8n's acknowledgement only
+ * sets `dispatched_at`; `running`, `completed` and `failed` come from n8n's
+ * own report. `stale` = still queued/running past the time allowed.
+ */
+export type AnalysisRunStatus = 'queued' | 'running' | 'completed' | 'failed'
+
+export interface AnalysisRun {
+  run_id: string
+  session_id: string
+  trigger: 'on_demand' | 'scheduled'
+  status: AnalysisRunStatus
+  requested_by: string | null
+  opportunities_reported: number | null
+  opportunities_verified: number | null
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  dispatched_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  stale: boolean
+}

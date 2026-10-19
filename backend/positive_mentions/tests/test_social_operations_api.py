@@ -7,9 +7,12 @@ n8n's service token; n8n routes accept only the service token. Nothing here may
 write qa_social_media_opportunities, and nothing is seeded: a prompt has no
 text until someone saves one and a cost exists only when reported.
 """
+import json
+import urllib.error
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from unittest import mock
 
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, connection, transaction
@@ -27,6 +30,12 @@ from positive_mentions.models import (
 from positive_mentions.utils import encode_session_id
 
 SERVICE_TOKEN = "s" * 40
+# A test webhook only; every test mocks the HTTP call, nothing leaves the machine.
+WEBHOOK = {
+    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL": "https://n8n.test.invalid/webhook/kent-social-analysis-request",
+    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME": "X-Kent-Webhook-Key",
+    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE": "test-header-value",
+}
 # Test prices only; real prices come from SOCIAL_MEDIA_MODEL_PRICES.
 TEST_PRICES = ('{"test-model": {"input": "2.00", "cached_input": "0.50", "output": "10.00",'
                ' "source": "test fixture"}}')
@@ -37,7 +46,7 @@ def key(session_id):
     return encode_session_id(session_id)
 
 
-@override_settings(SOCIAL_MEDIA_SERVICE_TOKEN=SERVICE_TOKEN, SOCIAL_MEDIA_MODEL_PRICES="")
+@override_settings(SOCIAL_MEDIA_SERVICE_TOKEN=SERVICE_TOKEN, SOCIAL_MEDIA_MODEL_PRICES="", **WEBHOOK)
 class SocialOperationsTestCase(TransactionTestCase):
     @classmethod
     def setUpClass(cls):
@@ -70,6 +79,11 @@ class SocialOperationsTestCase(TransactionTestCase):
         self.anonymous = APIClient()
         self.n8n = APIClient()
         self.n8n.credentials(HTTP_AUTHORIZATION=f"Bearer {SERVICE_TOKEN}")
+        # The n8n webhook, mocked for every test: it acknowledges with 200.
+        patcher = mock.patch("positive_mentions.social_operations.urllib.request.urlopen")
+        self.urlopen = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.urlopen.return_value.__enter__.return_value.status = 200
 
     def client_for(self, user):
         client = APIClient()
@@ -289,33 +303,96 @@ class ReanalysisTests(SocialOperationsTestCase):
     def request(self, session_id="session-marketing", client=None):
         return (client or self.dashboard).post(f"/api/social-media/lectures/{key(session_id)}/reanalysis/")
 
-    def test_queues_one_run_and_claims_nothing(self):
+    def sent(self):
+        """The one request sent to the webhook: (url, headers, body)."""
+        self.assertEqual(self.urlopen.call_count, 1)
+        request = self.urlopen.call_args.args[0]
+        return request.full_url, dict(request.header_items()), json.loads(request.data)
+
+    def test_dispatches_to_n8n_and_claims_nothing(self):
         before = self.snapshot_opportunities()
         response = self.request()
         self.assertEqual(response.status_code, 202)
         run = response.json()["run"]
         uuid.UUID(run["run_id"])
-        self.assertEqual((run["status"], run["trigger"], run["requested_by"]), ("queued", "on_demand", "Mona Hassan"))
-        for field in ("dispatched_at", "started_at", "finished_at", "opportunities_verified"):
+        # n8n's acknowledgement is not progress: still queued, only dispatched_at is set.
+        self.assertEqual((run["status"], run["trigger"], run["requested_by"], run["stale"]),
+                         ("queued", "on_demand", "Mona Hassan", False))
+        self.assertIsNotNone(run["dispatched_at"])
+        for field in ("started_at", "finished_at", "opportunities_verified"):
             self.assertIsNone(run[field])
+        url, headers, body = self.sent()
+        self.assertEqual(url, WEBHOOK["SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL"])
+        # The run Django just created, and no other.
+        self.assertEqual(SocialMediaAnalysisRun.objects.count(), 1)
+        self.assertEqual(body, {"run_id": run["run_id"], "session_id": "session-marketing", "mode": "reanalyze"})
+        self.assertEqual(str(SocialMediaAnalysisRun.objects.get().run_id), run["run_id"])
+        self.assertEqual(headers["X-kent-webhook-key"], "test-header-value")
         self.assertEqual(self.snapshot_opportunities(), before)
+        # The credential is never returned to the browser.
+        self.assertNotIn("test-header-value", response.content.decode())
+
+    def test_a_refused_or_unreachable_webhook_fails_the_run(self):
+        for failure in (urllib.error.HTTPError("u", 403, "Forbidden", {}, None), urllib.error.URLError("down")):
+            with self.subTest(failure=type(failure).__name__):
+                self.urlopen.reset_mock()
+                self.urlopen.side_effect = failure
+                response = self.request()
+                self.assertEqual((response.status_code, response.json()["code"]),
+                                 (502, "reanalysis_request_failed"))
+                # The run that was failed is the one whose id was sent.
+                failed = SocialMediaAnalysisRun.objects.order_by("-created_at").first()
+                self.assertEqual(self.sent()[2], {"run_id": str(failed.run_id), "session_id": "session-marketing",
+                                                  "mode": "reanalyze"})
+                self.assertEqual((failed.status, failed.error_code), ("failed", "dispatch_failed"))
+        self.urlopen.side_effect = None
+        self.urlopen.return_value.__enter__.return_value.status = 500
+        self.assertEqual(self.request().status_code, 502)
+        self.assertEqual(set(SocialMediaAnalysisRun.objects.values_list("status", "error_code")),
+                         {("failed", "dispatch_failed")})
+        # The lecture is free again.
+        self.urlopen.return_value.__enter__.return_value.status = 200
+        self.assertEqual(self.request().status_code, 202)
+
+    def test_not_configured_means_no_run_and_no_call(self):
+        for missing in WEBHOOK:
+            with self.subTest(missing=missing), override_settings(**{missing: ""}):
+                response = self.request()
+                self.assertEqual((response.status_code, response.json()["code"]),
+                                 (503, "reanalysis_not_configured"))
+        with override_settings(SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL="http://n8n.test.invalid/webhook/x"):
+            self.assertEqual(self.request().status_code, 503)
+        self.urlopen.assert_not_called()
+        self.assertFalse(SocialMediaAnalysisRun.objects.exists())
 
     def test_missing_lecture_is_refused(self):
         self.assertEqual(self.request("no-such-lecture").status_code, 404)
         self.assertEqual(self.dashboard.post("/api/social-media/lectures/%%%/reanalysis/").status_code, 404)
         self.assertFalse(SocialMediaAnalysisRun.objects.exists())
+        self.urlopen.assert_not_called()
 
-    def test_one_active_run_per_lecture(self):
+    def test_one_active_run_per_lecture_and_one_webhook_call(self):
         first = self.request().json()["run"]["run_id"]
         response = self.request()
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"code": "analysis_in_progress",
                                            "detail": "This lecture is already being analysed.", "run_id": first})
+        self.assertEqual(self.urlopen.call_count, 1)
+        # Reading the runs never calls n8n.
+        for _ in range(3):
+            self.assertEqual(self.dashboard.get(
+                f"/api/social-media/lectures/{key('session-marketing')}/analysis-runs/").status_code, 200)
+        self.assertEqual(self.urlopen.call_count, 1)
         # The scheduled workflow is held to the same rule.
         response = self.n8n.post("/api/social-media/internal/analysis-runs/",
                                  {"session_id": "session-marketing"}, format="json")
         self.assertEqual(response.status_code, 409)
         self.assertEqual(SocialMediaAnalysisRun.objects.count(), 1)
+
+    def test_an_old_active_run_is_shown_as_stale(self):
+        run = self.age(self.make_run(dispatched_at=datetime.now(timezone.utc)), timedelta(hours=2))
+        runs = self.dashboard.get(f"/api/social-media/lectures/{key('session-marketing')}/analysis-runs/").json()
+        self.assertEqual((runs["runs"][0]["run_id"], runs["runs"][0]["stale"]), (str(run.run_id), True))
 
     def test_database_enforces_one_active_run(self):
         self.make_run()

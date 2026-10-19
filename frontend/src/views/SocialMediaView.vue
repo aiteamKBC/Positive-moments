@@ -17,6 +17,7 @@ import FilterBar from '../components/FilterBar.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import PageHeader from '../components/PageHeader.vue'
 import SectionPanel from '../components/SectionPanel.vue'
+import SocialPromptsDialog from '../components/SocialPromptsDialog.vue'
 import StatTile from '../components/StatTile.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { getSocialLectures, getSocialSummary } from '../services/social'
@@ -29,6 +30,7 @@ const route = useRoute()
 const router = useRouter()
 
 const summary = ref<SocialSummary | null>(null)
+const editingPrompts = ref(false)
 const data = ref<PaginatedSocialLectures | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -119,7 +121,14 @@ const detailLink = (sessionKey: string) => ({
       kicker="Social Media"
       title="Content opportunities"
       lede="Reels, carousels, quote posts and educational posts the AI found in analysed lectures. Every one is a suggestion for review, not content approved for publishing."
-    />
+    >
+      <template #actions>
+        <button type="button" class="btn-secondary" data-test="edit-prompts" @click="editingPrompts = true">
+          <AppIcon name="sparkle" :size="16" /> Edit AI Prompts
+        </button>
+      </template>
+    </PageHeader>
+    <SocialPromptsDialog v-if="editingPrompts" @close="editingPrompts = false" />
 
     <p class="notice-warn" role="note" data-test="not-approved-notice">
       <AppIcon name="info" :size="16" class="mt-0.5" />

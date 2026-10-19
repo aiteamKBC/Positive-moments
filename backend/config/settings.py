@@ -62,6 +62,14 @@ SOCIAL_MEDIA_SERVICE_TOKEN = os.getenv("SOCIAL_MEDIA_SERVICE_TOKEN", "").strip()
 #                "source": "where and when the price was read"}}
 # A model without a complete price records its usage with cost "unknown".
 SOCIAL_MEDIA_MODEL_PRICES = os.getenv("SOCIAL_MEDIA_MODEL_PRICES", "").strip()
+# "Reanalyse Lecture": the n8n Social Media webhook and its Header Auth
+# credential. Server-side only, never sent to the browser. Any of the three
+# missing (or a non-https URL) = reanalysis is refused and no run is created.
+SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL = os.getenv("SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL", "").strip()
+SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME = os.getenv(
+    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME", "").strip()
+SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE = os.getenv(
+    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE", "").strip()
 
 # Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
 # app registration the platform already has for Graph; the redirect URI must
