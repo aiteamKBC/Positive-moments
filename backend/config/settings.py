@@ -53,6 +53,16 @@ CLIP_ON_DEMAND_WEBHOOK_URL = os.getenv(
     "CLIP_ON_DEMAND_WEBHOOK_URL",
     "https://n8n.srv943390.hstgr.cloud/webhook/qa-clip-on-demand").strip()
 
+# Social Media management (positive_mentions/social_operations.py).
+# The secret n8n sends (Authorization: Bearer ...) to report run status and
+# OpenAI usage. Unset or shorter than 32 characters = those routes refuse.
+SOCIAL_MEDIA_SERVICE_TOKEN = os.getenv("SOCIAL_MEDIA_SERVICE_TOKEN", "").strip()
+# USD prices per million tokens, by exact model name, as JSON:
+#   {"gpt-5.2": {"input": "...", "cached_input": "...", "output": "...",
+#                "source": "where and when the price was read"}}
+# A model without a complete price records its usage with cost "unknown".
+SOCIAL_MEDIA_MODEL_PRICES = os.getenv("SOCIAL_MEDIA_MODEL_PRICES", "").strip()
+
 # Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
 # app registration the platform already has for Graph; the redirect URI must
 # be registered on that app exactly as written here. Empty = SSO switched off.
