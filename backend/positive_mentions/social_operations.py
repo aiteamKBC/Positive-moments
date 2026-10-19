@@ -216,22 +216,16 @@ def is_stale(run, now=None) -> bool:
 # --- dispatch to n8n --------------------------------------------------------------------
 
 def _webhook():
-    """(url, header name, header value), or None when reanalysis is not configured."""
+    """The n8n webhook URL, or None when reanalysis is not configured (missing or not https)."""
     url = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL
-    name = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME
-    value = settings.SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE
-    if not (url.startswith("https://") and name and value):
-        return None
-    return url, name, value
+    return url if url.startswith("https://") else None
 
 
-def _post_webhook(webhook, payload) -> bool:
-    """POST to n8n. True on a 2xx acknowledgement. Never logs the URL or the credential."""
-    url, header_name, header_value = webhook
+def _post_webhook(url, payload) -> bool:
+    """POST to n8n (no authentication header). True on a 2xx acknowledgement. Never logs the URL."""
     request = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json",
-                 header_name: header_value})
+        headers={"Content-Type": "application/json", "Accept": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=WEBHOOK_TIMEOUT_SECONDS) as response:
             return 200 <= response.status < 300

@@ -33,8 +33,6 @@ SERVICE_TOKEN = "s" * 40
 # A test webhook only; every test mocks the HTTP call, nothing leaves the machine.
 WEBHOOK = {
     "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL": "https://n8n.test.invalid/webhook/kent-social-analysis-request",
-    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_NAME": "X-Kent-Webhook-Key",
-    "SOCIAL_MEDIA_REANALYSIS_WEBHOOK_HEADER_VALUE": "test-header-value",
 }
 # Test prices only; real prices come from SOCIAL_MEDIA_MODEL_PRICES.
 TEST_PRICES = ('{"test-model": {"input": "2.00", "cached_input": "0.50", "output": "10.00",'
@@ -327,10 +325,11 @@ class ReanalysisTests(SocialOperationsTestCase):
         self.assertEqual(SocialMediaAnalysisRun.objects.count(), 1)
         self.assertEqual(body, {"run_id": run["run_id"], "session_id": "session-marketing", "mode": "reanalyze"})
         self.assertEqual(str(SocialMediaAnalysisRun.objects.get().run_id), run["run_id"])
-        self.assertEqual(headers["X-kent-webhook-key"], "test-header-value")
+        # The n8n webhook has no authentication: JSON headers only, nothing else.
+        self.assertEqual(headers, {"Content-type": "application/json", "Accept": "application/json"})
         self.assertEqual(self.snapshot_opportunities(), before)
-        # The credential is never returned to the browser.
-        self.assertNotIn("test-header-value", response.content.decode())
+        # The webhook URL is never returned to the browser.
+        self.assertNotIn("n8n.test.invalid", response.content.decode())
 
     def test_a_refused_or_unreachable_webhook_fails_the_run(self):
         for failure in (urllib.error.HTTPError("u", 403, "Forbidden", {}, None), urllib.error.URLError("down")):
