@@ -145,6 +145,29 @@ class PublisherQueueRepository:
                        detail={"job_kind": job["job_kind"], "reason": reason[:300]})
         return job
 
+    def lock_job(self, connection, job_id) -> dict | None:
+        """The job row, locked FOR UPDATE NOWAIT inside the caller's transaction (LockNotAvailable if a
+        worker's claim holds it). A claim (FOR UPDATE SKIP LOCKED) skips the row while it is held."""
+        return _row(connection.execute(f"SELECT {_COLUMNS} FROM public.bunny_publisher_jobs WHERE job_id = %s "
+                                       "FOR UPDATE NOWAIT", (job_id,)).fetchone())
+
+    def operator_cancel(self, connection, job_id, *, actor: str, reason: str, detail: dict | None = None) -> dict | None:
+        """
+        QUEUED / RETRY_WAIT and unleased -> CANCELLED (terminal: never claimed, never re-enqueued),
+        with one OPERATOR_CANCEL event. None when the job is not in a cancellable state. The caller
+        decides eligibility and holds the row lock (lock_job) in the same transaction.
+        """
+        job = _row(connection.execute(f"""
+            UPDATE public.bunny_publisher_jobs
+               SET status = 'CANCELLED', finished_at = now(), updated_at = now(), next_attempt_at = NULL,
+                   locked_by = NULL, locked_at = NULL
+             WHERE job_id = %s AND status IN ('QUEUED', 'RETRY_WAIT') AND locked_by IS NULL
+         RETURNING {_COLUMNS}""", (job_id,)).fetchone())
+        if job is not None:
+            self.event(connection, "OPERATOR_CANCEL", job_id=job_id, lecture_id=job["lecture_id"], actor=actor,
+                       detail={"job_kind": job["job_kind"], "reason": reason[:300], **(detail or {})})
+        return job
+
     def latest(self, connection, job_kind: str, subject_key: str) -> dict | None:
         """The most recent job of this kind for the subject, whatever its status."""
         return _row(connection.execute(

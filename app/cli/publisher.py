@@ -9,6 +9,7 @@ media runner; deliberately not a sub-command of app.cli.main).
     python -m app.cli.publisher lecture         --lecture-id ID
     python -m app.cli.publisher exceptions
     python -m app.cli.publisher retry           --job-id ID --actor NAME --reason TEXT
+    python -m app.cli.publisher cancel          --job-id ID --actor NAME --reason TEXT   (blocked duplicates only)
     python -m app.cli.publisher decide-part     --lecture-id ID --part N --decision INCLUDE|EXCLUDE --actor --reason
     python -m app.cli.publisher reconcile       --kind light|full
     python -m app.cli.publisher pilot-manifest  --manifest PATH --library-id N [--apply --actor NAME]
@@ -46,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     retry.add_argument("--job-id", required=True)
     retry.add_argument("--actor", required=True)
     retry.add_argument("--reason", required=True)
+    cancel = sub.add_parser("cancel", help="operator cancel of a waiting job of a conclusively blocked "
+                                           "calendar duplicate with no Teams meeting (audited)")
+    cancel.add_argument("--job-id", required=True)
+    cancel.add_argument("--actor", required=True)
+    cancel.add_argument("--reason", required=True)
     decide = sub.add_parser("decide-part", help="operator INCLUDE / EXCLUDE of one recording part (audited)")
     decide.add_argument("--lecture-id", required=True)
     decide.add_argument("--part", required=True, type=int)
@@ -122,6 +128,11 @@ def main(argv=None) -> int:
             with _connect(config) as connection:
                 connection.autocommit = True
                 return _print(operations.operator_retry(connection, args.job_id, actor=args.actor, reason=args.reason))
+        if args.command == "cancel":
+            with _connect(config) as connection:
+                connection.autocommit = True        # operator_cancel runs its own transaction
+                return _print(operations.operator_cancel(connection, args.job_id, actor=args.actor,
+                                                         reason=args.reason))
         if args.command == "decide-part":
             with _connect(config) as connection:
                 connection.autocommit = True

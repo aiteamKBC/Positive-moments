@@ -140,6 +140,65 @@ def operator_retry(connection, job_id, *, actor: str, reason: str) -> dict:
     return _job(reopened)
 
 
+CANCELLABLE = ("QUEUED", "RETRY_WAIT")
+
+
+def operator_cancel(connection, job_id, *, actor: str, reason: str) -> dict:
+    """
+    Cancel ONE waiting job of a conclusively blocked calendar duplicate. Audited (OPERATOR_CANCEL).
+
+    Allowed only when, checked under the job's row lock in the same transaction as the transition:
+      * the job is QUEUED or RETRY_WAIT and not leased (a worker holding it -> refused, never waited on);
+      * its lecture exists, is not cancelled and has NO resolved Teams meeting;
+      * Lecture Intelligence's validated duplicate rule classifies that lecture as the clear loser
+        (case DUPLICATE_EVENT_SUPPRESSED, role SUPPRESSIBLE_DUPLICATE, no manual review) of a group
+        with a winner.
+    Legitimate lectures, ambiguous groups, RUNNING and finished jobs are refused. Nothing is deleted:
+    the lecture, its LMS evaluation and the job's history stay as they are.
+    """
+    import psycopg
+
+    from app.lectures.duplicate_service import DuplicateResolutionService
+    from app.lectures.duplicates import CASE_SUPPRESSED
+    actor, reason = str(actor or "").strip(), str(reason or "").strip()
+    if not actor or not reason:
+        raise OperatorActionRefused("ACTOR_AND_REASON_REQUIRED", "a cancellation needs an actor and a reason")
+    queue = PublisherQueueRepository()
+    try:
+        with connection.transaction():
+            connection.execute("SET LOCAL lock_timeout = '2s'")
+            job = queue.lock_job(connection, job_id)
+            if job is None:
+                raise OperatorActionRefused("JOB_NOT_FOUND", "no such job")
+            if job["status"] not in CANCELLABLE or job["locked_by"] is not None:
+                raise OperatorActionRefused("JOB_NOT_CANCELLABLE", f"job is {job['status']}; only an unleased "
+                                                                    "QUEUED or RETRY_WAIT job can be cancelled")
+            if job["lecture_id"] is None:
+                raise OperatorActionRefused("NOT_A_LECTURE_JOB", "the job belongs to no lecture")
+            lecture_id = str(job["lecture_id"])
+            lecture = connection.execute("SELECT is_cancelled, meeting_id IS NOT NULL FROM public.lecture_sessions "
+                                         "WHERE lecture_id = %s FOR SHARE", (lecture_id,)).fetchone()
+            if lecture is None:
+                raise OperatorActionRefused("LECTURE_NOT_FOUND", "the job's lecture does not exist")
+            if lecture[1]:
+                raise OperatorActionRefused("MEETING_RESOLVED", "the lecture has a resolved Teams meeting: "
+                                                                "its recording and transcript can exist")
+            decision = DuplicateResolutionService().classify_lecture(connection, lecture_id)
+            if not (decision["case"] == CASE_SUPPRESSED and decision["role"] == "SUPPRESSIBLE_DUPLICATE"
+                    and not decision["requires_manual_review"] and decision.get("winner")):
+                raise OperatorActionRefused("NOT_A_BLOCKED_DUPLICATE",
+                                            f"the lecture is not a conclusively blocked duplicate "
+                                            f"(case {decision['case']}, role {decision['role']})")
+            cancelled = queue.operator_cancel(connection, job_id, actor=actor[:120], reason=reason, detail={
+                "previous_status": job["status"], "attempt_count": job["attempt_count"],
+                "duplicate_case": decision["case"], "duplicate_role": decision["role"]})
+            if cancelled is None:
+                raise OperatorActionRefused("JOB_NOT_CANCELLABLE", "the job changed state; nothing was cancelled")
+    except psycopg.errors.LockNotAvailable:
+        raise OperatorActionRefused("JOB_BUSY", "a worker holds the job right now; nothing was cancelled") from None
+    return _job(cancelled)
+
+
 def decide_part(connection, lecture_id, part_index: int, *, decision: str, actor: str, reason: str) -> dict:
     """INCLUDE / EXCLUDE one recording part (the fragment policy never decides this alone). Audited."""
     decision = str(decision or "").upper()

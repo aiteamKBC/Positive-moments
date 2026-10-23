@@ -34,7 +34,7 @@ from app.publisher.bunny_jobs import (
 from app.publisher.config import SHADOW, STAGING_WRITE, PublisherConfig
 from app.publisher.daemon import DISCOVERY, RECONCILE_FULL, PublisherDaemon
 from app.publisher.handlers import (
-    BUNNY_PRIORITY, MAX_ATTEMPTS, BunnyJobHandler, RecordingJobHandler, TranscriptJobHandler, part_subject_key,
+    BUNNY_PRIORITY, LIVE_PRIORITY, MAX_ATTEMPTS, BunnyJobHandler, RecordingJobHandler, TranscriptJobHandler, part_subject_key,
 )
 from app.publisher.planner import CalendarDiscovery, ConflictTolerantLectureRepository, Planner
 from app.publisher.reconcile import AlertDispatcher, Reconciler
@@ -1055,6 +1055,134 @@ def test_a_succeeded_job_drops_its_stale_error_and_the_event_log_keeps_it(url):
     history = world.q("SELECT e.detail::text FROM public.bunny_publisher_events e JOIN public.bunny_publisher_jobs j "
                       "USING (job_id) WHERE j.lecture_id = %s AND j.job_kind = 'ACQUIRE_TRANSCRIPT'", world.lecture_id)
     assert any(code in text for (text,) in history)                         # the earlier reason is still on record
+
+
+# =========================================================================== P1: audited operator cancel
+CANCEL_ACTOR, CANCEL_REASON = "Test Operator", "blocked duplicate invitation; no Teams meeting"
+
+
+def _stale_job(world, lecture_id, kind="ACQUIRE_TRANSCRIPT", *, retry_wait=True):
+    """A track job of the kind created before the planner skipped blocked duplicates."""
+    with psycopg.connect(world.url, autocommit=True) as c:
+        job, _ = PublisherQueueRepository().enqueue(c, job_kind=kind, subject_key=f"lecture:{lecture_id}",
+                                                    lecture_id=lecture_id, priority=LIVE_PRIORITY,
+                                                    max_attempts=MAX_ATTEMPTS)
+        if retry_wait:
+            c.execute("UPDATE public.bunny_publisher_jobs SET status = 'RETRY_WAIT', attempt_count = 5, "
+                      "next_attempt_at = now() + interval '3 minutes', last_error_code = 'MEETING_NOT_RESOLVED' "
+                      "WHERE job_id = %s", (job["job_id"],))
+    return str(job["job_id"])
+
+
+def _cancel(world, job_id, actor=CANCEL_ACTOR, reason=CANCEL_REASON):
+    with psycopg.connect(world.url, autocommit=True) as c:
+        return operations.operator_cancel(c, job_id, actor=actor, reason=reason)
+
+
+def _refused(world, job_id, **kw):
+    with pytest.raises(operations.OperatorActionRefused) as refusal:
+        _cancel(world, job_id, **kw)
+    return refusal.value.code
+
+
+def _job_row(world, job_id):
+    return world.q("SELECT status, finished_at IS NOT NULL, next_attempt_at, locked_by FROM public.bunny_publisher_jobs "
+                   "WHERE job_id = %s", job_id)[0]
+
+
+def test_operator_cancel_closes_a_blocked_duplicates_waiting_jobs_audited(url):
+    world = _one_part_world(url)
+    _confirm_organizer(world)
+    loser = _sibling(world, with_meeting=False)
+    transcript, recording = _stale_job(world, loser), _stale_job(world, loser, "RESOLVE_RECORDING", retry_wait=False)
+    for job_id, previous in ((transcript, "RETRY_WAIT"), (recording, "QUEUED")):
+        done = _cancel(world, job_id)
+        assert done["status"] == "CANCELLED" and done["lecture_id"] == loser
+        assert _job_row(world, job_id) == ("CANCELLED", True, None, None)
+        [(actor, detail)] = world.q("SELECT actor, detail FROM public.bunny_publisher_events WHERE job_id = %s "
+                                    "AND event = 'OPERATOR_CANCEL'", job_id)
+        assert actor == CANCEL_ACTOR and detail["reason"] == CANCEL_REASON and detail["previous_status"] == previous
+        assert (detail["duplicate_case"], detail["duplicate_role"]) == (CASE_SUPPRESSED, "SUPPRESSIBLE_DUPLICATE")
+    # Never reclaimed, never recreated; the lecture, its job history and the winner are untouched.
+    world.clock.advance(timedelta(hours=2))
+    world.run(rounds=4)
+    assert world.q("SELECT job_kind, status FROM public.bunny_publisher_jobs WHERE lecture_id = %s ORDER BY job_kind",
+                   loser) == [("ACQUIRE_TRANSCRIPT", "CANCELLED"), ("RESOLVE_RECORDING", "CANCELLED")]
+    assert world.q("SELECT count(*) FROM public.lecture_sessions WHERE lecture_id = %s", loser) == [(1,)]
+    assert world.ready() and len(world.bunny.fetch_calls) == 1
+    assert _refused(world, transcript) == "JOB_NOT_CANCELLABLE"                     # already terminal
+
+
+def test_operator_cancel_refuses_running_leased_and_finished_jobs(url):
+    world = _one_part_world(url)
+    _confirm_organizer(world)
+    loser = _sibling(world, with_meeting=False)
+    job_id = _stale_job(world, loser, retry_wait=False)
+    with psycopg.connect(url, autocommit=True) as c:
+        claimed = PublisherQueueRepository().claim(c, "worker-x", ["ACQUIRE_TRANSCRIPT"])
+    assert str(claimed["job_id"]) == job_id
+    assert _refused(world, job_id) == "JOB_NOT_CANCELLABLE" and _job_row(world, job_id)[0] == "RUNNING"
+    with psycopg.connect(url, autocommit=True) as c:
+        PublisherQueueRepository().succeed(c, job_id, "worker-x")
+    assert _refused(world, job_id) == "JOB_NOT_CANCELLABLE" and _job_row(world, job_id)[0] == "SUCCEEDED"
+    assert world.q("SELECT count(*) FROM public.bunny_publisher_events WHERE event = 'OPERATOR_CANCEL'") == [(0,)]
+
+
+def test_operator_cancel_refuses_legitimate_and_ambiguous_lectures_and_needs_actor_and_reason(url):
+    world = _one_part_world(url)
+    _confirm_organizer(world)
+    world.run(rounds=1)
+    legit = _stale_job(world, world.lecture_id, "RESOLVE_RECORDING")             # resolved meeting
+    assert _refused(world, legit) == "MEETING_RESOLVED"
+    _sibling(world, with_meeting=True)                                           # a second valid meeting
+    unresolved_member = _sibling(world, with_meeting=False)                       # ... makes the group ambiguous
+    ambiguous = _stale_job(world, unresolved_member)
+    assert _refused(world, ambiguous) == "NOT_A_BLOCKED_DUPLICATE"
+    loner = World(url, lms=False, start=START + timedelta(days=2), end=END + timedelta(days=2))   # no group at all
+    with psycopg.connect(url, autocommit=True) as c:
+        c.execute("UPDATE public.lecture_sessions SET meeting_id = NULL, downstream_ready = false, "
+                  "calendar_mapping_status = 'ONLINE_MEETING_NOT_FOUND', discovery_status = 'REVIEW' "
+                  "WHERE lecture_id = %s", (loner.lecture_id,))
+    assert _refused(world, _stale_job(world, loner.lecture_id)) == "NOT_A_BLOCKED_DUPLICATE"
+    loser_world = _one_part_world(url)
+    _confirm_organizer(loser_world)
+    blocked = _stale_job(loser_world, _sibling(loser_world, with_meeting=False))
+    assert _refused(loser_world, blocked, actor=" ") == "ACTOR_AND_REASON_REQUIRED"
+    assert _refused(loser_world, blocked, reason="") == "ACTOR_AND_REASON_REQUIRED"
+    assert _job_row(loser_world, blocked)[0] == "RETRY_WAIT"
+    assert world.q("SELECT count(*) FROM public.bunny_publisher_events WHERE event = 'OPERATOR_CANCEL'") == [(0,)]
+
+
+def test_operator_cancel_and_a_worker_claim_never_both_win(url):
+    world = _one_part_world(url)
+    _confirm_organizer(world)
+    loser = _sibling(world, with_meeting=False)
+    queue = PublisherQueueRepository()
+    # 1. A worker's claim holds the row: the cancel is refused at once, never waits, changes nothing.
+    first = _stale_job(world, loser, retry_wait=False)
+    worker = psycopg.connect(url)
+    try:
+        claimed = queue.claim(worker, "worker-a", ["ACQUIRE_TRANSCRIPT"])        # transaction still open
+        assert str(claimed["job_id"]) == first
+        assert _refused(world, first) == "JOB_BUSY"
+    finally:
+        worker.rollback()
+        worker.close()
+    assert _job_row(world, first)[0] == "QUEUED"
+    # 2. The cancel holds the row: a claim skips it, and after the cancel it is never claimable.
+    operator = psycopg.connect(url)
+    try:
+        assert str(queue.lock_job(operator, first)["job_id"]) == first           # operator's lock, txn open
+        with psycopg.connect(url, autocommit=True) as c:
+            assert queue.claim(c, "worker-b", ["ACQUIRE_TRANSCRIPT"]) is None    # SKIP LOCKED
+    finally:
+        operator.rollback()
+        operator.close()
+    assert _cancel(world, first)["status"] == "CANCELLED"
+    with psycopg.connect(url, autocommit=True) as c:
+        assert queue.claim(c, "worker-c", ["ACQUIRE_TRANSCRIPT"]) is None
+        assert not queue.enqueue_once(c, job_kind="ACQUIRE_TRANSCRIPT", subject_key=f"lecture:{loser}",
+                                      lecture_id=loser, priority=LIVE_PRIORITY, max_attempts=MAX_ATTEMPTS)
 
 
 # =========================================================================== P0-G: db-smoke
