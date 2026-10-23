@@ -7,7 +7,7 @@ there is no route here that will perform an action named by the caller.
 """
 from django.urls import path
 
-from . import actions, backfill_views, media_views, views
+from . import actions, backfill_views, media_views, publisher_views, views
 
 urlpatterns = [
     path("day/", views.day_view, name="operations-day"),
@@ -81,4 +81,17 @@ urlpatterns = [
     path("backfills/<uuid:run_id>/recording-links/",
          backfill_views.backfill_recording_links_view,
          name="operations-backfill-recording-links"),
+
+    # Continuous Bunny Publisher (P0-D). Reads are READ ONLY; the two actions are audited.
+    path("publisher/status/", publisher_views.status_view, name="operations-publisher-status"),
+    path("publisher/pending/", publisher_views.pending_view, name="operations-publisher-pending"),
+    path("publisher/exceptions/", publisher_views.exceptions_view, name="operations-publisher-exceptions"),
+    path("publisher/lectures/<uuid:lecture_id>/", publisher_views.lecture_view,
+         name="operations-publisher-lecture"),
+    path("publisher/jobs/<uuid:job_id>/history/", publisher_views.job_history_view,
+         name="operations-publisher-job-history"),
+    path("publisher/jobs/<uuid:job_id>/retry/", publisher_views.job_retry_view,
+         name="operations-publisher-job-retry"),
+    path("publisher/lectures/<uuid:lecture_id>/parts/<int:part_index>/decision/",
+         publisher_views.part_decision_view, name="operations-publisher-part-decision"),
 ]

@@ -64,94 +64,8 @@ class TranscriptSelectionService:
             "multi_part_selections": 0, "legacy_parity_matched": 0,
             "legacy_parity_total": 0, "error_count": 0,
         }
-        results: list[dict] = []
-
-        for lecture in ready:
-            candidates = self.selection_repository.load_candidates(connection, lecture.lecture_id)
-            outcome = select_transcript_parts(
-                candidates,
-                scheduled_start=lecture.scheduled_start,
-                scheduled_end=lecture.scheduled_end,
-                target_date=lecture.session_date,
-                meeting_id=lecture.meeting_id,
-            )
-            result = {
-                "lecture_id": str(lecture.lecture_id),
-                "subject": lecture.subject,
-                "module": lecture.module,
-                "scheduled_start": lecture.scheduled_start.isoformat(),
-                "scheduled_end": lecture.scheduled_end.isoformat(),
-                "selection_status": outcome.status,
-                **outcome.diagnostics,
-            }
-            if outcome.status != SELECTED:
-                result["selected_parts_count"] = 0
-                results.append(result)
-                if persist:
-                    selection_id = selection_identity(
-                        lecture_id=lecture.lecture_id, selection_version=self.selection_version)
-                    written = self.selection_repository.upsert_selection(
-                        connection, selection_id, lecture.lecture_id,
-                        selection_version=self.selection_version, primary_artifact_id=None,
-                        primary_provider_transcript_id=None, selection_status=outcome.status,
-                        diagnostics=outcome.diagnostics, parts=[], combined=None)
-                    counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
-                continue
-
-            combined, part_rows, combine_error = self._combine(connection, outcome)
-            if combine_error:
-                counters["error_count"] += 1
-                result["combine_error"] = combine_error
-                result["selection_status"] = COMBINE_FAILED
-
-            if len(outcome.parts) > 1:
-                counters["multi_part_selections"] += 1
-
-            result.update({
-                "selected_parts_count": len(outcome.parts),
-                "combined_duration_seconds": combined["duration_seconds"] if combined else None,
-                "combined_duration_minutes": combined["duration_minutes"] if combined else None,
-                "combined_content_bytes": combined["content_bytes"] if combined else None,
-                "combined_content_sha256_prefix": combined["content_sha256"][:12] if combined else None,
-                "combined_from_parts": combined["parts_combined"] if combined else 0,
-                "is_multi_part": bool(combined and combined["parts_combined"] > 1),
-                "part_offsets_ms": [row["part_offset_ms"] for row in part_rows],
-            })
-
-            if persist:
-                selection_id = selection_identity(
-                    lecture_id=lecture.lecture_id, selection_version=self.selection_version)
-                # COMBINE_FAILED selected nothing usable - typically a part whose
-                # content has not been fetched yet - so it is stored the way
-                # every other non-SELECTED answer is: no primary, no parts. The
-                # table's own CHECK requires exactly that, and storing the parts
-                # anyway failed the statement and, with it, the whole cycle.
-                failed = combine_error is not None
-                written = self.selection_repository.upsert_selection(
-                    connection, selection_id, lecture.lecture_id,
-                    selection_version=self.selection_version,
-                    primary_artifact_id=None if failed else outcome.primary.candidate.artifact_id,
-                    primary_provider_transcript_id=(
-                        None if failed else outcome.primary.candidate.provider_transcript_id),
-                    selection_status=result["selection_status"],
-                    diagnostics=({**outcome.diagnostics, "combine_error": combine_error,
-                                  "combine_failure": combine_failure_kind(combine_error)}
-                                 if failed else outcome.diagnostics),
-                    parts=[] if failed else part_rows, combined=combined)
-                counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
-                if combined:
-                    stored = self.selection_repository.upsert_combined(
-                        connection, selection_id, lecture.lecture_id,
-                        selection_version=self.selection_version, combined=combined,
-                        source_fingerprint=combined["source_fingerprint"],
-                        speaker_attribution=combined["speaker_attribution"],
-                        metadata={"part_offsets_ms": combined["part_offsets_ms"],
-                                  "selection_method": self.selection_version})
-                    counters["combined_transcripts_reused" if stored == "reused"
-                             else "combined_transcripts_created"] += 1
-                result["selection_id"] = str(selection_id)
-                result["persistence"] = written
-            results.append(result)
+        results: list[dict] = [self.select_lecture(connection, lecture, counters, persist=persist)
+                               for lecture in ready]
 
         parity = None
         if self.qa_evidence_repository is not None:
@@ -190,6 +104,99 @@ class TranscriptSelectionService:
             "duration_ms": summary["duration_ms"],
         }})
         return summary
+
+    def select_lecture(self, connection, lecture, counters: dict, *, persist: bool = True) -> dict:
+        """
+        Select, combine and (when persisting) store ONE lecture's transcript.
+
+        The body `select_day` runs for each ready lecture, unchanged; the
+        Continuous Publisher calls it for a single lecture. DB-only: no Graph.
+        `counters` is updated in place exactly as the day run counts it.
+        """
+        candidates = self.selection_repository.load_candidates(connection, lecture.lecture_id)
+        outcome = select_transcript_parts(
+            candidates,
+            scheduled_start=lecture.scheduled_start,
+            scheduled_end=lecture.scheduled_end,
+            target_date=lecture.session_date,
+            meeting_id=lecture.meeting_id,
+        )
+        result = {
+            "lecture_id": str(lecture.lecture_id),
+            "subject": lecture.subject,
+            "module": lecture.module,
+            "scheduled_start": lecture.scheduled_start.isoformat(),
+            "scheduled_end": lecture.scheduled_end.isoformat(),
+            "selection_status": outcome.status,
+            **outcome.diagnostics,
+        }
+        if outcome.status != SELECTED:
+            result["selected_parts_count"] = 0
+            if persist:
+                selection_id = selection_identity(
+                    lecture_id=lecture.lecture_id, selection_version=self.selection_version)
+                written = self.selection_repository.upsert_selection(
+                    connection, selection_id, lecture.lecture_id,
+                    selection_version=self.selection_version, primary_artifact_id=None,
+                    primary_provider_transcript_id=None, selection_status=outcome.status,
+                    diagnostics=outcome.diagnostics, parts=[], combined=None)
+                counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
+            return result
+
+        combined, part_rows, combine_error = self._combine(connection, outcome)
+        if combine_error:
+            counters["error_count"] += 1
+            result["combine_error"] = combine_error
+            result["selection_status"] = COMBINE_FAILED
+
+        if len(outcome.parts) > 1:
+            counters["multi_part_selections"] += 1
+
+        result.update({
+            "selected_parts_count": len(outcome.parts),
+            "combined_duration_seconds": combined["duration_seconds"] if combined else None,
+            "combined_duration_minutes": combined["duration_minutes"] if combined else None,
+            "combined_content_bytes": combined["content_bytes"] if combined else None,
+            "combined_content_sha256_prefix": combined["content_sha256"][:12] if combined else None,
+            "combined_from_parts": combined["parts_combined"] if combined else 0,
+            "is_multi_part": bool(combined and combined["parts_combined"] > 1),
+            "part_offsets_ms": [row["part_offset_ms"] for row in part_rows],
+        })
+
+        if persist:
+            selection_id = selection_identity(
+                lecture_id=lecture.lecture_id, selection_version=self.selection_version)
+            # COMBINE_FAILED selected nothing usable - typically a part whose
+            # content has not been fetched yet - so it is stored the way
+            # every other non-SELECTED answer is: no primary, no parts. The
+            # table's own CHECK requires exactly that, and storing the parts
+            # anyway failed the statement and, with it, the whole cycle.
+            failed = combine_error is not None
+            written = self.selection_repository.upsert_selection(
+                connection, selection_id, lecture.lecture_id,
+                selection_version=self.selection_version,
+                primary_artifact_id=None if failed else outcome.primary.candidate.artifact_id,
+                primary_provider_transcript_id=(
+                    None if failed else outcome.primary.candidate.provider_transcript_id),
+                selection_status=result["selection_status"],
+                diagnostics=({**outcome.diagnostics, "combine_error": combine_error,
+                              "combine_failure": combine_failure_kind(combine_error)}
+                             if failed else outcome.diagnostics),
+                parts=[] if failed else part_rows, combined=combined)
+            counters[f"selections_{'created' if written == 'created' else 'updated'}"] += 1
+            if combined:
+                stored = self.selection_repository.upsert_combined(
+                    connection, selection_id, lecture.lecture_id,
+                    selection_version=self.selection_version, combined=combined,
+                    source_fingerprint=combined["source_fingerprint"],
+                    speaker_attribution=combined["speaker_attribution"],
+                    metadata={"part_offsets_ms": combined["part_offsets_ms"],
+                              "selection_method": self.selection_version})
+                counters["combined_transcripts_reused" if stored == "reused"
+                         else "combined_transcripts_created"] += 1
+            result["selection_id"] = str(selection_id)
+            result["persistence"] = written
+        return result
 
     def _combine(self, connection, outcome):
         """Load each selected part's stored raw VTT and combine it. No Graph."""

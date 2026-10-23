@@ -37,6 +37,44 @@ from tests.integration.seeding import (
     seed_legacy_row,
     seed_transcript_document,
 )
+from tests.integration.committed_cleanup import committed_lecture_ids, purge_lectures
+
+
+# ---------------------------------------------------------------------------
+# committed-data hygiene. submit() commits by design (the double-spend guard),
+# which commits everything the test had seeded on that connection - lectures
+# on the shared fixture DAY included. Left behind, they broke unrelated suites
+# (day-scoped selection hit their seeded selection rows) and later claims here.
+# ---------------------------------------------------------------------------
+
+def _committed_view():
+    url = Settings.from_environment().database_url
+    return psycopg.connect(url, autocommit=True) if url else None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _purge_leftovers_from_earlier_runs():
+    """Lectures this module committed in an earlier run that ended before its cleanup."""
+    connection = _committed_view()
+    if connection is not None:
+        with connection:
+            leftovers = [row[0] for row in connection.execute(
+                "SELECT DISTINCT lecture_id FROM public.positive_moment_analyses "
+                "UNION SELECT DISTINCT lecture_id FROM public.positive_moment_media_jobs").fetchall()]
+            purge_lectures(connection, leftovers, with_artifacts=True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _purge_what_this_test_committed():
+    connection = _committed_view()
+    if connection is None:
+        yield
+        return
+    with connection:
+        before = committed_lecture_ids(connection)
+        yield
+        purge_lectures(connection, committed_lecture_ids(connection) - before, with_artifacts=True)
 
 UTC = timezone.utc
 LEARNER = "Synthetic Learner Amy"

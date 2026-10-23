@@ -1,0 +1,59 @@
+# KBC Continuous Bunny Publisher - daily continuous production (P1).
+#
+# Teams calendar discovery + LMS matching every 5 min (Africa/Cairo lecture days, rolling,
+# with lookback/catch-up), independent transcript and recording acquisition, Bunny import
+# (at most PUBLISHER_MAX_IMPORTS_IN_FLIGHT), encoding verification and caption publication,
+# light reconciliation every 6 h and a full one daily at 05:00 Cairo.
+#
+# Independent of QA: it neither starts, waits for nor stops positive-moments-scheduler /
+# -backfill / -media, and their 21:00 / 23:00 cycle never pauses it. One instance only: the
+# PostgreSQL queue leases plus per-lecture advisory locks (Neon DIRECT endpoint) make a second
+# copy safe but pointless - do not run one anywhere else.
+#
+# Mode, database, Graph and Bunny settings come ONLY from the EnvironmentFile (root:www-data, 0640).
+
+[Unit]
+Description=KBC Continuous Bunny Publisher
+After=network-online.target
+Wants=network-online.target
+# A crash loop stops after 5 failed starts in 10 minutes instead of hammering Graph / Bunny.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+WorkingDirectory=/var/www/Positive-moments
+
+EnvironmentFile=/var/www/Positive-moments/backend/config/publisher.env
+Environment="PYTHONPATH=/var/www/Positive-moments"
+Environment="PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
+Environment="TZ=Africa/Cairo"
+Environment="PYTHONUNBUFFERED=1"
+
+# Refuses to start on an invalid configuration (exit 2: pooled DB URL, forbidden library,
+# missing keys ...); systemd then shows the reason and does not restart.
+ExecStartPre=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.publisher validate-config
+ExecStart=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.publisher run
+
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2
+# SIGTERM: the scheduler and workers stop taking work, finish the step in hand and record a
+# stopped heartbeat; any job still leased is reclaimed from PostgreSQL on the next start.
+KillSignal=SIGTERM
+TimeoutStopSec=180
+
+# Logs: stdout/stderr to journald (journalctl -u bunny-publisher).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bunny-publisher
+
+MemoryMax=512M
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
