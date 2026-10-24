@@ -144,6 +144,24 @@ systemctl restart --no-block bunny-publisher.service
 
 ## Phase D: release, then turn learner playback on
 
+**Integration-testing variant (Kent decision, 24 Oct 2026):** release the seven verified lectures and turn the playback switch on, so the LMS team can integrate and test signed playback.
+- Learners still reach nothing until the LMS enforces login and enrolment and signs embeds.
+- The full-length staff browser acceptance (step 1 below) moves to the LMS team, before learner access.
+
+Run as root on the VPS, in this order:
+```bash
+cd /var/www/Positive-moments && git pull --ff-only
+sudo bash deploy/harden_api_https.sh inspect     # read-only: vhost, config file, listeners, current answers
+sudo bash deploy/harden_api_https.sh apply       # HTTP /api/publisher/ -> 403 at the web server; HTTP pages -> 301 HTTPS
+sudo bash deploy/activate_phase_d.sh check       # read-only: the seven READY, verified, same video IDs, library secure
+sudo bash deploy/activate_phase_d.sh apply "<your name>"   # release the seven, playback flag on, restart Django only, verify
+```
+- `activate_phase_d.sh apply` refuses while plain HTTP still reaches the Publisher API.
+- It uses only the audited `release` command, which re-checks verification and library security per lecture.
+- It restarts only `positive-moments.service`, never the publisher or the QA units.
+- Each script prints its own rollback.
+- `activate_phase_d.sh verify` re-runs the public HTTPS checks at any time.
+
 1. **Staff playback test** on one lecture: checklist steps 8–9, and every long-playback live check in [the LMS guide, §6](../docs/integration/LMS_INTEGRATION_GUIDE.md#6-long-playback-pause-seek-resume-and-token-expiry):
    ```bash
    sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/config/publisher.env \

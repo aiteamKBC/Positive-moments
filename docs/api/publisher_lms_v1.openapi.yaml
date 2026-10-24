@@ -16,8 +16,8 @@ servers:
   - url: https://{host}/api/publisher/v1
     variables:
       host:
-        default: example.invalid
-        description: The Positive Moments backend host (confirmed at deployment).
+        default: positive-moments.kentbusinesscollege.net
+        description: The Positive Moments backend host. HTTPS only; plain-HTTP requests to /api/publisher/ are refused (403).
 security:
   - lmsServiceToken: []
 paths:

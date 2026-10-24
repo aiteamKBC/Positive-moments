@@ -1,6 +1,40 @@
 # LMS Backend Integration Guide: lecture recordings from Bunny Stream
 
-**For:** the Kent LMS backend team. **Contract:** v1 ([OpenAPI](../api/publisher_lms_v1.openapi.yaml)). **Status:** implemented and tested on a local copy; not yet deployed (see [the rollout runbook](../../deploy/DELIVERY_ROLLOUT.md)).
+**For:** the Kent LMS backend team. **Contract:** v1 ([OpenAPI](../api/publisher_lms_v1.openapi.yaml)). **Status:** deployed in production; seven verified lectures released for LMS integration testing (see *Start here*).
+
+## Start here: integration-testing status (24 Oct 2026)
+
+**Base URL (HTTPS only):** `https://positive-moments.kentbusinesscollege.net/api/publisher/v1`
+- Plain `http://` requests to `/api/publisher/` are refused by the web server (403) before they reach the API.
+- Never send the service token over HTTP. A token that was sent over HTTP even once must be rotated.
+
+**Released for integration testing:** these seven occurrences are `READY`, `RELEASED` and `playback.available: true`. Each has one published part, in library 786045, with a verified English caption track.
+
+| LMS occurrence | Lecture date |
+|---|---|
+| `OCC-4493AC65DF5041459BC5A14DA8B357A0` | 23 Oct 2026 |
+| `OCC-188B392FF4ED45A9B46C02E40072A1F9` | 23 Oct 2026 |
+| `OCC-774CB73AB0094A03A13F87E30B9FF4C0` | 23 Oct 2026 (Teams part 1 excluded; see §4) |
+| `OCC-EB064C5DE7B44E119E67F128896C592B` | 23 Oct 2026 |
+| `OCC-5FDA481E5B1145398AA108E04D19F9A4` | 23 Oct 2026 |
+| `OCC-075C8136DD8546FD834CC6B0E4B7DE18` | 23 Oct 2026 |
+| `OCC-B8C49F1C2ED4429786178B5914ED7368` | 23 Oct 2026 |
+
+Every other occurrence stays unavailable until Kent releases it. New lectures are imported and verified automatically, but never released automatically.
+
+**What `playback.available: true` means:** Kent's side is finished. The recording is verified, released and delivered from a library that passes the security check.
+
+**What it does not mean:** that any particular person may watch it. The API is server to server and knows nothing about learners. **Learner login, enrolment and entitlement checks are entirely the LMS's responsibility**, and they come before every signature (see *Learner access control* below). Nothing in the Publisher bypasses or replaces them.
+
+**Still the LMS's to do before learners see a recording:**
+1. Enforce login and enrolment, then sign server side (§5, *Secrets*).
+2. Run the full-length staff browser acceptance (§6, *Live checks*). Kent has verified the token behaviour at the HTTP level:
+   - an unsigned, expired or wrong-video token gets 403;
+   - a correctly signed URL from the LMS domain gets 200;
+   - a correct signature from another domain, or with no referrer, gets 403.
+
+   **No real browser has played a full lecture yet.**
+3. Answer §10.
 
 ## 1. What changes for learners
 
@@ -9,7 +43,9 @@ Bunny Stream becomes the primary playback source for recorded live sessions. Tea
 **Where it lives:**
 - **Library:** every recording is delivered from Bunny library **786045**.
 - **Captions:** each part has an English caption track, verified against the transcript.
-- **Hidden until released:** a recording reaches learners only after it's *released*. Learner playback is also switched off globally until Kent turns it on.
+- **Hidden until released:** a recording reaches learners only after it's *released*, and only while Kent's global delivery switch is on.
+  - The switch was turned on on 24 Oct 2026 for the seven lectures above.
+  - Kent can withdraw any lecture immediately, or turn the switch off for all lectures.
 
 ## 2. Who does what
 
@@ -31,6 +67,9 @@ GET {base}/api/publisher/v1/occurrences/{lms_occurrence_id}/recording
 Authorization: Bearer <PUBLISHER_SERVICE_TOKEN>
 ```
 
+`{base}` is `https://positive-moments.kentbusinesscollege.net`.
+- **HTTPS only:** certificate verification on, and never `http://`.
+
 **The ID:**
 - `lms_occurrence_id` is your `curriculum.live_session_occurrences.id`, e.g. `OCC-4493AC65DF5041459BC5A14DA8B357A0`.
 - Look up by occurrence, never by `live_session_id`: a live session is a weekly series, and an occurrence is one lecture.
@@ -50,7 +89,7 @@ Authorization: Bearer <PUBLISHER_SERVICE_TOKEN>
 | `429` | Rate limit (default 600/min per token) | Back off; honour `Retry-After` |
 | `503 NOT_CONFIGURED` / `PLATFORM_UNAVAILABLE` | Temporary | Retry with backoff; treat as not playable |
 
-Every response is `Cache-Control: no-store`. If you cache answers, keep them for at most a few minutes, and always re-ask at playback time. A withdrawal must take effect immediately.
+Treat every response as `Cache-Control: no-store`. The API sends `no-store`, but the web server currently rewrites it to `no-cache` on the way out. If you cache answers, keep them for at most a few minutes, and always re-ask at playback time. A withdrawal must take effect immediately.
 
 ## 4. Reading the answer
 
@@ -132,7 +171,12 @@ URL     = https://player.mediadelivery.net/embed/{library_id}/{video_id}?token={
 - **Lifetime:** sign one URL per part, per request, valid for 5–15 minutes, and only after the enrolment check passes.
 - **Referrer:** the iframe must be served from `lms.kentbusinesscollege.org`, the only allowed domain. Requests without a referrer are blocked, subject to browser testing.
 - **Host:** always embed via `player.mediadelivery.net`, never the legacy `iframe.mediadelivery.net`.
-- **Keep GUIDs confidential:** don't log `video_id` in the browser and don't put it in shareable links. For this rollout, CDN token authentication is **deferred**: the video files behind the player are protected only by the referrer rule, so a leaked GUID plus a forged `Referer` header is enough to download a recording (see the [security checklist](BUNNY_786045_SECURITY_CHECKLIST.md#residual-risk-while-cdn-token-authentication-is-deferred)).
+- **Keep GUIDs confidential:** don't log `video_id` in the browser and don't put it in shareable links.
+- **Known risk while CDN token authentication is deferred:** the embed token protects only the *player page*. The files behind it are protected by the referrer rule alone.
+- **What a leaked GUID gives:** anyone with the GUID who forges a `Referer: https://lms.kentbusinesscollege.org/` header can fetch the HLS stream and the **original uploaded file**.
+- **Captions** are readable with the GUID alone.
+- **Where GUIDs leak:** an enrolled learner can see a GUID in their own browser's network tab.
+- **Mitigations:** treat GUIDs as confidential, and see the [security checklist](BUNNY_786045_SECURITY_CHECKLIST.md#residual-risk-while-cdn-token-authentication-is-deferred) for options; turning off *Keep original files* and moving to CDN tokens later are Kent decisions.
 
 **Working examples** (placeholders only): [Python](examples/lms_playback_example.py) · [Node.js](examples/lms_playback_example.mjs).
 
@@ -141,6 +185,57 @@ Both examples do the same four steps:
 2. Call the publisher API.
 3. Refuse unless `playback.available` is true.
 4. Sign each part.
+
+## Secrets: what you receive and how to hold them
+
+You receive two secrets. They are unrelated, and neither ever reaches a browser, a mobile app, a log line or Git.
+
+| | **Publisher API service token** | **Bunny embed signing key** |
+|---|---|---|
+| What it does | Lets your backend call `/api/publisher/v1/*` (`Authorization: Bearer …`) | Signs player URLs: `token = SHA256_HEX(key + video_id + expires)` |
+| Who issues it | Kent (Positive Moments platform) | The Bunny account owner (Kent): library 786045 > Security > *Token authentication key* |
+| What it can do if leaked | Read recording metadata for every occurrence (no video access, no write access) | Mint playable URLs for **any** video in library 786045, from the LMS domain |
+| Where it lives at Kent | `PUBLISHER_LMS_SERVICE_TOKENS` in the API's server environment (two may be valid at once) | Bunny. The Publisher never signs embeds. |
+| Rotation | Kent adds a second token, you switch, Kent removes the old one: no downtime | Kent regenerates it in Bunny and you update it in the **same** window: every URL signed with the old key stops working at once |
+
+**Transfer:**
+- **Channel:** one-time, expiring secret-sharing links (or the college password manager's shared vault), one secret per message, to a named recipient on the LMS backend team.
+- **Never** use email, Teams/Slack chat, tickets, documents or Git.
+- **Confirm receipt** on a separate channel, then delete the share.
+- **Exposure:** if either secret is ever pasted somewhere it shouldn't be, tell Kent and rotate it.
+
+**Storage on your side:**
+- **Where:** a secret manager or the server environment of the LMS backend only.
+- **Never:** in front-end bundles, mobile apps, client-side config, analytics or error-reporting payloads.
+- **Logging:** redact the `Authorization` header and the `token=` query parameter in your HTTP client and access logs.
+
+**Generating a signed URL (server side, after the enrolment check):**
+```python
+import hashlib, time
+expires = int(time.time()) + 600                       # 10 minutes; seconds, not milliseconds
+token = hashlib.sha256(f"{SIGNING_KEY}{video_id}{expires}".encode()).hexdigest()
+url = (f"https://player.mediadelivery.net/embed/786045/{video_id}"
+       f"?token={token}&expires={expires}&captions=en")  # + &t=<seconds> to resume
+```
+Return `url` only inside the page you render for that learner on `lms.kentbusinesscollege.org`. Never cache it or reuse it for another learner. The full flow is in the [Python](examples/lms_playback_example.py) and [Node.js](examples/lms_playback_example.mjs) examples.
+
+**Token expiry, multi-hour lectures, reloads and captions:** see §6. In short:
+- sign per page view;
+- the loaded player is expected to keep playing past `expires` (to be confirmed in the staff checks);
+- every reload or next part needs a fresh URL, using `t=` to resume;
+- add `captions=en` to show the English track by default.
+
+## Learner access control (the LMS's responsibility)
+
+Before signing, on **every** playback request, the LMS backend must:
+1. **Authenticate** the learner through the LMS's normal login. Never serve the player page to an anonymous session.
+2. **Check enrolment:** the learner must be enrolled on the module and cohort that owns *this* `lms_occurrence_id`. For `link_role = SHARED_MODULE`, check the occurrence the learner asked about, not the recording.
+3. **Ask the Publisher** for that occurrence and refuse unless `playback.available` is `true`.
+4. **Sign** a short-lived URL per part and render it in the learner's page.
+
+**Kent's controls are not a substitute:**
+- **What they cover:** release and the global switch decide whether a recording *can* be shown; the referrer rule and the embed token decide *where* and *how long* a URL works.
+- **What they don't cover:** none of them knows who the learner is.
 
 ## 6. Long playback: pause, seek, resume and token expiry
 
@@ -152,7 +247,7 @@ Lectures run up to about 2 h 15 min, and a token lives for 5–15 minutes.
 - CDN token authentication is off, so the loaded player's file requests are checked only against the referrer. Pause, seek and resume inside an already-loaded player should therefore keep working after `expires`.
 - Anything that **reloads the iframe** needs a **new** signed URL: a page refresh, opening the next part, coming back later, or a browser discarding the tab.
 
-**This must be confirmed live before release.**
+**Status:** the seven lectures are released for integration testing, but this behaviour **has not yet been confirmed in a real browser**. The live checks below are the LMS team's staff acceptance, and must pass before learners are given access.
 
 **What the LMS should do:**
 - **Sign when the page is rendered**, never ahead of time, and never cache a signed URL.
@@ -163,9 +258,9 @@ Lectures run up to about 2 h 15 min, and a token lives for 5–15 minutes.
   - **either** re-render the iframe with a new URL and `t` = the current position (from your viewing heartbeat);
   - **or**, as a fallback, raise the token lifetime to cover the lecture plus a margin (e.g. 3 h). This makes leaked URLs usable for longer; decide with Kent.
 
-### Live checks (staff, before release)
+### Live checks (staff, before learners get access)
 
-Use a 10-minute token on one released lecture over 2 h long. Record the browser, device, token TTL and result for each.
+Use a 10-minute token on one released lecture over 2 h long, e.g. `OCC-774CB73AB0094A03A13F87E30B9FF4C0` (2 h 8 min). Embed it on a staff-only page of `lms.kentbusinesscollege.org`. Record the browser, device, token TTL and result for each.
 
 | # | Scenario | Expected |
 |---|---|---|
@@ -218,6 +313,6 @@ GET {base}/api/publisher/v1/occurrences?changed_since=2026-10-24T08:00:00Z&limit
 1. Will Bunny replace Teams playback, with Teams as the fallback while a recording isn't `available`? (Decided by Kent; confirm the LMS rollout plan.)
 2. Is `lms.kentbusinesscollege.org` the only domain that serves the player (web *and* any mobile app web views)?
 3. Where does the LMS backend run? This is for an optional IP allowlist at Kent's proxy.
-4. Who receives the service token and the token authentication key, and how are they rotated?
+4. Who on your team receives the service token and the signing key (one named person each; see *Secrets*)?
 5. How does enrolment resolve to an occurrence, including shared-module cohorts?
 6. Are multi-part lectures shown as a playlist, or one after another in a single player?
