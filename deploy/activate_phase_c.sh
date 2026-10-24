@@ -69,11 +69,14 @@ trap 'rm -f "$CANDIDATE"' EXIT
 # Read-only database checks (PUBLISHER_DATABASE_URL from the given env file, read-only session).
 # ---------------------------------------------------------------------------------------------
 db_state() {   # $1 env file, $2 baseline|verify, $3 restart time (UTC ISO) for verify, $4 before.json
-  sudo -u www-data "$VENV_PY" - "$1" "$2" "${3:-}" "${4:-}" "$LIB" "$BASELINE" <<'PY'
+  # Runs as www-data: the root-only before.json (under /root, 0700) is read HERE by root and passed
+  # as text (non-secret: counts, video prefixes, record ids); www-data never opens a /root path.
+  local before_text=""; [ -n "${4:-}" ] && [ -f "$4" ] && before_text=$(cat "$4")
+  sudo -u www-data "$VENV_PY" - "$1" "$2" "${3:-}" "$before_text" "$LIB" "$BASELINE" <<'PY'
 import json, sys
 from dotenv import dotenv_values
 import psycopg
-env_file, mode, since, before_file, lib, baseline = sys.argv[1:7]
+env_file, mode, since, before_text, lib, baseline = sys.argv[1:7]
 lib, baseline = int(lib), baseline.split()
 url = dotenv_values(env_file).get("PUBLISHER_DATABASE_URL") or ""
 if not url: sys.exit("PUBLISHER_DATABASE_URL is empty")
@@ -116,7 +119,7 @@ if not state["baseline_captions_ok"]: problems.append("BASELINE_CAPTIONS_NOT_VER
 if state["visibility"] != ["HIDDEN"]: problems.append("A_VIDEO_IS_NOT_HIDDEN")
 if state["release_events"]: problems.append("RELEASE_EVENTS_EXIST")
 if mode == "verify":
-    before = json.load(open(before_file)) if before_file else None
+    before = json.loads(before_text) if before_text.strip() else None
     beat = {r[0].rsplit(":", 1)[-1]: r for r in q(
         "SELECT worker_id, started_at >= %s::timestamptz, seen_at > now() - interval '120 seconds' "
         "FROM bunny_publisher_heartbeats WHERE started_at >= %s::timestamptz", since, since)}

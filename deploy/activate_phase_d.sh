@@ -188,10 +188,14 @@ PY
 done
 [ "$(cut -d' ' -f1 "$WORK/lectures.txt" | sort -u | wc -l)" = 7 ] || die "the seven occurrences do not map to seven distinct lectures"
 
-sudo -u www-data "$VENV_PY" - "$PUB_ENV" "$LIB" "$WORK/lectures.txt" <<'PY' || die "inventory check failed (above)"
+# Runs as www-data: it gets the (non-secret) lecture UUIDs as arguments, never a path under the
+# root-only $WORK (0700). Only publisher.env (root:www-data 0640) is opened by name.
+LECTURE_IDS=$(cut -d' ' -f1 "$WORK/lectures.txt" | tr '\n' ' ')
+sudo -u www-data "$VENV_PY" - "$PUB_ENV" "$LIB" "$LECTURE_IDS" <<'PY' || die "inventory check failed (above)"
 import sys, psycopg
 from dotenv import dotenv_values
-env, lib, lect = sys.argv[1], int(sys.argv[2]), [l.split()[0] for l in open(sys.argv[3])]
+env, lib, lect = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
+if len(lect) != 7: sys.exit(f"expected 7 lecture ids, got {len(lect)}")
 with psycopg.connect(dotenv_values(env)["PUBLISHER_DATABASE_URL"], prepare_threshold=None,
                      options="-c default_transaction_read_only=on") as c:
     rows = c.execute("SELECT lecture_id::text, recording_part_index, bunny_video_id::text, visibility_state "
