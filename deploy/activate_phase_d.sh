@@ -38,11 +38,12 @@ readonly HTTP_BASE=http://positive-moments.kentbusinesscollege.net/api/publisher
 readonly VENV_PY=$APP/backend/venv/bin/python
 readonly TS=$(date -u +%Y%m%dT%H%M%SZ)
 readonly WORK=/root/kbc-phase-d/$TS
-# occurrence -> expected Bunny video id prefix (the seven verified lectures; nothing else is touched)
-readonly SEVEN="OCC-4493AC65DF5041459BC5A14DA8B357A0=a1a8fc1d OCC-188B392FF4ED45A9B46C02E40072A1F9=550c9c30
-OCC-774CB73AB0094A03A13F87E30B9FF4C0=456d51cf OCC-EB064C5DE7B44E119E67F128896C592B=010900eb
-OCC-5FDA481E5B1145398AA108E04D19F9A4=51920222 OCC-075C8136DD8546FD834CC6B0E4B7DE18=069df826
-OCC-B8C49F1C2ED4429786178B5914ED7368=04fe964d"
+# occurrence = expected Bunny video id prefix : expected lecture id prefix (the seven verified lectures;
+# nothing else is touched). Read back from production on 24 Oct 2026.
+readonly SEVEN="OCC-4493AC65DF5041459BC5A14DA8B357A0=a1a8fc1d:0fe6c2fa OCC-188B392FF4ED45A9B46C02E40072A1F9=550c9c30:15e61dca
+OCC-774CB73AB0094A03A13F87E30B9FF4C0=456d51cf:3f09b150 OCC-EB064C5DE7B44E119E67F128896C592B=010900eb:95a710b0
+OCC-5FDA481E5B1145398AA108E04D19F9A4=51920222:a7c5fb2a OCC-075C8136DD8546FD834CC6B0E4B7DE18=069df826:b4761fb4
+OCC-B8C49F1C2ED4429786178B5914ED7368=04fe964d:d2768b20"
 MODE=${1:-}
 ACTOR=${2:-"KBC operator (deploy/activate_phase_d.sh)"}
 readonly REASON="LMS integration testing: release of the seven verified lectures of 23 Oct 2026"
@@ -74,7 +75,8 @@ api_verify() {   # $1 = expected: RELEASED|NOT_RELEASED ; $2 = expected playback
   for pair in $SEVEN; do
     occ=${pair%%=*}
     code=$(curl -s -o "$WORK/occ.json" -w '%{http_code}' --proto '=https' --max-time 30 -H @"$AUTH" "$BASE/occurrences/$occ/recording" || true)
-    printf '%s %s %s\n' "$occ" "${pair#*=}" "$code" >> "$f"; cat "$WORK/occ.json" >> "$f"; echo >> "$f"
+    rest=${pair#*=}
+    printf '%s %s %s\n' "$occ" "${rest%%:*}" "$code" >> "$f"; cat "$WORK/occ.json" >> "$f"; echo >> "$f"
   done
   printf 'unauth %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$BASE/health")" >> "$f"
   printf 'unknown %s\n' "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H @"$AUTH" "$BASE/occurrences/OCC-DOES-NOT-EXIST/recording")" >> "$f"
@@ -165,48 +167,102 @@ assert r["secure"] is True and r["problems"] == []
 assert r["cdn_token_authentication"] == {"policy": "DEFERRED", "status": "DEFERRED", "enabled": False}
 PY
 
-: > "$WORK/lectures.txt"
-for pair in $SEVEN; do
-  occ=${pair%%=*}; prefix=${pair#*=}
-  cli delivery --occurrence-id "$occ" > "$WORK/$occ.json" || die "$occ: delivery lookup failed"
-  python3 - "$WORK/$occ.json" "$prefix" "$LIB" >> "$WORK/lectures.txt" <<'PY' || die "pre-flight failed for an occurrence (above)"
+# One line per occurrence in $WORK/lectures.txt: "<lecture uuid> <occurrence> <RELEASED|NOT_RELEASED>".
+# Read from the `delivery` answer (the v1 occurrence shape: release is {"status", "released_at",
+# "withdrawn_at"}). A RELEASED occurrence (e.g. left by an interrupted run) is accepted only when it is
+# fully consistent: expected lecture and video, READY, verified captions, every part READY_FOR_LMS,
+# a release time and no withdrawal. Anything else stops the script.
+occurrence_state() {   # $1 occurrence, $2 video prefix, $3 lecture prefix, $4 required release ("" = either)
+  cli delivery --occurrence-id "$1" > "$WORK/$1.json" || die "$1: delivery lookup failed"
+  python3 - "$WORK/$1.json" "$1" "$2" "$3" "$LIB" "${4:-}" <<'PY' || die "occurrence state not as expected (above)"
 import json, sys
-a = json.load(open(sys.argv[1])); prefix, lib = sys.argv[2], int(sys.argv[3])
-rec = a.get("recording") or {}; parts = rec.get("parts") or []
-vids = [p["bunny"]["video_id"][:8] for p in parts]
-caps = bool(parts) and all(any(c["language"] == "en" and c["status"] == "VERIFIED" and c["content_verified"]
-                               for c in p["captions"]) for p in parts)
-ok = (a.get("state") == "READY" and a.get("blocking") == [] and vids == [prefix]
-      and all(p["encoding"] == "VERIFIED" and p["bunny"]["library_id"] == lib for p in parts)
-      and rec.get("published_part_count") == 1 and caps
-      and a["release"]["status"] in ("NOT_RELEASED", "RELEASED"))
-print(a["lecture"]["lecture_id"], a["lms_occurrence_id"], a["release"]["status"])
-print(f"{'OK  ' if ok else 'FAIL'} {a['lms_occurrence_id'][:12]}… {a.get('state')} video={vids} parts={rec.get('published_part_count')} "
-      f"captions={caps} release={a['release']['status']} lecture={a['lecture']['lecture_id'][:8]}…", file=sys.stderr)
-sys.exit(0 if ok else 1)
+path, occ, vprefix, lprefix, lib, required = sys.argv[1:4] + sys.argv[4:5] + [int(sys.argv[5])] + sys.argv[6:7]
+a = json.load(open(path))
+def get(d, *keys):
+    for k in keys:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+rec = get(a, "recording") or {}
+parts = rec.get("parts") if isinstance(rec.get("parts"), list) else []
+lecture = str(get(a, "lecture", "lecture_id") or "")
+release = get(a, "release", "status")
+vids = [str(get(p, "bunny", "video_id") or "")[:8] for p in parts]
+vis = [get(p, "visibility") for p in parts]
+caps = bool(parts) and all(any(get(c, "language") == "en" and get(c, "status") == "VERIFIED" and get(c, "content_verified") is True
+                               for c in (get(p, "captions") or [])) for p in parts)
+problems = []
+if get(a, "lms_occurrence_id") != occ: problems.append("OCCURRENCE_MISMATCH")
+if not (lecture and lecture.startswith(lprefix)): problems.append("UNEXPECTED_LECTURE")
+if get(a, "state") != "READY" or get(a, "blocking") != []: problems.append(f"STATE_{get(a, 'state')}")
+if vids != [vprefix] or get(rec, "published_part_count") != 1: problems.append("UNEXPECTED_VIDEO_OR_PARTS")
+if not all(get(p, "encoding") == "VERIFIED" and get(p, "bunny", "library_id") == lib for p in parts): problems.append("VIDEO_NOT_VERIFIED")
+if not caps: problems.append("CAPTIONS_NOT_VERIFIED")
+if release == "RELEASED":
+    if vis != ["READY_FOR_LMS"] * len(parts) or not get(a, "release", "released_at") or get(a, "release", "withdrawn_at"):
+        problems.append("INCONSISTENT_RELEASED_STATE")
+elif release == "NOT_RELEASED":
+    if vis != ["HIDDEN"] * len(parts): problems.append("INCONSISTENT_NOT_RELEASED_STATE")
+else:
+    problems.append(f"RELEASE_{release}")
+if required and release != required: problems.append(f"EXPECTED_{required}")
+print(f"{'OK  ' if not problems else 'FAIL'} {occ[:12]}… {get(a, 'state')} video={vids} parts={get(rec, 'published_part_count')} "
+      f"captions={caps} release={release} visibility={vis} lecture={lecture[:8]}… {' '.join(problems)}", file=sys.stderr)
+if problems: sys.exit(1)
+print(lecture, occ, release)
 PY
-done
-[ "$(cut -d' ' -f1 "$WORK/lectures.txt" | sort -u | wc -l)" = 7 ] || die "the seven occurrences do not map to seven distinct lectures"
+}
 
-# Runs as www-data: it gets the (non-secret) lecture UUIDs as arguments, never a path under the
-# root-only $WORK (0700). Only publisher.env (root:www-data 0640) is opened by name.
-LECTURE_IDS=$(cut -d' ' -f1 "$WORK/lectures.txt" | tr '\n' ' ')
-sudo -u www-data "$VENV_PY" - "$PUB_ENV" "$LIB" "$LECTURE_IDS" <<'PY' || die "inventory check failed (above)"
+# Read-only database confirmation, as www-data with ids as arguments (never a root-only path).
+# $1 = the seven lecture ids, $2 = the ids that must be RELEASED now. Checks the persisted state, not a
+# CLI message: one live video per lecture, visibility READY_FOR_LMS exactly for $2 and HIDDEN otherwise,
+# exactly ONE PUBLICATION_RELEASED and no PUBLICATION_WITHDRAWN per released lecture, none elsewhere.
+db_check() {
+  sudo -u www-data "$VENV_PY" - "$PUB_ENV" "$LIB" "$1" "${2:-}" <<'PY' || die "database check failed (above)"
 import sys, psycopg
 from dotenv import dotenv_values
-env, lib, lect = sys.argv[1], int(sys.argv[2]), sys.argv[3].split()
-if len(lect) != 7: sys.exit(f"expected 7 lecture ids, got {len(lect)}")
+env, lib, lect, rel = sys.argv[1], int(sys.argv[2]), sys.argv[3].split(), set(sys.argv[4].split())
+if len(set(lect)) != 7 or not rel <= set(lect): sys.exit("expected 7 distinct lectures, the released ones among them")
 with psycopg.connect(dotenv_values(env)["PUBLISHER_DATABASE_URL"], prepare_threshold=None,
                      options="-c default_transaction_read_only=on") as c:
     rows = c.execute("SELECT lecture_id::text, recording_part_index, bunny_video_id::text, visibility_state "
                      "FROM bunny_videos WHERE bunny_library_id = %s AND retired_at IS NULL", (lib,)).fetchall()
     dup = c.execute("SELECT count(*) FROM (SELECT lecture_id, recording_part_index FROM bunny_videos WHERE bunny_library_id = %s "
                     "AND retired_at IS NULL GROUP BY 1, 2 HAVING count(*) > 1) d", (lib,)).fetchone()[0]
-    others_released = [r for r in rows if r[0] not in lect and r[3] != "HIDDEN"]
-print(f"videos in {lib}: {len(rows)} | of the seven lectures: {sum(r[0] in lect for r in rows)} | other lectures: "
-      f"{sum(r[0] not in lect for r in rows)} | duplicate parts: {dup} | other lectures not HIDDEN: {len(others_released)}")
-assert sum(r[0] in lect for r in rows) == 7 and dup == 0 and not others_released
+    events = c.execute("SELECT lecture_id::text, event, count(*) FROM bunny_publisher_events WHERE event IN "
+                       "('PUBLICATION_RELEASED', 'PUBLICATION_WITHDRAWN') GROUP BY 1, 2").fetchall()
+ev = {(l, e): n for l, e, n in events}
+mine = [r for r in rows if r[0] in lect]
+problems = []
+if len(mine) != 7 or len({r[0] for r in mine}) != 7: problems.append("SEVEN_LECTURES_NOT_ONE_VIDEO_EACH")
+if dup: problems.append("DUPLICATE_PARTS")
+if any(r[3] != "HIDDEN" for r in rows if r[0] not in lect): problems.append("ANOTHER_LECTURE_NOT_HIDDEN")
+for r in mine:
+    if r[3] != ("READY_FOR_LMS" if r[0] in rel else "HIDDEN"): problems.append(f"VISIBILITY_{r[0][:8]}_{r[3]}")
+for l in lect:
+    n_rel, n_wd = ev.get((l, "PUBLICATION_RELEASED"), 0), ev.get((l, "PUBLICATION_WITHDRAWN"), 0)
+    if n_wd or n_rel != (1 if l in rel else 0): problems.append(f"EVENTS_{l[:8]}_released{n_rel}_withdrawn{n_wd}")
+if any(l not in lect for (l, _e) in ev): problems.append("LIFECYCLE_EVENTS_OUTSIDE_THE_SEVEN")
+released_events = sum(n for (_l, e), n in ev.items() if e == "PUBLICATION_RELEASED")
+withdrawals = sum(n for (_l, e), n in ev.items() if e == "PUBLICATION_WITHDRAWN")
+print(f"database: videos in {lib}: {len(rows)} | seven lectures: {len(mine)} | READY_FOR_LMS: "
+      f"{sum(r[3] == 'READY_FOR_LMS' for r in mine)} (expected {len(rel)}) | release events: {released_events} | "
+      f"withdrawals: {withdrawals} | duplicate parts: {dup} | {' '.join(problems) or 'consistent'}")
+sys.exit(1 if problems else 0)
 PY
+}
+
+prefixes_of() { local pair; for pair in $SEVEN; do [ "${pair%%=*}" = "$1" ] && { echo "${pair#*=}"; return 0; }; done; return 1; }
+
+: > "$WORK/lectures.txt"
+for pair in $SEVEN; do
+  occ=${pair%%=*}; rest=${pair#*=}
+  occurrence_state "$occ" "${rest%%:*}" "${rest#*:}" >> "$WORK/lectures.txt"
+done
+[ "$(cut -d' ' -f1 "$WORK/lectures.txt" | sort -u | wc -l)" = 7 ] || die "the seven occurrences do not map to seven distinct lectures"
+LECTURE_IDS=$(cut -d' ' -f1 "$WORK/lectures.txt" | tr '\n' ' ')
+RELEASED_IDS=$(awk '$3 == "RELEASED" {print $1}' "$WORK/lectures.txt" | tr '\n' ' ')
+echo "release state: $(awk '$3 == "RELEASED"' "$WORK/lectures.txt" | wc -l) of 7 already RELEASED (accepted only because consistent)"
+db_check "$LECTURE_IDS" "$RELEASED_IDS"
 HTTP_ANSWER="$(curl -s -o /dev/null -D "$WORK/http.h" -w '%{http_code}' --max-time 20 "$HTTP_BASE/health" || true) $(grep -ci '^x-publisher-contract:' "$WORK/http.h" || true)"
 if [ "${HTTP_ANSWER#* }" != 0 ]; then
   [ "$MODE" = apply ] && die "plain HTTP still reaches the Publisher API ($HTTP_ANSWER): run deploy/harden_api_https.sh apply first"
@@ -216,23 +272,50 @@ else
 fi
 if [ "$MODE" = check ]; then say "CHECK PASSED. Nothing changed. Next: sudo bash deploy/activate_phase_d.sh apply \"<your name>\""; exit 0; fi
 
-# ------------------------------------------------------------------- release the seven (audited, idempotent)
-say "2. release the seven lectures (actor: $ACTOR)"
-ROLLBACK_HINT="ROLLBACK: withdraw each released lecture (immediate, no restart):
-$(cut -d' ' -f1 "$WORK/lectures.txt" | sed "s|^|  sudo -u www-data $VENV_PY -m app.cli.publisher --env-file $PUB_ENV withdraw --actor \"$ACTOR\" --reason \"rollback of phase D\" --lecture-id |")"
-while read -r lecture occ _ <&3; do
+# ------------------------------------------------------------------- release the remaining lectures (audited)
+say "2. release the lectures that are not yet RELEASED (actor: $ACTOR)"
+ROLLBACK_HINT="ROLLBACK is manual and explicit; this script never withdraws anything by itself.
+Withdraw a released lecture (immediate, no restart):
+$(cut -d' ' -f1 "$WORK/lectures.txt" | sed "s|^|  sudo -u www-data $VENV_PY -m app.cli.publisher --env-file $PUB_ENV withdraw --actor \"<name>\" --reason \"<why>\" --lecture-id |")"
+while read -r lecture occ status <&3; do
+  rest=$(prefixes_of "$occ") || die "$occ is not one of the seven"
+  if [ "$status" = RELEASED ]; then
+    echo "${occ:0:12}… already RELEASED and consistent: not released again (no new audit event)"
+    continue
+  fi
   cli release --lecture-id "$lecture" --actor "$ACTOR" --reason "$REASON" > "$WORK/release.$occ.json" \
-    || { cat "$WORK/release.$occ.json"; die "release refused for $occ (nothing else released after it)"; }
-  python3 - "$WORK/release.$occ.json" "$occ" <<'PY' || die "release answer not as expected for $occ"
+    || { cat "$WORK/release.$occ.json"; die "release refused for $occ; nothing after it was released, playback flag unchanged"; }
+  # `release` prints delivery.release(): {"lecture_id", "library_id", "action": "RELEASE", "changed": bool,
+  # "parts_changed": [...], "release": "RELEASED" (a STRING), "state": "READY" (a STRING), "blocking": [...]}
+  python3 - "$WORK/release.$occ.json" "$occ" "$lecture" "$LIB" <<'PY' || die "release answer not as expected for $occ; playback flag unchanged"
 import json, sys
-r = json.load(open(sys.argv[1]))
-print(f"{sys.argv[2][:12]}… release={r['release']['status']} changed={r['changed']} parts={r['parts_changed']} state={r['state']}")
-assert r["release"]["status"] == "RELEASED" and r["state"] == "READY"
+r = json.load(open(sys.argv[1])); occ, lecture, lib = sys.argv[2], sys.argv[3], int(sys.argv[4])
+if not isinstance(r, dict): sys.exit("release printed no JSON object")
+print(f"{occ[:12]}… release={r.get('release')!r} state={r.get('state')!r} changed={r.get('changed')} parts={r.get('parts_changed')}")
+assert r.get("lecture_id") == lecture and r.get("library_id") == lib and r.get("action") == "RELEASE", "identity"
+assert r.get("release") == "RELEASED" and r.get("state") == "READY", "release/state"
 PY
+  # Confirm the PERSISTED state, not the CLI message: the live answer and the database rows/events.
+  occurrence_state "$occ" "${rest%%:*}" "${rest#*:}" RELEASED > /dev/null
+  RELEASED_IDS="$RELEASED_IDS $lecture"
+  db_check "$LECTURE_IDS" "$RELEASED_IDS"
 done 3< "$WORK/lectures.txt"
+
+say "2b. all seven independently confirmed before the playback flag is touched"
+db_check "$LECTURE_IDS" "$LECTURE_IDS"
+RUNNING_FLAG=$(curl -s --proto '=https' --max-time 20 -H @"$AUTH" "$BASE/health" \
+  | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("playback_enabled") is True else "false")') \
+  || die "health unreadable"
+api_verify RELEASED "$RUNNING_FLAG" || die "public API does not show all seven RELEASED; playback flag NOT changed"
 
 # ------------------------------------------------------------------- playback flag (Django env, atomic)
 say "3. PUBLISHER_LMS_PLAYBACK_ENABLED=true in the Django env"
+if [ "$RUNNING_FLAG" = true ] && grep -qx 'PUBLISHER_LMS_PLAYBACK_ENABLED=true' "$DJANGO_ENV"; then
+  echo "already on in the file and in the running service: no edit, no restart"
+  say "5. public HTTPS API verification"
+  api_verify RELEASED true || die "verification failed (above); evidence $WORK"
+  printf '\nDONE. Evidence (root-only): %s\n%s\n' "$WORK" "$ROLLBACK_HINT"; exit 0
+fi
 read -r OWNER GROUP PERM < <(stat -c '%U %G %a' "$DJANGO_ENV")
 BACKUP=/root/kbc-phase-d/django.env.before-phase-d.$TS
 cp --preserve=mode,ownership,timestamps "$DJANGO_ENV" "$BACKUP"; chown root:root "$BACKUP"; chmod 0600 "$BACKUP"
