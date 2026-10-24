@@ -18,14 +18,15 @@ from app.bunny import tokens
 from app.bunny.client import BunnyCoreClient
 from app.publisher import delivery
 from app.publisher.bunny_jobs import CaptionWorker
-from app.publisher.library_security import check_delivery_security, read_delivery_security
+from app.publisher.config import PublisherConfig
+from app.publisher.library_security import DeliveryPolicy, check_delivery_security, read_delivery_security
 from app.publisher.operations import OperatorActionRefused
 
 KEY = "4742a81b-bf15-42fe-8b1c-8fcb9024c550"          # Bunny's documentation sample, not a real key
 VIDEO = "32d140e2-e4f4-4eec-9d53-20371e9be607"
 
 SECURE_LIBRARY = {"Id": 786045, "PlayerTokenAuthenticationEnabled": True, "AllowDirectPlay": False,
-                  "BlockNoneReferrer": True, "EnableMP4Fallback": False, "AllowedReferrers": ["lms.example.invalid"],
+                  "BlockNoneReferrer": True, "EnableMP4Fallback": False, "AllowedReferrers": ["LMS.KentBusinessCollege.org"],
                   "PullZoneId": 6840885, "KeepOriginalFiles": True, "EnableDRM": False}
 SECURE_ZONE = {"Id": 6840885, "ZoneSecurityEnabled": True, "ZoneSecurityIncludeHashRemoteIP": False}
 
@@ -103,12 +104,25 @@ def _worker(config, served):
 def test_production_read_back_signs_the_caption_url_with_the_pull_zone_key():
     text = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n"
     config = SimpleNamespace(caption_language="en", caption_label="English", mode="PRODUCTION_WRITE",
-                             cdn_hostname="cdn.example.invalid", cdn_token_key="zone-key")
+                             cdn_hostname="cdn.example.invalid", cdn_signing_key="zone-key")
     worker, cdn = _worker(config, text)
     readback = worker._read_back(VIDEO, SimpleNamespace(text=text))
     assert readback["content_check"] in ("IDENTICAL", "EQUIVALENT")
     [url] = cdn.urls
     assert "token=HS256-" in url and "expires=" in url and "ver=4" in url and "zone-key" not in url
+
+
+def test_deferred_cdn_protection_reads_back_unsigned_even_with_a_key_configured():
+    text = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n"
+    config = PublisherConfig(mode="PRODUCTION_WRITE", production_library_id=786045, production_api_key="k",
+                             production_account_api_key="a", production_write_enabled=True,
+                             production_cdn_hostname="cdn.example.invalid", cdn_token_key="zone-key")
+    assert config.cdn_token_auth_policy == "DEFERRED" and config.cdn_signing_key == ""
+    assert config.describe()["cdn_token_key_ignored"] is True
+    worker, cdn = _worker(config, text)
+    readback = worker._read_back(VIDEO, SimpleNamespace(text=text))
+    assert readback["content_check"] in ("IDENTICAL", "EQUIVALENT")
+    assert cdn.urls == [f"https://cdn.example.invalid/{VIDEO}/captions/en.vtt?ver=4"]
 
 
 def test_staging_read_back_without_a_key_is_unsigned_as_before():
@@ -121,10 +135,35 @@ def test_staging_read_back_without_a_key_is_unsigned_as_before():
 
 
 # =========================================================================== delivery security check
-def test_a_fully_locked_down_library_passes():
-    report = check_delivery_security(SECURE_LIBRARY, SECURE_ZONE)
-    assert report == {"secure": True, "problems": [], "observed": report["observed"]}
-    assert report["observed"]["AllowedReferrers_count"] == 1 and "AllowedReferrers" not in report["observed"]
+def codes(report, key="problems"):
+    return sorted(p.split(":")[0] for p in report[key])
+
+
+def test_the_approved_rollout_library_passes_with_cdn_protection_reported_deferred():
+    report = check_delivery_security(SECURE_LIBRARY, {**SECURE_ZONE, "ZoneSecurityEnabled": False})
+    assert report["secure"] and report["problems"] == []
+    assert report["cdn_token_authentication"] == {"policy": "DEFERRED", "status": "DEFERRED", "enabled": False}
+    assert codes(report, "warnings") == ["CDN_TOKEN_AUTHENTICATION_DEFERRED", "ORIGINAL_FILES_KEPT"]
+    assert "ORIGINAL uploaded file" in report["warnings"][0]
+    assert report["observed"]["AllowedReferrers"] == ["lms.kentbusinesscollege.org"]
+    assert report["policy"]["cdn_token_authentication"] == "DEFERRED"
+
+
+def test_deferred_cdn_protection_is_never_reported_as_enabled_or_silently_secure():
+    unreadable = check_delivery_security(SECURE_LIBRARY, None)
+    assert unreadable["secure"] and unreadable["cdn_token_authentication"]["status"] == "DEFERRED"
+    assert "PULL_ZONE_UNREADABLE" in codes(unreadable, "warnings")
+    on = check_delivery_security(SECURE_LIBRARY, SECURE_ZONE)
+    assert on["secure"] and on["cdn_token_authentication"]["status"] == "DEFERRED_BUT_ENABLED"
+    assert "CDN_TOKEN_AUTHENTICATION_ENABLED_WHILE_DEFERRED" in codes(on, "warnings")
+
+
+def test_required_cdn_protection_is_a_release_blocker():
+    required = DeliveryPolicy(cdn_token_auth="REQUIRED")
+    assert check_delivery_security(SECURE_LIBRARY, SECURE_ZONE, required)["secure"]
+    off = check_delivery_security(SECURE_LIBRARY, {**SECURE_ZONE, "ZoneSecurityEnabled": False}, required)
+    assert codes(off) == ["PULL_ZONE_TOKEN_AUTHENTICATION"] and off["cdn_token_authentication"]["status"] == "MISSING"
+    assert codes(check_delivery_security(SECURE_LIBRARY, None, required)) == ["PULL_ZONE_UNREADABLE"]
 
 
 @pytest.mark.parametrize("field,value,code", [
@@ -132,26 +171,30 @@ def test_a_fully_locked_down_library_passes():
     ("AllowDirectPlay", True, "LIBRARY_DIRECT_PLAY"),
     ("BlockNoneReferrer", False, "LIBRARY_BLOCK_NONE_REFERRER"),
     ("EnableMP4Fallback", True, "LIBRARY_MP4_FALLBACK"),
-    ("AllowedReferrers", [], "LIBRARY_ALLOWED_REFERRERS"),
+    ("AllowedReferrers", [], "LIBRARY_ALLOWED_REFERRERS_MISSING"),
+    ("AllowedReferrers", ["lms.kentbusinesscollege.org", "old.example.invalid"], "LIBRARY_ALLOWED_REFERRERS_UNEXPECTED"),
 ])
-def test_each_open_library_setting_is_reported(field, value, code):
-    report = check_delivery_security({**SECURE_LIBRARY, field: value}, SECURE_ZONE)
-    assert not report["secure"] and [p.split(":")[0] for p in report["problems"]] == [code]
+def test_each_approved_protection_is_a_release_blocker(field, value, code):
+    report = check_delivery_security({**SECURE_LIBRARY, field: value}, None)
+    assert not report["secure"] and codes(report) == [code]
 
 
-def test_cdn_token_authentication_off_or_unreadable_is_reported():
-    off = check_delivery_security(SECURE_LIBRARY, {**SECURE_ZONE, "ZoneSecurityEnabled": False})
-    assert [p.split(":")[0] for p in off["problems"]] == ["PULL_ZONE_TOKEN_AUTHENTICATION"]
-    assert [p.split(":")[0] for p in check_delivery_security(SECURE_LIBRARY, None)["problems"]] == \
-        ["PULL_ZONE_UNREADABLE"]
+def test_block_none_referrer_can_be_relaxed_by_policy_after_browser_testing():
+    relaxed = DeliveryPolicy(require_block_none_referrer=False)
+    report = check_delivery_security({**SECURE_LIBRARY, "BlockNoneReferrer": False}, None, relaxed)
+    assert report["secure"] and "BLOCK_NONE_REFERRER_NOT_REQUIRED" in codes(report, "warnings")
 
 
-def test_library_786045_as_read_on_2026_10_24_is_not_yet_secure():
+def test_library_786045_as_read_on_2026_10_24_is_not_yet_releasable():
     observed = {"Id": 786045, "PlayerTokenAuthenticationEnabled": False, "AllowDirectPlay": True,
-                "BlockNoneReferrer": True, "EnableMP4Fallback": False, "AllowedReferrers": ["one.invalid"],
-                "PullZoneId": 6840885}
-    codes = {p.split(":")[0] for p in check_delivery_security(observed, None)["problems"]}
-    assert codes == {"LIBRARY_EMBED_TOKEN_AUTHENTICATION", "LIBRARY_DIRECT_PLAY", "PULL_ZONE_UNREADABLE"}
+                "BlockNoneReferrer": True, "EnableMP4Fallback": False, "AllowedReferrers": ["lms.kentbusinesscollege.org"],
+                "PullZoneId": 6840885, "KeepOriginalFiles": True, "EnableDRM": False}
+    assert codes(check_delivery_security(observed, None)) == ["LIBRARY_DIRECT_PLAY", "LIBRARY_EMBED_TOKEN_AUTHENTICATION"]
+
+
+def test_drm_on_is_reported_but_not_a_blocker():
+    report = check_delivery_security({**SECURE_LIBRARY, "EnableDRM": True}, None)
+    assert report["secure"] and "DRM_ENABLED" in codes(report, "warnings")
 
 
 def test_the_pull_zone_read_drops_its_secret_key():

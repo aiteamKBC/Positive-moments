@@ -67,11 +67,30 @@ def test_production_write_is_disabled_by_default():
                   BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
                   BUNNY_STAGING_LIBRARY_ID="900001")
     assert enabled.problems() == [] and enabled.library_id == 900001 and enabled.describe()["adopts_staging_library"]
-    keyless = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
+    # CDN token authentication is DEFERRED by default: no key is needed, and a configured key is ignored.
+    assert enabled.cdn_token_auth_policy == "DEFERRED" and enabled.cdn_signing_key == ""
+    assert enabled.approved_referrers == ("lms.kentbusinesscollege.org",) and enabled.require_block_none_referrer
+    ignored = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
                   BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
                   BUNNY_CDN_TOKEN_KEY="cdn-key")
-    assert any("BUNNY_PRODUCTION_CDN_HOSTNAME" in p for p in keyless.problems())
-    assert "cdn-key" not in repr(keyless) and "cdn-key" not in str(keyless.describe())
+    assert ignored.problems() == [] and ignored.cdn_signing_key == "" and ignored.describe()["cdn_token_key_ignored"]
+    assert "cdn-key" not in repr(ignored) and "cdn-key" not in str(ignored.describe())
+    # REQUIRED (future hardening) needs the key and the CDN host, and then signs.
+    required = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
+                   BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
+                   PUBLISHER_CDN_TOKEN_AUTH="required")
+    assert any("PUBLISHER_CDN_TOKEN_AUTH=REQUIRED needs" in p for p in required.problems())
+    signed = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
+                 BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
+                 PUBLISHER_CDN_TOKEN_AUTH="REQUIRED", BUNNY_CDN_TOKEN_KEY="cdn-key",
+                 BUNNY_PRODUCTION_CDN_HOSTNAME="cdn.example.invalid")
+    assert signed.problems() == [] and signed.cdn_signing_key == "cdn-key"
+    assert any("PUBLISHER_CDN_TOKEN_AUTH must be one of" in p
+               for p in cfg(PUBLISHER_MODE="SHADOW", PUBLISHER_CDN_TOKEN_AUTH="sometimes").problems())
+    relaxed = cfg(PUBLISHER_MODE="SHADOW", PUBLISHER_APPROVED_REFERRERS=" LMS.KentBusinessCollege.org , b.example ",
+                  PUBLISHER_REQUIRE_BLOCK_NONE_REFERRER="false")
+    assert relaxed.approved_referrers == ("b.example", "lms.kentbusinesscollege.org")
+    assert relaxed.require_block_none_referrer is False
 
 
 def test_the_old_library_is_refused_in_every_mode():

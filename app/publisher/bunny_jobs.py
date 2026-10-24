@@ -197,6 +197,12 @@ def _cdn_hostname(cfg) -> str:
     return getattr(cfg, "staging_cdn_hostname", "") if getattr(cfg, "mode", "") == "STAGING_WRITE" else ""
 
 
+def _cdn_signing_key(cfg) -> str:
+    """PublisherConfig gates the key on its CDN policy; a plain namespace (tests) is taken as configured."""
+    key = getattr(cfg, "cdn_signing_key", None)
+    return key if isinstance(key, str) else getattr(cfg, "cdn_token_key", "")
+
+
 def _status_name(code) -> str:
     return STATUS_NAMES.get(code, str(code)).upper()
 
@@ -793,9 +799,10 @@ class CaptionWorker(_Worker):
         if entry is None or not host or self.rt.open_url is None:
             return readback
         path, version = f"/{video_id}/captions/{cfg.caption_language}.vtt", entry.get("version") or 0
-        key = getattr(cfg, "cdn_token_key", "")
-        # With CDN token authentication on, the caption file needs a token too; the publisher signs its own
-        # read-back with the pull zone key. A wrong or missing token is a 403 -> CDN_UNAVAILABLE, never a pass.
+        key = _cdn_signing_key(cfg)
+        # Only when CDN token authentication is REQUIRED does the caption file need a token; the publisher then
+        # signs its own read-back with the pull zone key. While it is DEFERRED the read-back is a plain request.
+        # A wrong or missing token is a 403 -> CDN_UNAVAILABLE, never a pass.
         url = tokens.signed_cdn_url(host, path, key, params={"ver": version}) if key \
             else f"https://{host}{path}?ver={version}"
         try:

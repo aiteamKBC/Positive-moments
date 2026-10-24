@@ -21,8 +21,10 @@ CDN TOKEN (pull zone "advanced" token authentication)
     https://bunny.net/docs/cdn/security/token-authentication/advanced
 
     The publisher uses it for one thing only: reading back its own caption file
-    from the CDN once CDN token authentication is on. Bunny states that "CDN
-    token authentication uses the same key" as the embed token.
+    from the CDN when the delivery policy makes CDN token authentication
+    REQUIRED. For the 2026-10 rollout it is DEFERRED, and this is never called.
+    Bunny states that "CDN token authentication uses the same key" as the
+    embed token.
 
 Nothing here logs, stores or returns a key.
 """

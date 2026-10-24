@@ -45,6 +45,12 @@ from datetime import date, time, timedelta
 from pathlib import Path
 
 SHADOW, STAGING_WRITE, PRODUCTION_WRITE = "SHADOW", "STAGING_WRITE", "PRODUCTION_WRITE"
+# CDN (pull zone) token authentication policy for learner delivery. DEFERRED for the 2026-10 rollout
+# (uninterrupted playback first): not a release blocker, reported as DEFERRED, the publisher never signs
+# its caption read-back. REQUIRED (a future hardening step) makes it a release blocker and signs.
+CDN_DEFERRED, CDN_REQUIRED = "DEFERRED", "REQUIRED"
+CDN_POLICIES = (CDN_DEFERRED, CDN_REQUIRED)
+APPROVED_REFERRERS_DEFAULT = "lms.kentbusinesscollege.org"
 MODES = (SHADOW, STAGING_WRITE, PRODUCTION_WRITE)
 # The old Bunny account's library: never a destination, in any mode.
 FORBIDDEN_LIBRARY_IDS = frozenset({785080})
@@ -111,8 +117,12 @@ class PublisherConfig:
     production_write_enabled: bool = False
     production_cdn_hostname: str = ""
     # The pull zone's token key, used ONLY to sign the publisher's own caption
-    # read-back once CDN token authentication is on. Optional; never logged.
+    # read-back, and only when cdn_token_auth_policy is REQUIRED. Never logged.
     cdn_token_key: str = field(default="", repr=False)
+    # -- learner-delivery security policy (checked by `security-check`, enforced by `release`) ---------
+    cdn_token_auth_policy: str = CDN_DEFERRED
+    approved_referrers: tuple = (APPROVED_REFERRERS_DEFAULT,)
+    require_block_none_referrer: bool = True
     caption_language: str = "en"
     caption_label: str = "English"
     # -- runtime ----------------------------------------------------------------
@@ -157,6 +167,11 @@ class PublisherConfig:
         if self.mode == PRODUCTION_WRITE:
             return self.production_cdn_hostname
         return ""
+
+    @property
+    def cdn_signing_key(self) -> str:
+        """The key the caption read-back signs with: none while CDN token authentication is DEFERRED."""
+        return self.cdn_token_key if self.cdn_token_auth_policy == CDN_REQUIRED else ""
 
     @property
     def api_key(self) -> str:
@@ -209,8 +224,13 @@ class PublisherConfig:
                 found.append("PRODUCTION_WRITE is disabled (PUBLISHER_PRODUCTION_WRITE_ENABLED is not true)")
             if not self.production_library_id or not self.production_api_key or not self.production_account_api_key:
                 found.append("PRODUCTION_WRITE needs BUNNY_PRODUCTION_LIBRARY_ID, _API_KEY and _ACCOUNT_API_KEY")
-            if self.cdn_token_key and not self.production_cdn_hostname:
-                found.append("BUNNY_CDN_TOKEN_KEY needs BUNNY_PRODUCTION_CDN_HOSTNAME")
+            if self.cdn_token_auth_policy == CDN_REQUIRED and not (self.cdn_token_key and self.production_cdn_hostname):
+                found.append("PUBLISHER_CDN_TOKEN_AUTH=REQUIRED needs BUNNY_CDN_TOKEN_KEY and "
+                             "BUNNY_PRODUCTION_CDN_HOSTNAME (the caption read-back must be signed)")
+        if self.cdn_token_auth_policy not in CDN_POLICIES:
+            found.append(f"PUBLISHER_CDN_TOKEN_AUTH must be one of {', '.join(CDN_POLICIES)}")
+        if not self.approved_referrers:
+            found.append("PUBLISHER_APPROVED_REFERRERS must name at least one LMS domain")
         return found
 
     def validate(self) -> "PublisherConfig":
@@ -229,6 +249,11 @@ class PublisherConfig:
             "adopts_staging_library": self.mode == PRODUCTION_WRITE and self.production_library_id is not None
             and self.production_library_id == self.staging_library_id,
             "cdn_readback_configured": bool(self.cdn_hostname),
+            "cdn_token_auth_policy": self.cdn_token_auth_policy,
+            "cdn_readback_signed": bool(self.cdn_signing_key),
+            "cdn_token_key_ignored": bool(self.cdn_token_key) and not self.cdn_signing_key,
+            "approved_referrers": list(self.approved_referrers),
+            "require_block_none_referrer": self.require_block_none_referrer,
             "lookback_days": self.lookback_days, "workers": self.workers,
             "max_imports_in_flight": self.max_imports_in_flight,
             "discovery_interval_seconds": self.discovery_interval.total_seconds(),
@@ -298,6 +323,10 @@ class PublisherConfig:
             production_write_enabled=flag("PUBLISHER_PRODUCTION_WRITE_ENABLED"),
             production_cdn_hostname=text("BUNNY_PRODUCTION_CDN_HOSTNAME"),
             cdn_token_key=text("BUNNY_CDN_TOKEN_KEY"),
+            cdn_token_auth_policy=text("PUBLISHER_CDN_TOKEN_AUTH", CDN_DEFERRED).upper(),
+            approved_referrers=tuple(sorted({d.strip().lower() for d in text(
+                "PUBLISHER_APPROVED_REFERRERS", APPROVED_REFERRERS_DEFAULT).split(",") if d.strip()})),
+            require_block_none_referrer=flag("PUBLISHER_REQUIRE_BLOCK_NONE_REFERRER", True),
             workers=number("PUBLISHER_WORKERS", 2),
             max_imports_in_flight=number("PUBLISHER_MAX_IMPORTS_IN_FLIGHT", 2),
             poll_seconds=number("PUBLISHER_POLL_SECONDS", 5.0, float),

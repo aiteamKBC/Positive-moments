@@ -12,6 +12,8 @@
   - the audit trail uses `bunny_publisher_events` (026).
 - **No re-import:** the 7 existing videos, their captions and every ID stay as they are.
 
+**CDN token authentication is deferred for this rollout** (Kent decision, 24 Oct 2026). It is reported, never required, and the publisher needs no CDN key. The residual risk is documented in the checklist.
+
 **Gates that keep learners out**, each sufficient on its own:
 1. No lecture is RELEASED until an operator runs `release`. `release` refuses while the library fails `security-check`.
 2. `PUBLISHER_LMS_PLAYBACK_ENABLED=false` in the Django environment makes `playback.available` false for every answer.
@@ -54,7 +56,15 @@
 
 ## Phase B: secure library 786045 (Bunny account owner)
 
-Follow [the security checklist](../docs/integration/BUNNY_786045_SECURITY_CHECKLIST.md), steps 1–6. Learners are unaffected, because nothing is released.
+Follow [the security checklist](../docs/integration/BUNNY_786045_SECURITY_CHECKLIST.md), steps 1–6:
+- embed token authentication **on**;
+- direct play **off**;
+- allowed domain exactly `lms.kentbusinesscollege.org`;
+- block requests without a referrer **on**;
+- CDN token authentication **left off** (deferred);
+- DRM off.
+
+Learners are unaffected, because nothing is released. Read the checklist's *Residual risk* section before Phase D.
 
 **Rollback for Phase B:** revert the setting in the Bunny dashboard. This only re-opens access, and nothing is released.
 
@@ -68,8 +78,12 @@ Follow [the security checklist](../docs/integration/BUNNY_786045_SECURITY_CHECKL
    BUNNY_PRODUCTION_API_KEY=<the same library API key as BUNNY_STAGING_API_KEY>
    BUNNY_PRODUCTION_ACCOUNT_API_KEY=<the same account key as BUNNY_STAGING_ACCOUNT_API_KEY>
    BUNNY_PRODUCTION_CDN_HOSTNAME=<the same host as BUNNY_STAGING_CDN_HOSTNAME>
-   BUNNY_CDN_TOKEN_KEY=<the pull zone token key; only once CDN token authentication is on>
+   PUBLISHER_CDN_TOKEN_AUTH=DEFERRED
+   PUBLISHER_APPROVED_REFERRERS=lms.kentbusinesscollege.org
+   PUBLISHER_REQUIRE_BLOCK_NONE_REFERRER=true
    ```
+   - The last three lines are the defaults; writing them down makes the policy visible.
+   - **Do not set `BUNNY_CDN_TOKEN_KEY`:** CDN token authentication is deferred, and the caption read-back stays unsigned.
 2. **Check the configuration (read-only):**
    ```bash
    sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/config/publisher.env validate-config --check-library
@@ -79,7 +93,11 @@ Follow [the security checklist](../docs/integration/BUNNY_786045_SECURITY_CHECKL
    ```bash
    sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/config/publisher.env security-check --caption-readback-video-id <GUID>
    ```
-   **Expected:** `"secure": true`, `caption_readback.status` 200.
+   **Expected:**
+   - `"secure": true` and `"problems": []`;
+   - `"cdn_token_authentication": {"policy": "DEFERRED", "status": "DEFERRED"}`;
+   - warnings `CDN_TOKEN_AUTHENTICATION_DEFERRED` and `ORIGINAL_FILES_KEPT`;
+   - `"caption_readback": {"status": 200, "signed": false}`.
 4. **Restart the publisher gracefully** (approved window): `sudo systemctl restart --no-block bunny-publisher.service`.
 5. **Verify:**
    - `status` shows new-PID heartbeats.
@@ -94,7 +112,7 @@ Follow [the security checklist](../docs/integration/BUNNY_786045_SECURITY_CHECKL
 
 ## Phase D: release, then turn learner playback on
 
-1. **Staff playback test** (checklist step 9) on one lecture:
+1. **Staff playback test** on one lecture: checklist steps 8–9, and every long-playback live check in [the LMS guide, §6](../docs/integration/LMS_INTEGRATION_GUIDE.md#6-long-playback-pause-seek-resume-and-token-expiry):
    ```bash
    sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/config/publisher.env \
         release --lecture-id <lecture uuid> --actor "<name>" --reason "<why>"

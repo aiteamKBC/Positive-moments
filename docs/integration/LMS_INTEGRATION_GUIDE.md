@@ -21,7 +21,7 @@ Bunny Stream becomes the primary playback source for recorded live sessions. Tea
 | Release and withdrawal | Owns it (audited) | Decides *when* to show a released recording |
 | Learner login, enrolment, entitlement | Never | **Owns it**, and checks on every playback |
 | Signing the Bunny embed URL | Never (holds no learner context) | **Owns it**, using the library's token authentication key |
-| Viewing analytics | — | **Owns it**, keyed on your `artifact_id` (see §6) |
+| Viewing analytics | — | **Owns it**, keyed on your `artifact_id` (see §7) |
 | Bunny management (API) keys | Only holder | Never needs them |
 
 ## 3. Calling the API
@@ -130,7 +130,9 @@ URL     = https://player.mediadelivery.net/embed/{library_id}/{video_id}?token={
 
 - **The key:** `token_security_key` is on library 786045's **Security** page, in the **Token authentication key** card. Bunny labels the field "API key", but it is **not** the library API key. Kent hands it over through a secure channel. It's the LMS's to hold, and it never leaves your servers.
 - **Lifetime:** sign one URL per part, per request, valid for 5–15 minutes, and only after the enrolment check passes.
-- **Referrer:** the iframe must be served from a domain on the library's allowed list (agree the list with Kent).
+- **Referrer:** the iframe must be served from `lms.kentbusinesscollege.org`, the only allowed domain. Requests without a referrer are blocked, subject to browser testing.
+- **Host:** always embed via `player.mediadelivery.net`, never the legacy `iframe.mediadelivery.net`.
+- **Keep GUIDs confidential:** don't log `video_id` in the browser and don't put it in shareable links. For this rollout, CDN token authentication is **deferred**: the video files behind the player are protected only by the referrer rule, so a leaked GUID plus a forged `Referer` header is enough to download a recording (see the [security checklist](BUNNY_786045_SECURITY_CHECKLIST.md#residual-risk-while-cdn-token-authentication-is-deferred)).
 
 **Working examples** (placeholders only): [Python](examples/lms_playback_example.py) · [Node.js](examples/lms_playback_example.mjs).
 
@@ -140,7 +142,50 @@ Both examples do the same four steps:
 3. Refuse unless `playback.available` is true.
 4. Sign each part.
 
-## 6. Keeping your viewing analytics
+## 6. Long playback: pause, seek, resume and token expiry
+
+Lectures run up to about 2 h 15 min, and a token lives for 5–15 minutes.
+
+**What Bunny documents:** the iframe URL must carry a valid `token` / `expires` pair. Its documentation doesn't say whether anything *after* the iframe has loaded (playlists, segments, captions) checks the token.
+
+**Expected in this rollout:**
+- CDN token authentication is off, so the loaded player's file requests are checked only against the referrer. Pause, seek and resume inside an already-loaded player should therefore keep working after `expires`.
+- Anything that **reloads the iframe** needs a **new** signed URL: a page refresh, opening the next part, coming back later, or a browser discarding the tab.
+
+**This must be confirmed live before release.**
+
+**What the LMS should do:**
+- **Sign when the page is rendered**, never ahead of time, and never cache a signed URL.
+- **Resume from a saved position** with a fresh URL plus Bunny's documented start-time parameter `t`, e.g. `&t=3725` for 1:02:05. Optionally use `rememberPosition=true`, which uses the browser's own memory.
+- **Default captions** with `captions=en`.
+- **For multi-part lectures**, sign each part's URL when that part is shown.
+- **If live testing shows playback stops after `expires`:**
+  - **either** re-render the iframe with a new URL and `t` = the current position (from your viewing heartbeat);
+  - **or**, as a fallback, raise the token lifetime to cover the lecture plus a margin (e.g. 3 h). This makes leaked URLs usable for longer; decide with Kent.
+
+### Live checks (staff, before release)
+
+Use a 10-minute token on one released lecture over 2 h long. Record the browser, device, token TTL and result for each.
+
+| # | Scenario | Expected |
+|---|---|---|
+| 1 | Play continuously for 20 min (past `expires`) | Keeps playing |
+| 2 | Pause 30 min (past `expires`), then resume | Resumes |
+| 3 | After expiry, seek to the last 5 minutes | Plays from there |
+| 4 | After expiry, seek back to 0:00 | Plays from there |
+| 5 | Captions on (`captions=en`), seek several times | Captions stay in sync |
+| 6 | Reload the page with the **old** URL after expiry | 403; the LMS's freshly rendered URL plays |
+| 7 | Resume next day from the saved position (`t=`) | New URL, starts at the position |
+| 8 | Part 1 to the end, then open part 2 | Part 2 signed on open; plays |
+| 9 | Laptop asleep / tab in background for 1 h, then return | Continues, or recovers on reload with a new URL |
+| 10 | Wi-Fi → mobile data mid-lecture | Continues after a short buffer |
+| 11 | Copy the signed URL into a page on another domain | 403 (referrer) |
+| 12 | Open the signed URL with no referrer (address bar) | 403 (no-referrer block) |
+| 13 | Browsers | Chrome, Edge, Firefox, Safari (macOS), **Safari (iOS)**, Chrome (Android): all play when embedded on `lms.kentbusinesscollege.org` |
+
+If #13 fails on Safari for iOS because of the no-referrer block, Kent can relax that one protection (`PUBLISHER_REQUIRE_BLOCK_NONE_REFERRER=false`, plus the library setting). That is a recorded policy decision, not a code change.
+
+## 7. Keeping your viewing analytics
 
 `parts[].teams_recording_id` is the Microsoft Graph recording ID. It equals `curriculum.live_session_artifacts.graph_artifact_id`.
 
@@ -148,7 +193,7 @@ Both examples do the same four steps:
 - **Effect:** you can keep `live_session_recording_views` keyed on your own `artifact_id` and just change the player.
 - **Not every Teams recording becomes a Bunny part:** excluded fragments don't.
 
-## 7. Incremental sync (optional)
+## 8. Incremental sync (optional)
 
 ```
 GET {base}/api/publisher/v1/occurrences?changed_since=2026-10-24T08:00:00Z&limit=50
@@ -162,16 +207,16 @@ GET {base}/api/publisher/v1/occurrences?changed_since=2026-10-24T08:00:00Z&limit
 
 **The feed is for listings, not for playback:** use it to keep "recording available" badges current. Playback must still re-ask the single-occurrence route.
 
-## 8. Health and support
+## 9. Health and support
 
 - **Health check:** `GET {base}/api/publisher/v1/health` returns the contract version, library, whether playback is switched on, and database status. It needs the same token.
 - **Logging:** every request writes one access-log line (route, status, duration, token fingerprint, occurrence ID). Quote the occurrence ID when you report a problem.
 - **Contract changes:** v1 only gains optional fields. A breaking change gets `/v2/`.
 
-## 9. Before go-live, please confirm
+## 10. Before go-live, please confirm
 
 1. Will Bunny replace Teams playback, with Teams as the fallback while a recording isn't `available`? (Decided by Kent; confirm the LMS rollout plan.)
-2. Which LMS domains serve the player? They go on the library's allowed referrer list.
+2. Is `lms.kentbusinesscollege.org` the only domain that serves the player (web *and* any mobile app web views)?
 3. Where does the LMS backend run? This is for an optional IP allowlist at Kent's proxy.
 4. Who receives the service token and the token authentication key, and how are they rotated?
 5. How does enrolment resolve to an occurrence, including shared-module cohorts?

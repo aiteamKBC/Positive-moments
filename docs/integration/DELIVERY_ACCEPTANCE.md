@@ -8,8 +8,8 @@
 
 | Suite | Command | Result |
 |---|---|---|
-| Delivery integration (test DB) | `pytest tests/integration/test_publisher_delivery.py` | **11 passed** |
-| Delivery units | `pytest tests/unit/test_publisher_delivery_units.py` | **17 passed** |
+| Delivery integration (test DB) | `pytest tests/integration/test_publisher_delivery.py` | **13 passed** |
+| Delivery units | `pytest tests/unit/test_publisher_delivery_units.py` | **22 passed** |
 | Affected units (config, read-back, Bunny client, recording fakes) | `pytest tests/unit/test_publisher_runtime_units.py tests/unit/test_bunny_caption_readback.py tests/unit/test_bunny_client.py tests/unit/test_publisher_recording_mapping.py tests/unit/test_publisher_recording_worker.py` | all passed (98 and 75 in two runs) |
 | Django LMS API + staff withdraw + existing publisher API | `cd backend && python manage.py test operations.tests.test_lms_api operations.tests.test_publisher_api` | **18 OK** |
 | Publisher runtime regression (test DB) | `pytest tests/integration/test_publisher_runtime.py` | **43 passed** (7 min 45 s) |
@@ -33,7 +33,12 @@
 | New lecture after production-mode configuration | Same test: a new lecture reaches READY with its caption read back through a signed CDN URL, and stays NOT_RELEASED |
 | Token security | `test_embed_token_is_the_documented_sha256_hex_of_key_video_and_expiry`, `test_signed_embed_url_is_short_lived_and_never_carries_the_key`, `test_a_token_for_one_video_or_expiry_does_not_fit_another`, `test_cdn_token_is_the_documented_hmac_sha256_base64url`, `test_the_pull_zone_read_drops_its_secret_key`, `test_a_wrong_cdn_key_never_counts_as_a_content_check` |
 | Blocked playback | `PLAYBACK_DISABLED`, `NOT_RELEASED`, `WITHDRAWN` and `STATE_*` reasons in the tests above; `test_unknown_and_lms_only_occurrences` |
-| Security gate | `test_each_open_library_setting_is_reported`, `test_cdn_token_authentication_off_or_unreadable_is_reported`, `test_library_786045_as_read_on_2026_10_24_is_not_yet_secure`; release refused with `LIBRARY_NOT_SECURE` |
+| Security gate: approved policy (24 Oct 2026) | `test_each_approved_protection_is_a_release_blocker` (embed token, direct play, no-referrer block, MP4 fallback, allowed domain missing *or* extra); `test_library_786045_as_read_on_2026_10_24_is_not_yet_releasable`; release refused with `LIBRARY_NOT_SECURE` |
+| CDN token authentication DEFERRED | `test_the_approved_rollout_library_passes_with_cdn_protection_reported_deferred`, `test_deferred_cdn_protection_is_never_reported_as_enabled_or_silently_secure` (status `DEFERRED` / `DEFERRED_BUT_ENABLED`, never "secure" by omission); `test_block_none_referrer_can_be_relaxed_by_policy_after_browser_testing`; `test_drm_on_is_reported_but_not_a_blocker` |
+| No CDN key needed while deferred | `test_production_write_is_disabled_by_default` (config: no key needed; a configured key is ignored; `REQUIRED` needs key and host) |
+| Caption verification without CDN signing | `test_deferred_cdn_protection_reads_back_unsigned_even_with_a_key_configured`; `test_production_mode_adopts_existing_videos_and_still_processes_new_lectures[cdn-deferred-approved]` (a new lecture's caption is read back unsigned from the production CDN host: content verified, READY) |
+| CDN protection kept as a future mode | `…[cdn-required-future]` (signed read-back), `test_a_wrong_cdn_key_never_counts_as_a_content_check`, `test_required_cdn_protection_is_a_release_blocker` |
+| CDN protection enabled while the policy is deferred | `test_cdn_protection_turned_on_while_policy_is_deferred_blocks_release_not_playback`: read-back 403, caption not content-checked, release refused |
 
 ## Read-only run against production data (24 Oct 2026)
 
@@ -57,8 +62,18 @@ The connection had `transaction_read_only = on`, library 786045, and `playback_e
 
 **Latency from the workstation:** 1.6–4.3 s per READY occurrence (about 25 sequential queries, each crossing the workstation-to-Neon round trip); 0.5 s for coverage-only or unknown occurrences. The feed page is capped at 50 items because of this. Measure again from the VPS in Phase A.
 
+## Direct-access probe (24 Oct 2026, read-only)
+
+Status codes only, for one existing video. Full table and interpretation: [security checklist, *Residual risk*](BUNNY_786045_SECURITY_CHECKLIST.md#residual-risk-while-cdn-token-authentication-is-deferred).
+
+**Findings:**
+- **With an LMS `Referer`:** the HLS playlists, thumbnails and the original file answer 200. With no referrer or a foreign one, they answer 403.
+- **Captions** answer 200 to everyone.
+- **MP4 fallback:** 404 (none exist).
+- **Player pages without a token:** 200 for now. Embed token authentication was still off; re-probe after Phase B.
+
 ## Not verifiable locally (activation checks)
 
-- **CDN token signing against the real pull zone:** `security-check --caption-readback-video-id` must return 200. The algorithm follows Bunny's current documentation; the tests check internal consistency only.
-- **Captions in the embed player with CDN token authentication on:** Bunny's documentation doesn't cover this. Staff test, checklist step 9.
+- **Unsigned caption read-back from the production CDN host:** `security-check --caption-readback-video-id` must return 200 with `signed: false`. CDN token signing (the future `REQUIRED` mode) follows Bunny's documentation; the tests check internal consistency only.
+- **Long playback past token expiry** (pause, seek, resume, reload): the live checks in [LMS guide §6](LMS_INTEGRATION_GUIDE.md#6-long-playback-pause-seek-resume-and-token-expiry).
 - **Safari / iOS referrer behaviour** with *Block requests without a referrer*: staff test.

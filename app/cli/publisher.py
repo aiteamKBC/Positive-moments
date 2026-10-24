@@ -63,7 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--actor", required=True)
     decide.add_argument("--reason", required=True)
     security = sub.add_parser("security-check", help="read-only learner-delivery security check of the library "
-                                                     "and its pull zone (flags only; nothing is changed)")
+                                                     "and its pull zone against the approved policy (CDN token "
+                                                     "authentication reported as DEFERRED or REQUIRED; nothing "
+                                                     "is changed)")
     security.add_argument("--caption-readback-video-id", default=None,
                           help="also fetch this video's caption from the CDN the way the publisher's read-back "
                                "does, and report only the HTTP status (validates CDN token signing)")
@@ -214,11 +216,12 @@ def main(argv=None) -> int:
 def _security(config) -> dict:
     """Read-only: Get Video Library + Get Pull Zone with the account key; flags only."""
     from app.bunny.client import BunnyCoreClient
-    from app.publisher.library_security import read_delivery_security
+    from app.publisher.library_security import DeliveryPolicy, read_delivery_security
     if config.library_id is None or not config.account_api_key:
-        return {"secure": False, "library_id": config.library_id,
+        return {"secure": False, "library_id": config.library_id, "warnings": [],
                 "problems": ["NO_LIBRARY: a write mode with its account key is needed for the security check"]}
-    return read_delivery_security(BunnyCoreClient(config.account_api_key), config.library_id)
+    return read_delivery_security(BunnyCoreClient(config.account_api_key), config.library_id,
+                                  DeliveryPolicy.from_config(config))
 
 
 def _caption_readback(config, video_id: str) -> dict:
@@ -232,14 +235,16 @@ def _caption_readback(config, video_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-fA-F-]{36}", video_id or "") or not config.cdn_hostname:
         return {"status": "NOT_ATTEMPTED", "detail": "needs a video GUID and a configured CDN hostname"}
     path = f"/{video_id}/captions/{config.caption_language}.vtt"
-    url = tokens.signed_cdn_url(config.cdn_hostname, path, config.cdn_token_key, params={"ver": 0})         if config.cdn_token_key else f"https://{config.cdn_hostname}{path}?ver=0"
+    key = config.cdn_signing_key                      # "" while CDN token authentication is DEFERRED
+    url = (tokens.signed_cdn_url(config.cdn_hostname, path, key, params={"ver": 0}) if key
+           else f"https://{config.cdn_hostname}{path}?ver=0")
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "text/vtt"}), timeout=30) as r:
             body = r.read()
-            return {"status": r.status, "signed": bool(config.cdn_token_key),
+            return {"status": r.status, "signed": bool(key),
                     "is_webvtt": body.lstrip(BOM)[:6] == b"WEBVTT"}
     except urllib.error.HTTPError as error:
-        return {"status": error.code, "signed": bool(config.cdn_token_key)}
+        return {"status": error.code, "signed": bool(key)}
     except (urllib.error.URLError, OSError) as error:
         return {"status": "UNREACHABLE", "detail": type(error).__name__}
 

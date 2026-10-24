@@ -66,10 +66,34 @@ class TokenCdn:
         return _Response(text.encode("utf-8"))
 
 
-def production(**extra):
-    return {**dict(mode=PRODUCTION_WRITE, production_library_id=LIBRARY_ID, production_api_key="k",
-                   production_account_api_key="a", production_write_enabled=True,
-                   production_cdn_hostname=CDN_HOST, cdn_token_key=CDN_KEY), **extra}
+def production(*, signed=False, **extra):
+    """PRODUCTION_WRITE on the SAME library. Approved rollout: CDN token authentication DEFERRED (unsigned
+    read-back). signed=True is the future REQUIRED mode, with the pull zone key."""
+    base = dict(mode=PRODUCTION_WRITE, production_library_id=LIBRARY_ID, production_api_key="k",
+                production_account_api_key="a", production_write_enabled=True, production_cdn_hostname=CDN_HOST)
+    if signed:
+        base.update(cdn_token_auth_policy="REQUIRED", cdn_token_key=CDN_KEY)
+    return {**base, **extra}
+
+
+def add_second_lecture(world):
+    """A new lecture (own meeting, recording and transcript) after the mode switch; returns the first id."""
+    first = world.lecture_id
+    [(first_meeting,)] = world.q("SELECT meeting_id FROM public.lecture_sessions WHERE lecture_id = %s", first)
+    for recording in world.rgraph.recordings:
+        world.rgraph.scoped[recording["id"]] = first_meeting
+    second_start = END + timedelta(minutes=30)
+    world.lecture_id = world.lecture(start=second_start, end=second_start + timedelta(hours=1))
+    world.start, world.end = second_start, second_start + timedelta(hours=1)
+    [(second_meeting,)] = world.q("SELECT meeting_id FROM public.lecture_sessions WHERE lecture_id = %s",
+                                  world.lecture_id)
+    world.add_occurrence()
+    correlation = f"corr-after-switch-{second_meeting[-6:]}"
+    recording = world.rgraph.recording(second_start + timedelta(minutes=1), world.end - timedelta(minutes=2),
+                                       correlation=correlation, meeting_id=second_meeting)
+    world.rgraph.recorded_file(recording, lead=35)
+    world.transcript(second_start + timedelta(minutes=1), world.end - timedelta(minutes=2), correlation)
+    return first
 
 
 def delivered(url, *, cdn_key=None, **config):
@@ -257,7 +281,8 @@ def test_concurrent_releases_and_withdrawals_serialise(url):
 
 
 # =========================================================================== production mode adoption
-def test_production_mode_adopts_existing_videos_and_still_processes_new_lectures(url):
+@pytest.mark.parametrize("signed", [False, True], ids=["cdn-deferred-approved", "cdn-required-future"])
+def test_production_mode_adopts_existing_videos_and_still_processes_new_lectures(url, signed):
     world = ready_world(url)                                    # published while STAGING_WRITE
     before = world.q("SELECT bunny_video_record_id, bunny_video_id, encoding_status, visibility_state "
                      "FROM public.bunny_videos ORDER BY 1")
@@ -267,10 +292,12 @@ def test_production_mode_adopts_existing_videos_and_still_processes_new_lectures
     released = world.q("SELECT bunny_video_record_id, visibility_state FROM public.bunny_videos ORDER BY 1")
 
     # The operator switches the SAME library to PRODUCTION_WRITE (no re-import, no id change).
-    world.config = PublisherConfig(**{**world.config.__dict__, **production()})
-    assert world.config.validate().library_id == LIBRARY_ID and world.config.describe()["adopts_staging_library"]
+    world.config = PublisherConfig(**{**world.config.__dict__, **production(signed=signed)})
+    config = world.config.validate()
+    assert config.library_id == LIBRARY_ID and config.describe()["adopts_staging_library"]
+    assert config.describe()["cdn_readback_signed"] is signed
     world.daemon = world._daemon()
-    world.cdn = TokenCdn(world.bunny, CDN_KEY)
+    world.cdn = TokenCdn(world.bunny, CDN_KEY if signed else None)
     world.runtime.open_url = world.cdn
     world.run(rounds=6)
     assert len(world.bunny.fetch_calls) == fetches and world.bunny.delete_calls == []
@@ -282,26 +309,13 @@ def test_production_mode_adopts_existing_videos_and_still_processes_new_lectures
     assert world.events().count("LECTURE_FULLY_READY") == 1
     assert answer(world)["playback"]["available"] is True
 
-    # A NEW lecture after the switch goes all the way, its caption read back through a signed CDN URL.
-    # (Each lecture's Teams meeting lists only its own recording; the first one's stays its own.)
-    first = world.lecture_id
-    [(first_meeting,)] = world.q("SELECT meeting_id FROM public.lecture_sessions WHERE lecture_id = %s", first)
-    for recording in world.rgraph.recordings:
-        world.rgraph.scoped[recording["id"]] = first_meeting
-    second_start = END + timedelta(minutes=30)
-    world.lecture_id = world.lecture(start=second_start, end=second_start + timedelta(hours=1))
-    world.start, world.end = second_start, second_start + timedelta(hours=1)
-    [(second_meeting,)] = world.q("SELECT meeting_id FROM public.lecture_sessions WHERE lecture_id = %s",
-                                  world.lecture_id)
-    world.add_occurrence()
-    correlation = "corr-after-production-switch"
-    recording = world.rgraph.recording(second_start + timedelta(minutes=1), world.end - timedelta(minutes=2),
-                                       correlation=correlation, meeting_id=second_meeting)
-    world.rgraph.recorded_file(recording, lead=35)
-    world.transcript(second_start + timedelta(minutes=1), world.end - timedelta(minutes=2), correlation)
+    # A NEW lecture after the switch goes all the way; its caption is read back from the production CDN host,
+    # unsigned while CDN token authentication is DEFERRED, signed in the future REQUIRED mode.
+    first = add_second_lecture(world)
     world.run(rounds=16)
     assert world.ready() and world.lecture_id != first
-    assert any("token=HS256-" in u and "expires=" in u for u in world.cdn.urls)
+    urls = [u for u in world.cdn.urls if CDN_HOST in u]
+    assert urls and all(("token=HS256-" in u and "expires=" in u) is signed for u in urls)
     body = answer(world)
     assert body["state"] == "READY" and body["recording"]["parts"][0]["captions"][0]["content_verified"]
     assert body["release"]["status"] == "NOT_RELEASED"                          # never public on its own
@@ -310,7 +324,7 @@ def test_production_mode_adopts_existing_videos_and_still_processes_new_lectures
 
 
 def test_a_wrong_cdn_key_never_counts_as_a_content_check(url):
-    world = delivered(url, cdn_key=CDN_KEY, **production(cdn_token_key="not-the-pull-zone-key"))
+    world = delivered(url, cdn_key=CDN_KEY, **production(signed=True, cdn_token_key="not-the-pull-zone-key"))
     world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
     world.run(rounds=10)
     body = answer(world)
@@ -318,6 +332,18 @@ def test_a_wrong_cdn_key_never_counts_as_a_content_check(url):
     [(check,)] = world.q("SELECT readback ->> 'content_check' FROM public.bunny_caption_publications "
                          "WHERE lecture_id = %s", world.lecture_id)
     assert check == "CDN_UNAVAILABLE"
+
+
+def test_cdn_protection_turned_on_while_policy_is_deferred_blocks_release_not_playback(url):
+    # Someone enables CDN token authentication on the pull zone without switching the policy: the unsigned
+    # read-back gets 403, the caption is registered but not content-checked, and release refuses it.
+    world = delivered(url, cdn_key=CDN_KEY, **production())
+    world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
+    world.run(rounds=10)
+    assert world.ready() and answer(world)["blocking"] == ["PART_1_CAPTION_CONTENT_UNVERIFIED"]
+    with pytest.raises(OperatorActionRefused) as refused:
+        act(world, "release")
+    assert refused.value.code == "NOT_VERIFIED"
 
 
 # =========================================================================== unknown, LMS-only and the feed
