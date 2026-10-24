@@ -92,6 +92,8 @@ urlpatterns = [
          name="operations-publisher-job-history"),
     path("publisher/jobs/<uuid:job_id>/retry/", publisher_views.job_retry_view,
          name="operations-publisher-job-retry"),
+    path("publisher/lectures/<uuid:lecture_id>/withdraw/", publisher_views.lecture_withdraw_view,
+         name="operations-publisher-lecture-withdraw"),
     path("publisher/lectures/<uuid:lecture_id>/parts/<int:part_index>/decision/",
          publisher_views.part_decision_view, name="operations-publisher-part-decision"),
 ]

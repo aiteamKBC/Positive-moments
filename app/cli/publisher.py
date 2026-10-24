@@ -11,6 +11,10 @@ media runner; deliberately not a sub-command of app.cli.main).
     python -m app.cli.publisher retry           --job-id ID --actor NAME --reason TEXT
     python -m app.cli.publisher cancel          --job-id ID --actor NAME --reason TEXT   (blocked duplicates only)
     python -m app.cli.publisher decide-part     --lecture-id ID --part N --decision INCLUDE|EXCLUDE --actor --reason
+    python -m app.cli.publisher security-check  [--caption-readback-video-id GUID]   (read-only Bunny reads)
+    python -m app.cli.publisher release         --lecture-id ID --actor NAME --reason TEXT   (PRODUCTION_WRITE only)
+    python -m app.cli.publisher withdraw        --lecture-id ID --actor NAME --reason TEXT [--library-id N]
+    python -m app.cli.publisher delivery        --occurrence-id OCC-...   (the LMS v1 answer, read-only)
     python -m app.cli.publisher reconcile       --kind light|full
     python -m app.cli.publisher pilot-manifest  --manifest PATH --library-id N [--apply --actor NAME]
 
@@ -58,6 +62,22 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--decision", required=True, choices=("INCLUDE", "EXCLUDE"))
     decide.add_argument("--actor", required=True)
     decide.add_argument("--reason", required=True)
+    security = sub.add_parser("security-check", help="read-only learner-delivery security check of the library "
+                                                     "and its pull zone (flags only; nothing is changed)")
+    security.add_argument("--caption-readback-video-id", default=None,
+                          help="also fetch this video's caption from the CDN the way the publisher's read-back "
+                               "does, and report only the HTTP status (validates CDN token signing)")
+    for name, text in (("release", "RELEASE a verified lecture to the LMS (audited; PRODUCTION_WRITE only; "
+                                   "refused unless the library passes the security check)"),
+                       ("withdraw", "WITHDRAW a lecture from the LMS immediately (audited)")):
+        action = sub.add_parser(name, help=text)
+        action.add_argument("--lecture-id", required=True)
+        action.add_argument("--actor", required=True)
+        action.add_argument("--reason", required=True)
+        if name == "withdraw":
+            action.add_argument("--library-id", type=int, default=None)
+    delivery = sub.add_parser("delivery", help="what the LMS API answers for one occurrence (read-only)")
+    delivery.add_argument("--occurrence-id", required=True)
     reconcile = sub.add_parser("reconcile", help="run one reconciliation now")
     reconcile.add_argument("--kind", choices=("light", "full"), default="light")
     pilot = sub.add_parser("pilot-manifest", help="plan (default) or apply the pilot manifest promotion")
@@ -138,6 +158,38 @@ def main(argv=None) -> int:
                 connection.autocommit = True
                 return _print(operations.decide_part(connection, args.lecture_id, args.part, decision=args.decision,
                                                      actor=args.actor, reason=args.reason))
+        if args.command == "security-check":
+            report = _security(config)
+            if args.caption_readback_video_id:
+                report["caption_readback"] = _caption_readback(config, args.caption_readback_video_id)
+            return _print(report, ok=report["secure"])
+        if args.command in ("release", "withdraw"):
+            from app.publisher import delivery
+            if args.command == "release":
+                from app.publisher.config import PRODUCTION_WRITE
+                if config.mode != PRODUCTION_WRITE:
+                    return _print({"refused": "NOT_PRODUCTION_MODE",
+                                   "detail": "release needs PUBLISHER_MODE=PRODUCTION_WRITE"}, ok=False)
+                security = _security(config)
+                with _connect(config) as connection:
+                    connection.autocommit = True
+                    return _print(delivery.release(connection, args.lecture_id, library_id=config.library_id,
+                                                   actor=args.actor, reason=args.reason, security=security,
+                                                   language=config.caption_language))
+            library = args.library_id or config.library_id
+            if library is None:
+                return _print({"refused": "NO_LIBRARY", "detail": "pass --library-id in SHADOW mode"}, ok=False)
+            with _connect(config) as connection:
+                connection.autocommit = True
+                return _print(delivery.withdraw(connection, args.lecture_id, library_id=library, actor=args.actor,
+                                                reason=args.reason, language=config.caption_language))
+        if args.command == "delivery":
+            from app.publisher import delivery
+            if config.library_id is None:
+                return _print({"refused": "NO_LIBRARY", "detail": "SHADOW mode has no delivery library"}, ok=False)
+            answer = _read(config, delivery.occurrence_recording, args.occurrence_id, library_id=config.library_id,
+                           playback_enabled=False, language=config.caption_language)
+            return _print(answer if answer is not None else {"refused": "OCCURRENCE_NOT_FOUND"}, ok=answer is not None)
         if args.command == "reconcile":
             from app.publisher.runtime import build_daemon
             return _print(build_daemon(config).reconciler.run(args.kind.upper()))
@@ -157,6 +209,39 @@ def main(argv=None) -> int:
     except operations.OperatorActionRefused as error:
         return _print({"refused": error.code, "detail": error.detail}, ok=False)
     return 2
+
+
+def _security(config) -> dict:
+    """Read-only: Get Video Library + Get Pull Zone with the account key; flags only."""
+    from app.bunny.client import BunnyCoreClient
+    from app.publisher.library_security import read_delivery_security
+    if config.library_id is None or not config.account_api_key:
+        return {"secure": False, "library_id": config.library_id,
+                "problems": ["NO_LIBRARY: a write mode with its account key is needed for the security check"]}
+    return read_delivery_security(BunnyCoreClient(config.account_api_key), config.library_id)
+
+
+def _caption_readback(config, video_id: str) -> dict:
+    """Fetch one caption file from the CDN as the publisher's read-back does. Reports the status only."""
+    import re
+    import urllib.error
+    import urllib.request
+
+    from app.bunny import tokens
+    BOM = bytes((0xEF, 0xBB, 0xBF))
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", video_id or "") or not config.cdn_hostname:
+        return {"status": "NOT_ATTEMPTED", "detail": "needs a video GUID and a configured CDN hostname"}
+    path = f"/{video_id}/captions/{config.caption_language}.vtt"
+    url = tokens.signed_cdn_url(config.cdn_hostname, path, config.cdn_token_key, params={"ver": 0})         if config.cdn_token_key else f"https://{config.cdn_hostname}{path}?ver=0"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "text/vtt"}), timeout=30) as r:
+            body = r.read()
+            return {"status": r.status, "signed": bool(config.cdn_token_key),
+                    "is_webvtt": body.lstrip(BOM)[:6] == b"WEBVTT"}
+    except urllib.error.HTTPError as error:
+        return {"status": error.code, "signed": bool(config.cdn_token_key)}
+    except (urllib.error.URLError, OSError) as error:
+        return {"status": "UNREACHABLE", "detail": type(error).__name__}
 
 
 def _print(value, *, ok: bool = True) -> int:

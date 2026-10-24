@@ -54,18 +54,22 @@ class FakeRecordingGraph:
         self.teams: dict[str, list[str]] = {}            # team -> channel ids (joined by the lookup user)
         self.channel_items: dict[str, list] = defaultdict(list)
         self.calls: list[tuple] = []
+        self.scoped: dict[str, str] = {}                  # recording id -> the only meeting that lists it
         self.invalidations = 0
         self._next = 0
 
     # -- building the world --------------------------------------------------------------
     def recording(self, start: datetime, end: datetime | None, *, call_id="call-1", correlation=None,
-                  recording_id=None) -> dict:
+                  recording_id=None, meeting_id=None) -> dict:
+        """`meeting_id` scopes the recording to that meeting's listing (default: every meeting sees it)."""
         self._next += 1
         row = {"id": recording_id or f"rec-{uuid.uuid4().hex[:12]}", "callId": call_id,
                "contentCorrelationId": correlation or f"corr-{uuid.uuid4().hex[:12]}",
                "createdDateTime": iso(start), "endDateTime": iso(end) if end else None,
                "meetingId": "synthetic-meeting",
                "recordingContentUrl": "https://example.invalid/recording/content"}
+        if meeting_id:
+            self.scoped[row["id"]] = meeting_id
         self.recordings.append(row)
         return row
 
@@ -107,7 +111,8 @@ class FakeRecordingGraph:
                 error = self.recording_errors.pop(0)
                 if error is not None:
                     raise error
-            return [dict(r) for r in self.recordings]
+            meeting = decoded.split("/onlineMeetings/", 1)[1].split("/recordings", 1)[0]
+            return [dict(r) for r in self.recordings if self.scoped.get(r["id"], meeting) == meeting]
         if "/drive/root:/Recordings:/children" in decoded:
             user = decoded.split("/users/", 1)[1].split("/", 1)[0]
             self.calls.append(("onedrive", user))

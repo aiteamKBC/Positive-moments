@@ -39,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg
 
 from app.bunny import captions as cap
+from app.bunny import tokens
 from app.bunny.client import FAILED_STATUSES, FINISHED, STATUS_NAMES, BunnyError
 from app.bunny.identity import build_publisher_title, caption_publication_id, recording_identity, video_record_id
 from app.bunny.verification import media_checks
@@ -186,6 +187,14 @@ class _Worker:
 def _backoff(attempt: int) -> timedelta:
     steps = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15), timedelta(hours=1))
     return steps[attempt - 1] if 1 <= attempt <= len(steps) else timedelta(hours=3)
+
+
+def _cdn_hostname(cfg) -> str:
+    """The CDN host of the library this process writes to ("" = no content read-back)."""
+    host = getattr(cfg, "cdn_hostname", None)
+    if isinstance(host, str):
+        return host
+    return getattr(cfg, "staging_cdn_hostname", "") if getattr(cfg, "mode", "") == "STAGING_WRITE" else ""
 
 
 def _status_name(code) -> str:
@@ -780,10 +789,15 @@ class CaptionWorker(_Worker):
         readback = {"registered": entry is not None,
                     "label_matches": bool(entry) and entry.get("label") == cfg.caption_label,
                     "caption_version": entry.get("version") if entry else None, "content_check": "NOT_ATTEMPTED"}
-        host = getattr(cfg, "staging_cdn_hostname", "") if cfg.mode == "STAGING_WRITE" else ""
+        host = _cdn_hostname(cfg)
         if entry is None or not host or self.rt.open_url is None:
             return readback
-        url = f"https://{host}/{video_id}/captions/{cfg.caption_language}.vtt?ver={entry.get('version') or 0}"
+        path, version = f"/{video_id}/captions/{cfg.caption_language}.vtt", entry.get("version") or 0
+        key = getattr(cfg, "cdn_token_key", "")
+        # With CDN token authentication on, the caption file needs a token too; the publisher signs its own
+        # read-back with the pull zone key. A wrong or missing token is a 403 -> CDN_UNAVAILABLE, never a pass.
+        url = tokens.signed_cdn_url(host, path, key, params={"ver": version}) if key \
+            else f"https://{host}{path}?ver={version}"
         try:
             with self.rt.open_url(urllib.request.Request(url, headers={"Accept": "text/vtt"}), 60) as response:
                 served = response.read().decode("utf-8", "replace")

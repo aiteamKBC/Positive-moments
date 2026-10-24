@@ -14,8 +14,10 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from django.conf import settings
+
 from app.common.errors import PlatformError
-from app.publisher import operations
+from app.publisher import delivery, operations
 from app.publisher.config import PublisherConfig
 
 from .platform import reading, writing
@@ -108,4 +110,24 @@ def part_decision_view(request, lecture_id, part_index):
         connection.autocommit = True
         result = operations.decide_part(connection, str(lecture_id), part_index, decision=data.get("decision"),
                                         actor=_actor(request), reason=data.get("reason") or "")
+    return Response(result)
+
+
+@api_view(["POST"])
+@_handle
+def lecture_withdraw_view(request, lecture_id):
+    """
+    WITHDRAW a lecture from LMS delivery immediately (audited; body {"reason": "..."}).
+
+    RELEASE is deliberately not offered here: it needs a live read of the Bunny library's security
+    settings with the account key, which only the publisher service holds (CLI `release`).
+    """
+    library = settings.PUBLISHER_LMS_LIBRARY_ID or _library(request)
+    if library is None:
+        raise operations.OperatorActionRefused("NO_LIBRARY", "PUBLISHER_LMS_LIBRARY_ID is not configured")
+    reason = (request.data or {}).get("reason") if hasattr(request, "data") else None
+    with writing() as connection:
+        connection.autocommit = True
+        result = delivery.withdraw(connection, str(lecture_id), library_id=int(library), actor=_actor(request),
+                                   reason=reason or "")
     return Response(result)

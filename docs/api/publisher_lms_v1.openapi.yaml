@@ -1,0 +1,273 @@
+openapi: 3.0.3
+info:
+  title: Kent Lecture Recording Delivery API
+  version: "1"
+  description: |
+    Read-only API the Kent LMS backend uses to find the verified Bunny Stream recording of an LMS
+    live-session occurrence. Served by the Continuous Bunny Publisher's Django backend.
+
+    * Lookup is by the LMS's own identifier, `curriculum.live_session_occurrences.id`.
+    * Every answer is computed live from the publisher's readiness rule; nothing is cached.
+    * The LMS backend decides who may watch (enrolment) and signs the Bunny embed URL. This API
+      never sees a learner and never returns a signed URL, a key, a Teams link, a SharePoint
+      identifier or any job information.
+    * `playback.available` is the ONLY field that says a recording may be shown to a learner.
+servers:
+  - url: https://{host}/api/publisher/v1
+    variables:
+      host:
+        default: example.invalid
+        description: The Positive Moments backend host (confirmed at deployment).
+security:
+  - lmsServiceToken: []
+paths:
+  /occurrences/{lms_occurrence_id}/recording:
+    get:
+      operationId: getOccurrenceRecording
+      summary: The recording of one LMS occurrence, and whether it can be played
+      parameters:
+        - name: lms_occurrence_id
+          in: path
+          required: true
+          description: "`curriculum.live_session_occurrences.id`, e.g. OCC-4493AC65DF5041459BC5A14DA8B357A0"
+          schema: {type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"}
+      responses:
+        "200":
+          description: The publisher knows this occurrence. Read `state` and `playback.available`.
+          headers:
+            Cache-Control: {schema: {type: string, enum: [no-store]}}
+            X-Publisher-Contract: {schema: {type: string, enum: ["1"]}}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OccurrenceRecording"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "404":
+          description: The publisher has never seen this occurrence (code OCCURRENCE_NOT_FOUND).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Error"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+  /occurrences:
+    get:
+      operationId: listChangedOccurrences
+      summary: Occurrences whose answer may have changed (incremental sync feed)
+      description: |
+        Ordered by change time, oldest first, then by occurrence id. At-least-once: an occurrence
+        can appear again when anything it is computed from changes. To sync, keep the `updated_at`
+        of the last item you stored, and on the next run pass it as `changed_since` (minus a small
+        overlap, e.g. 2 minutes). Follow `next_cursor` while `has_more` is true.
+      parameters:
+        - name: changed_since
+          in: query
+          required: false
+          description: ISO 8601 with a timezone (exclusive). Omit for a full resync.
+          schema: {type: string, format: date-time}
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque; the `next_cursor` of the previous page.
+          schema: {type: string}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 50, default: 20}
+      responses:
+        "200":
+          description: One page.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Feed"}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/TooManyRequests"}
+        "503": {$ref: "#/components/responses/Unavailable"}
+  /health:
+    get:
+      operationId: getHealth
+      summary: Contract version, delivery library and whether playback is switched on
+      responses:
+        "200":
+          description: Healthy.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "503":
+          description: Degraded (database unavailable or delivery library not configured).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Health"}
+components:
+  securitySchemes:
+    lmsServiceToken:
+      type: http
+      scheme: bearer
+      description: |
+        A service token (at least 32 characters) issued to the LMS backend only. Sent as
+        `Authorization: Bearer <token>`. Two tokens may be valid at once during a rotation.
+  responses:
+    BadRequest:
+      description: A malformed parameter (INVALID_OCCURRENCE_ID, INVALID_CHANGED_SINCE, INVALID_LIMIT, INVALID_CURSOR).
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+    Unauthorized:
+      description: Missing, malformed or unknown service token.
+      headers:
+        WWW-Authenticate: {schema: {type: string, example: 'Bearer realm="publisher-lms"'}}
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: {detail: {type: string}}
+    TooManyRequests:
+      description: Rate limit for this service token exceeded. Honour `Retry-After`.
+      headers:
+        Retry-After: {schema: {type: integer}}
+    Unavailable:
+      description: NOT_CONFIGURED or PLATFORM_UNAVAILABLE. Retry with backoff; treat as "not playable".
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/Error"}
+  schemas:
+    Error:
+      type: object
+      required: [code, detail]
+      properties:
+        code: {type: string, example: OCCURRENCE_NOT_FOUND}
+        detail: {type: string}
+    State:
+      type: string
+      description: |
+        READY: every included part has a verified video and a verified, content-checked caption.
+        PROCESSING: still being recorded, imported, encoded or captioned.
+        REVIEW_REQUIRED: waiting for a publisher operator.
+        BLOCKED: duplicate calendar entry, or every part excluded.
+        WITHDRAWN: an operator withdrew it.
+        NOT_DISCOVERED: the publisher has no lecture for this occurrence (yet).
+        NOT_APPLICABLE: cancelled, test or inactive.
+      enum: [READY, PROCESSING, REVIEW_REQUIRED, BLOCKED, WITHDRAWN, NOT_DISCOVERED, NOT_APPLICABLE]
+    OccurrenceRecording:
+      type: object
+      required: [contract_version, lms_occurrence_id, state, blocking, release, playback]
+      properties:
+        contract_version: {type: string, enum: ["1"]}
+        lms_occurrence_id: {type: string}
+        lms_live_session_id: {type: string, nullable: true}
+        lms_module_catalogue_id: {type: string, nullable: true}
+        lms_session_number: {type: integer, nullable: true}
+        link_role:
+          type: string
+          nullable: true
+          enum: [PRIMARY, SHARED_MODULE]
+          description: SHARED_MODULE = the LMS shares this Teams meeting between modules.
+        state: {$ref: "#/components/schemas/State"}
+        blocking:
+          type: array
+          description: Machine-readable reasons the recording is not READY / not RELEASED (informational).
+          items: {type: string, example: PART_1_FRAGMENT_NEEDS_DECISION}
+        updated_at: {type: string, format: date-time, nullable: true}
+        lecture:
+          type: object
+          nullable: true
+          properties:
+            lecture_id: {type: string, format: uuid}
+            title: {type: string}
+            session_date: {type: string, format: date}
+            scheduled_start: {type: string, format: date-time}
+            scheduled_end: {type: string, format: date-time}
+            lms_match:
+              type: object
+              properties:
+                status: {type: string, example: VERIFIED}
+                rule_version: {type: string, nullable: true}
+        recording:
+          type: object
+          nullable: true
+          properties:
+            teams_part_count: {type: integer, description: Recordings Teams made for the meeting.}
+            published_part_count: {type: integer, description: Parts the learner plays, in `sequence` order.}
+            total_duration_seconds: {type: integer, nullable: true}
+            parts:
+              type: array
+              items: {$ref: "#/components/schemas/Part"}
+            excluded_parts:
+              type: array
+              items:
+                type: object
+                properties:
+                  source_part_index: {type: integer}
+                  reason: {type: string, enum: [OPERATOR_EXCLUDED]}
+        release: {$ref: "#/components/schemas/Release"}
+        playback: {$ref: "#/components/schemas/Playback"}
+    Part:
+      type: object
+      properties:
+        sequence: {type: integer, description: "Play order: 1..published_part_count."}
+        source_part_index: {type: integer, description: Teams recording order (may have gaps for excluded parts).}
+        classification: {type: string, enum: [FULL, PARTIAL, FRAGMENT, UNKNOWN], nullable: true}
+        teams_recording_id:
+          type: string
+          description: The Graph callRecording id = `curriculum.live_session_artifacts.graph_artifact_id`. Lets the LMS keep its viewing analytics keyed on its own artifact_id.
+        recorded_start: {type: string, format: date-time, nullable: true}
+        recorded_end: {type: string, format: date-time, nullable: true}
+        duration_seconds: {type: integer, nullable: true}
+        bunny:
+          type: object
+          nullable: true
+          properties:
+            library_id: {type: integer, example: 786045}
+            video_id: {type: string, format: uuid}
+        encoding: {type: string, enum: [NOT_IMPORTED, NOT_STARTED, IN_PROGRESS, FINISHED, VERIFIED, FAILED, REVIEW_REQUIRED]}
+        resolutions: {type: array, items: {type: string, example: 1080p}}
+        visibility: {type: string, nullable: true, enum: [HIDDEN, READY_FOR_LMS, WITHDRAWN]}
+        captions:
+          type: array
+          items:
+            type: object
+            properties:
+              language: {type: string, example: en}
+              label: {type: string, example: English}
+              status: {type: string, example: VERIFIED}
+              version: {type: integer, nullable: true}
+              content_verified: {type: boolean, description: The published caption file was read back and matched.}
+    Release:
+      type: object
+      properties:
+        status: {type: string, enum: [NOT_RELEASED, RELEASED, WITHDRAWN]}
+        released_at: {type: string, format: date-time, nullable: true}
+        withdrawn_at: {type: string, format: date-time, nullable: true}
+    Playback:
+      type: object
+      required: [available, library_id]
+      properties:
+        available:
+          type: boolean
+          description: True only when state is READY, the lecture is RELEASED and delivery is switched on. Never show a recording when false.
+        reason:
+          type: string
+          nullable: true
+          description: Why it is not available, e.g. STATE_PROCESSING, NOT_RELEASED, WITHDRAWN, PLAYBACK_DISABLED.
+        library_id: {type: integer}
+        player: {type: string, enum: [BUNNY_STREAM_EMBED]}
+        token_authentication_required: {type: boolean, enum: [true]}
+    Feed:
+      type: object
+      properties:
+        contract_version: {type: string}
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/OccurrenceRecording"}
+        next_cursor: {type: string, nullable: true}
+        has_more: {type: boolean}
+    Health:
+      type: object
+      properties:
+        contract_version: {type: string}
+        status: {type: string, enum: [ok, degraded]}
+        library_id: {type: integer, nullable: true}
+        playback_enabled: {type: boolean}
+        database: {type: string, enum: [ok, schema_missing, unavailable]}
+        time: {type: string, format: date-time}

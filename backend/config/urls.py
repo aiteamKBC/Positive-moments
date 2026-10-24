@@ -7,4 +7,5 @@ urlpatterns = [
     path("api/positive-mentions/", include("positive_mentions.urls")),
     path("api/social-media/", include("positive_mentions.social_urls")),
     path("api/operations/", include("operations.urls")),
+    path("api/publisher/v1/", include("operations.lms_urls")),
 ]

@@ -284,3 +284,22 @@ class BunnyCoreClient:
         if not isinstance(response.body, dict):
             raise BunnyError("INVALID_LIBRARY_RESPONSE", "Get Video Library returned no object")
         return response.body
+
+    def get_pull_zone(self, pull_zone_id: int) -> dict:
+        """
+        The pull zone's settings, READ-ONLY, with every secret field removed.
+
+        Bunny's Get Pull Zone answers with ZoneSecurityKey (the CDN token key)
+        among the settings; it is dropped here so no caller can log or store it.
+        """
+        response = self._http.call("GET", f"/pullzone/{int(pull_zone_id)}", idempotent=True)
+        if not isinstance(response.body, dict):
+            raise BunnyError("INVALID_PULL_ZONE_RESPONSE", "Get Pull Zone returned no object")
+        return {k: v for k, v in response.body.items() if not _secret_field(k, v)}
+
+
+def _secret_field(name: str, value) -> bool:
+    """A key-, password-, secret- or token-named field holding text (flags and counts are kept)."""
+    lowered = name.lower()
+    return not isinstance(value, (bool, int, float, type(None))) \
+        and any(word in lowered for word in ("key", "password", "secret", "token"))

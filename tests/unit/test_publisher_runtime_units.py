@@ -61,10 +61,17 @@ def test_production_write_is_disabled_by_default():
     config = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
                  BUNNY_PRODUCTION_ACCOUNT_API_KEY="a")
     assert any("PRODUCTION_WRITE is disabled" in p for p in config.problems())
+    # Library 786045 is adopted as the permanent production library (2026-10-24): the production
+    # library MAY equal the staging library, and the mode then writes to that one library.
     enabled = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
                   BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
                   BUNNY_STAGING_LIBRARY_ID="900001")
-    assert any("must differ from the staging library" in p for p in enabled.problems())
+    assert enabled.problems() == [] and enabled.library_id == 900001 and enabled.describe()["adopts_staging_library"]
+    keyless = cfg(PUBLISHER_MODE=PRODUCTION_WRITE, BUNNY_PRODUCTION_LIBRARY_ID="900001", BUNNY_PRODUCTION_API_KEY="k",
+                  BUNNY_PRODUCTION_ACCOUNT_API_KEY="a", PUBLISHER_PRODUCTION_WRITE_ENABLED="true",
+                  BUNNY_CDN_TOKEN_KEY="cdn-key")
+    assert any("BUNNY_PRODUCTION_CDN_HOSTNAME" in p for p in keyless.problems())
+    assert "cdn-key" not in repr(keyless) and "cdn-key" not in str(keyless.describe())
 
 
 def test_the_old_library_is_refused_in_every_mode():

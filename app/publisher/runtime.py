@@ -81,7 +81,7 @@ def build_daemon(config: PublisherConfig, *, graph=None, bunny=None, core=None, 
         from app.media.delivery import SharePointMedia
         runtime = BunnyRuntime(config=config, connect=connect, bunny=bunny, media=SharePointMedia(graph), graph=graph,
                                encoding_tier=settings.get("EncodingTier"),
-                               open_url=_cdn_open if config.staging_cdn_hostname else None, **kwargs)
+                               open_url=_cdn_open if config.cdn_hostname else None, **kwargs)
         for kind, worker in (("IMPORT_VIDEO", ImportWorker(runtime)), ("POLL_ENCODING", EncodingWorker(runtime)),
                              ("PUBLISH_CAPTION", CaptionWorker(runtime))):
             handlers[kind] = BunnyJobHandler(kind, worker=worker, connect=connect)

@@ -14,6 +14,14 @@ MODES
                     production library is configured. Disabled by default; the
                     student-facing release gate is separate (tokens, CDN, LMS API).
 
+PRODUCTION LIBRARY = THE STAGING LIBRARY, ADOPTED (decision 2026-10-24)
+  Bunny library 786045 is Kent's permanent delivery library. PRODUCTION_WRITE
+  therefore accepts BUNNY_PRODUCTION_LIBRARY_ID equal to the staging library:
+  every video, caption and readiness row is keyed by bunny_library_id, never by
+  mode, so switching the mode ADOPTS the existing rows - nothing is re-imported,
+  no Bunny id changes, no readiness resets. A staging library that DIFFERS from
+  the production library is still allowed (a separate test library).
+
 DATABASE CONNECTION
   PUBLISHER_DATABASE_URL is the publisher's own Lecture Intelligence
   connection and must be Neon's DIRECT endpoint (host without "-pooler"). The
@@ -101,6 +109,10 @@ class PublisherConfig:
     production_api_key: str = field(default="", repr=False)
     production_account_api_key: str = field(default="", repr=False)
     production_write_enabled: bool = False
+    production_cdn_hostname: str = ""
+    # The pull zone's token key, used ONLY to sign the publisher's own caption
+    # read-back once CDN token authentication is on. Optional; never logged.
+    cdn_token_key: str = field(default="", repr=False)
     caption_language: str = "en"
     caption_label: str = "English"
     # -- runtime ----------------------------------------------------------------
@@ -136,6 +148,15 @@ class PublisherConfig:
         if self.mode == PRODUCTION_WRITE:
             return self.production_library_id
         return None
+
+    @property
+    def cdn_hostname(self) -> str:
+        """The CDN host the publisher reads its own caption files back from (None in SHADOW)."""
+        if self.mode == STAGING_WRITE:
+            return self.staging_cdn_hostname
+        if self.mode == PRODUCTION_WRITE:
+            return self.production_cdn_hostname
+        return ""
 
     @property
     def api_key(self) -> str:
@@ -188,8 +209,8 @@ class PublisherConfig:
                 found.append("PRODUCTION_WRITE is disabled (PUBLISHER_PRODUCTION_WRITE_ENABLED is not true)")
             if not self.production_library_id or not self.production_api_key or not self.production_account_api_key:
                 found.append("PRODUCTION_WRITE needs BUNNY_PRODUCTION_LIBRARY_ID, _API_KEY and _ACCOUNT_API_KEY")
-            if self.production_library_id and self.production_library_id == self.staging_library_id:
-                found.append("the production library must differ from the staging library")
+            if self.cdn_token_key and not self.production_cdn_hostname:
+                found.append("BUNNY_CDN_TOKEN_KEY needs BUNNY_PRODUCTION_CDN_HOSTNAME")
         return found
 
     def validate(self) -> "PublisherConfig":
@@ -205,6 +226,9 @@ class PublisherConfig:
             "start_date": self.start_date.isoformat() if self.start_date else None,
             "end_date": self.end_date.isoformat() if self.end_date else None,
             "database_endpoint": database_endpoint(self.database_url),
+            "adopts_staging_library": self.mode == PRODUCTION_WRITE and self.production_library_id is not None
+            and self.production_library_id == self.staging_library_id,
+            "cdn_readback_configured": bool(self.cdn_hostname),
             "lookback_days": self.lookback_days, "workers": self.workers,
             "max_imports_in_flight": self.max_imports_in_flight,
             "discovery_interval_seconds": self.discovery_interval.total_seconds(),
@@ -216,7 +240,8 @@ class PublisherConfig:
             "alert_delivery_enabled": self.alert_delivery_enabled,
             "present": {name: bool(getattr(self, name)) for name in (
                 "database_url", "aptem_database_url", "lms_database_url", "graph_client_secret",
-                "staging_api_key", "staging_account_api_key", "production_api_key")},
+                "staging_api_key", "staging_account_api_key", "production_api_key",
+                "production_account_api_key", "cdn_token_key")},
         }
 
     # -- construction ---------------------------------------------------------------------
@@ -271,6 +296,8 @@ class PublisherConfig:
             production_api_key=text("BUNNY_PRODUCTION_API_KEY"),
             production_account_api_key=text("BUNNY_PRODUCTION_ACCOUNT_API_KEY"),
             production_write_enabled=flag("PUBLISHER_PRODUCTION_WRITE_ENABLED"),
+            production_cdn_hostname=text("BUNNY_PRODUCTION_CDN_HOSTNAME"),
+            cdn_token_key=text("BUNNY_CDN_TOKEN_KEY"),
             workers=number("PUBLISHER_WORKERS", 2),
             max_imports_in_flight=number("PUBLISHER_MAX_IMPORTS_IN_FLIGHT", 2),
             poll_seconds=number("PUBLISHER_POLL_SECONDS", 5.0, float),

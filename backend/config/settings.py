@@ -57,6 +57,28 @@ CLIP_ON_DEMAND_WEBHOOK_URL = os.getenv(
 # The secret n8n sends (Authorization: Bearer ...) to report run status and
 # OpenAI usage. Unset or shorter than 32 characters = those routes refuse.
 SOCIAL_MEDIA_SERVICE_TOKEN = os.getenv("SOCIAL_MEDIA_SERVICE_TOKEN", "").strip()
+
+# Continuous Bunny Publisher -> LMS backend delivery API (operations/lms_api.py, /api/publisher/v1/).
+# Service tokens: comma-separated so a rotation can overlap (old + new); each must be at least 32
+# characters. No token configured = every route answers 401. The library is the ONE Bunny library
+# recordings are delivered from (786045). Playback stays unavailable to every caller until
+# PUBLISHER_LMS_PLAYBACK_ENABLED is explicitly true, whatever has been released.
+PUBLISHER_LMS_SERVICE_TOKENS = [value.strip() for value in os.getenv(
+    "PUBLISHER_LMS_SERVICE_TOKENS", "").split(",") if value.strip()]
+_publisher_lms_library = os.getenv("PUBLISHER_LMS_LIBRARY_ID", "").strip()
+PUBLISHER_LMS_LIBRARY_ID = int(_publisher_lms_library) if _publisher_lms_library.isdigit() else None
+PUBLISHER_LMS_PLAYBACK_ENABLED = env_bool("PUBLISHER_LMS_PLAYBACK_ENABLED", False)
+PUBLISHER_LMS_RATE = os.getenv("PUBLISHER_LMS_RATE", "600/min").strip() or "600/min"
+PUBLISHER_LMS_CAPTION_LANGUAGE = os.getenv("PUBLISHER_LMS_CAPTION_LANGUAGE", "en").strip() or "en"
+
+# Access log of the LMS delivery API (one JSON line per request; never a token or a URL).
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"publisher_lms_console": {"class": "logging.StreamHandler"}},
+    "loggers": {"publisher.lms_api": {"handlers": ["publisher_lms_console"], "level": "INFO",
+                                      "propagate": False}},
+}
 # USD prices per million tokens, by exact model name, as JSON:
 #   {"gpt-5.2": {"input": "...", "cached_input": "...", "output": "...",
 #                "source": "where and when the price was read"}}
