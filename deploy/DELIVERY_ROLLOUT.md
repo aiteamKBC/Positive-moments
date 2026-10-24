@@ -70,6 +70,32 @@ Learners are unaffected, because nothing is released. Read the checklist's *Resi
 
 ## Phase C: switch the publisher to production mode on the same library
 
+**Scripted path (preferred):** [`deploy/activate_phase_c.sh`](activate_phase_c.sh) performs steps 1–5 below with gates. Run it as root on the VPS:
+```bash
+cd /var/www/Positive-moments && git pull --ff-only
+sudo bash deploy/activate_phase_c.sh check    # pre-flight only: changes nothing, restarts nothing
+sudo bash deploy/activate_phase_c.sh apply    # backup, atomic swap, restart bunny-publisher.service only, verify
+sudo bash deploy/activate_phase_c.sh verify   # read-only post-restart checks, re-runnable
+```
+- **Before any change:** it builds a candidate `publisher.env`, keeping every existing line byte for byte, and gates on all of these:
+  - `validate-config --check-library`;
+  - `security-check` (secure, CDN `DEFERRED`, caption read-back 200 unsigned);
+  - an independent HTTP 200 check of one existing caption URL;
+  - a baseline of the 7 videos (VERIFIED, HIDDEN, captions verified, no release events).
+- **Apply:** it writes a root-only backup to `/root/kbc-phase-c/`, swaps the file with one atomic rename and restarts **only** `bunny-publisher.service`.
+- **Verify:** it checks:
+  - the daemon started in `PRODUCTION_WRITE` on 786045;
+  - fresh scheduler/w0/w1 heartbeats;
+  - discovery ran;
+  - the same video records and caption publications;
+  - no new `IMPORT_VIDEO` / `PUBLISH_CAPTION` job for those lectures;
+  - no failed jobs;
+  - the QA units' start times are unchanged.
+- **Re-runs are idempotent:** an already-applied file and a daemon already in production mode means no backup and no restart.
+- **If the restarted unit fails to become active,** the script restores the backup and restarts the unit on the previous file.
+
+The manual steps below are what the script does.
+
 1. **Edit `backend/config/publisher.env`** (root:www-data 0640, `sudoedit`). Keep every existing line and add or change:
    ```
    PUBLISHER_MODE=PRODUCTION_WRITE
@@ -108,7 +134,13 @@ Learners are unaffected, because nothing is released. Read the checklist's *Resi
 
    Tested locally: `test_production_mode_adopts_existing_videos_and_still_processes_new_lectures`.
 
-**Rollback for Phase C:** restore the previous `publisher.env` (`PUBLISHER_MODE=STAGING_WRITE`), then restart. Every row is keyed by library, not by mode, so nothing changes.
+**Rollback for Phase C:** two steps, both required:
+```bash
+install -m 0640 -o root -g www-data /root/kbc-phase-c/publisher.env.before-phase-c.<timestamp> /var/www/Positive-moments/backend/config/publisher.env
+systemctl restart --no-block bunny-publisher.service
+```
+- **Restoring the file alone changes nothing.** systemd reads the `EnvironmentFile` only when the unit starts, so the running daemon stays in `PRODUCTION_WRITE` until it is restarted.
+- **No data rollback is needed.** Every row is keyed by library, not by mode.
 
 ## Phase D: release, then turn learner playback on
 
