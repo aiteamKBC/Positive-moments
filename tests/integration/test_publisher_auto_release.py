@@ -16,7 +16,7 @@ from app.publisher.config import PRODUCTION_WRITE, STAGING_WRITE, PublisherConfi
 from app.publisher.daemon import AUTO_RELEASE
 from app.publisher.operations import OperatorActionRefused
 from tests.integration.test_publisher_delivery import (
-    INSECURE, SECURE, act, answer, delivered, lifecycle_events, production,
+    INSECURE, SECURE, act, add_second_lecture, answer, delivered, lifecycle_events, production,
 )
 from tests.integration.test_publisher_runtime import (  # noqa: F401 - fixtures
     END, START, World, _confirm_organizer, _sibling, url,
@@ -37,17 +37,17 @@ class Security:
         return result
 
 
-def auto_world(url, *, security=None, since=None, **kwargs):
+def auto_world(url, *, security=None, **kwargs):
     """A PRODUCTION_WRITE world (the same library) whose daemon runs AUTO_RELEASE every tick."""
-    world = delivered(url, **production(auto_release=True, auto_release_from=since or START.date(), **kwargs))
+    world = delivered(url, **production(auto_release=True, **kwargs))
     world.security = security or Security()
     attach(world)
     return world
 
 
-def attach(world, connect=None):
+def attach(world, connect=None, **kwargs):
     connect = connect or (lambda: psycopg.connect(world.url, prepare_threshold=None))
-    world.daemon.auto_releaser = AutoReleaser(config=world.config, connect=connect, security=world.security)
+    world.daemon.auto_releaser = AutoReleaser(config=world.config, connect=connect, security=world.security, **kwargs)
 
 
 def one_part(world):
@@ -65,22 +65,22 @@ def visibility(world):
 
 
 # =========================================================================== configuration
-def test_auto_release_is_off_by_default_and_needs_production_mode_and_a_from_date():
+def test_auto_release_is_off_by_default_needs_production_mode_and_has_no_date_restriction():
     base = dict(mode=PRODUCTION_WRITE, database_url="postgresql://x/y", graph_tenant_id="t", graph_client_id="c",
                 graph_client_secret="s", start_date=START.date(), lms_database_url="l", discover_calendar=False,
                 production_library_id=1, production_api_key="k", production_account_api_key="a",
                 production_write_enabled=True)
     off = PublisherConfig(**base)
     assert off.auto_release is False and off.problems() == []
-    assert off.describe()["auto_release"] is False and off.describe()["auto_release_from"] is None
-    on = PublisherConfig(**base, auto_release=True, auto_release_from=START.date())
-    assert on.problems() == [] and on.describe()["auto_release_from"] == START.date().isoformat()
-    assert any("PUBLISHER_AUTO_RELEASE_FROM" in p for p in PublisherConfig(**base, auto_release=True).problems())
+    assert off.describe()["auto_release"] is False and "auto_release_from" not in off.describe()
+    on = PublisherConfig(**base, auto_release=True)
+    assert on.problems() == [] and on.describe()["auto_release"] is True
     staging = PublisherConfig(**{**base, "mode": STAGING_WRITE, "staging_library_id": 1, "staging_api_key": "k",
-                                 "staging_account_api_key": "a"}, auto_release=True, auto_release_from=START.date())
+                                 "staging_account_api_key": "a"}, auto_release=True)
     assert any("PRODUCTION_WRITE" in p for p in staging.problems())
+    # A leftover PUBLISHER_AUTO_RELEASE_FROM is ignored: there is no date restriction any more.
     env = PublisherConfig.from_mapping({"PUBLISHER_AUTO_RELEASE": "true", "PUBLISHER_AUTO_RELEASE_FROM": "2026-10-26"})
-    assert env.auto_release is True and env.auto_release_from.isoformat() == "2026-10-26"
+    assert env.auto_release is True and not hasattr(env, "auto_release_from")
     assert PublisherConfig.from_mapping({}).auto_release is False
 
 
@@ -193,7 +193,7 @@ def test_incomplete_encoding_is_never_released(url):
 
 
 def test_a_caption_never_content_checked_is_released_and_reported_honestly(url):
-    world = World(url, **production(auto_release=True, auto_release_from=START.date()))   # no CDN read-back
+    world = World(url, **production(auto_release=True))   # no CDN read-back
     world.security = Security()
     attach(world)
     one_part(world)
@@ -205,7 +205,7 @@ def test_a_caption_never_content_checked_is_released_and_reported_honestly(url):
 
 
 def test_a_lecture_that_became_a_duplicate_is_never_released(url):
-    world = delivered(url, **production(auto_release=True, auto_release_from=START.date()))
+    world = delivered(url, **production(auto_release=True))
     one_part(world)
     world.run(rounds=10)
     assert answer(world)["state"] == "READY"
@@ -218,15 +218,63 @@ def test_a_lecture_that_became_a_duplicate_is_never_released(url):
     assert schedule(world)[1]["skipped"] == {"STATE_BLOCKED": 1} and world.security.calls == 0
 
 
-def test_lectures_before_the_from_date_are_never_released(url):
-    world = auto_world(url, since=START.date() + timedelta(days=1))
+def test_a_historical_lecture_is_released_like_a_new_one(url):
+    """No date restriction: a lecture verified long after its date (a backfill) is released by the same task."""
+    world = delivered(url, **production(auto_release=True))
     one_part(world)
-    world.run(rounds=12)
+    world.run(rounds=10)                                      # imported and verified; nothing releases it yet
     assert answer(world)["state"] == "READY" and lifecycle_events(world) == []
+    world.clock.advance(timedelta(days=400))                  # the lecture is now more than a year old
+    world.security = Security()
+    attach(world)
+    world.run(rounds=2)
+    assert answer(world)["release"]["status"] == "RELEASED" and answer(world)["playback"]["available"] is True
+    assert lifecycle_events(world) == ["PUBLICATION_RELEASED"] and len(world.bunny.fetch_calls) == 1  # no re-import
+
+
+def test_a_new_part_of_a_released_lecture_is_never_released_automatically(url):
+    world = delivered(url, **production(auto_release=True))
+    middle = START + (END - START) / 2
+    world.part(START + timedelta(minutes=1), middle + timedelta(minutes=1))
+    world.run(rounds=10)
+    act(world, "release")                                     # released (by an operator) with one part
+    world.security = Security()
+    attach(world)
+    world.part(middle, END - timedelta(minutes=2))            # Teams makes the second recording available later
+    world.clock.advance(timedelta(hours=25))                  # the publisher's re-check of a located lecture finds it
+    world.run(rounds=14)
+    # A changed recording set goes to an operator (RECORDING_SET_CHANGED): nothing new is imported, the
+    # released part stays as it is, and the automatic task neither re-releases nor touches it.
+    recording_jobs = [j for j in world.jobs() if j[0] == "RESOLVE_RECORDING"]
+    assert any("REVIEW_REQUIRED" in j for j in recording_jobs), recording_jobs
+    assert visibility(world) == ["READY_FOR_LMS"] and len(world.bunny.fetch_calls) == 1
+    assert lifecycle_events(world) == ["PUBLICATION_RELEASED"] and world.security.calls == 0
+
+
+def test_a_large_backlog_is_released_newest_first_a_bounded_number_per_run(url):
+    world = delivered(url, **production(auto_release=True))
+    one_part(world)
+    world.run(rounds=10)
+    first = add_second_lecture(world)                         # a later lecture, also verified
+    world.run(rounds=10)
+    second = world.lecture_id
+    world.security = Security()
+    attach(world, limit=1)
+    world.run(rounds=1)
+    released = [r[0] for r in world.q("SELECT lecture_id::text FROM public.bunny_publisher_events WHERE event = "
+                                      "'PUBLICATION_RELEASED' AND lecture_id IN (%s, %s) ORDER BY event_id", first, second)]
+    assert released == [str(second)] and schedule(world)[1]["eligible"] == 2   # both seen, one released
+    world.run(rounds=1)
+    released = [r[0] for r in world.q("SELECT lecture_id::text FROM public.bunny_publisher_events WHERE event = "
+                                      "'PUBLICATION_RELEASED' AND lecture_id IN (%s, %s) ORDER BY event_id", first, second)]
+    assert released == [str(second), str(first)]
+    world.run(rounds=2)
+    assert len(world.q("SELECT 1 FROM public.bunny_publisher_events WHERE event = 'PUBLICATION_RELEASED' "
+                       "AND lecture_id IN (%s, %s)", first, second)) == 2             # never twice
 
 
 def test_an_operator_withdrawal_is_never_undone(url):
-    world = delivered(url, **production(auto_release=True, auto_release_from=START.date()))
+    world = delivered(url, **production(auto_release=True))
     one_part(world)
     world.run(rounds=10)
     act(world, "release")

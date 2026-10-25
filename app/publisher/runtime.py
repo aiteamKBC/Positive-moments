@@ -94,7 +94,7 @@ def build_daemon(config: PublisherConfig, *, graph=None, bunny=None, core=None, 
     reconciler = Reconciler(config=config, connect=connect, bunny=bunny if config.writes_bunny else None,
                             planner=planner, **kwargs)
     auto_releaser = None
-    if config.auto_release:                      # config.validate(): PRODUCTION_WRITE + a from-date
+    if config.auto_release:                      # config.validate(): PRODUCTION_WRITE only
         from app.publisher.auto_release import AutoReleaser
         from app.publisher.library_security import DeliveryPolicy, read_delivery_security
         policy, library = DeliveryPolicy.from_config(config), config.library_id

@@ -189,8 +189,9 @@ Nothing is deleted from Bunny or the database in any rollback.
 
 **What it does:** the publisher's scheduler gains an `AUTO_RELEASE` task. It runs every discovery interval (5 min), right after discovery, inside `bunny-publisher.service`; there is no new service.
 
+**There is no date restriction.** A historical lecture brought in by a backfill goes through the same pipeline (import, encoding verification, LMS match) and is released by the same task as today's lectures.
+
 **A lecture is released automatically only when all of these hold:**
-- it is dated on or after `PUBLISHER_AUTO_RELEASE_FROM`;
 - it has a current link to an LMS occurrence, and its LMS match is VERIFIED;
 - its live state is READY: a verified video for every included part. Captions are **not** required: a missing, late or failed transcript never holds the video back, and a caption produced later is attached to the same video, with no re-upload and no new release;
 - it is not a duplicate, not cancelled and not under review;
@@ -200,25 +201,29 @@ Nothing is deleted from Bunny or the database in any rollback.
 The release goes through the same audited `release()` as the operator command, recorded with actor `publisher:auto-release`.
 
 **Never released automatically:**
-- unmatched, duplicate, incomplete or unverified lectures;
-- lectures before the start date;
+- unmatched, duplicate, cancelled, incomplete or unverified lectures;
 - withdrawn lectures: an operator's withdrawal is never undone;
 - a lecture that gained a new part after an earlier release: an operator decides, as before;
 - the orphan Bunny video, which has no publisher record.
 
+**Volume:** every candidate is checked on every run, and at most 25 lectures are released per run (every 5 minutes), newest lecture first. A large backfill is released over several runs and never delays today's lectures.
+
 **Failures:** a temporary failure (database, the security read, a busy lecture) releases nothing and is retried on the next run. If the library is not secure, the task records `FAILED` / `LIBRARY_NOT_SECURE` and releases nothing.
 
-**To turn it on** (needs approval; deploy the code first):
-1. Add these to `backend/config/publisher.env`:
-   ```
-   PUBLISHER_AUTO_RELEASE=true
-   PUBLISHER_AUTO_RELEASE_FROM=<first lecture day to release automatically, YYYY-MM-DD>
-   ```
-2. Check the configuration: `validate-config --check-library` must report `"auto_release": true` and `"problems": []`.
-3. Restart the publisher: `systemctl restart --no-block bunny-publisher.service`.
-4. Watch the result: `status` shows the `AUTO_RELEASE` schedule row, and each automatic release writes one `PUBLICATION_RELEASED` event by `publisher:auto-release`.
+**To turn it on** (needs approval; deploy the code first). Use `deploy/activate_auto_release.sh`:
+1. `sudo bash deploy/activate_auto_release.sh preview`: read-only. Lists every lecture that would be released on the first run, across all dates, with its date, LMS occurrence and title, plus a count and a fingerprint of that exact set. Review it: are these the expected backfill items?
+2. `sudo bash deploy/activate_auto_release.sh apply <count> <fingerprint>`: refuses unless the eligible set is still exactly the reviewed one. It then:
+   - checks the library security, validates the candidate file with `validate-config --check-library` and confirms the seven released lectures are intact;
+   - sets `PUBLISHER_AUTO_RELEASE=true` atomically (backup first; every other line kept);
+   - restarts `bunny-publisher.service` only;
+   - waits for the scheduler, both workers and the first successful `AUTO_RELEASE` run;
+   - checks that every release it made satisfies the rule, with no duplicate events and no unexpected imports.
+   If any check fails, it switches automatic release off again and restarts the publisher only. It never withdraws anything.
+3. `sudo bash deploy/activate_auto_release.sh verify` at any time: read-only.
 
-**To turn it off:** set `PUBLISHER_AUTO_RELEASE=false`, then restart the publisher. Lectures already released stay released; withdraw any of them per lecture if needed.
+A leftover `PUBLISHER_AUTO_RELEASE_FROM` line is ignored; the script removes it.
+
+**To turn it off:** `sudo bash deploy/activate_auto_release.sh rollback` sets `PUBLISHER_AUTO_RELEASE=false` and restarts the publisher only. Lectures already released stay released; withdraw any of them per lecture if needed.
 
 ## Never, in any phase
 

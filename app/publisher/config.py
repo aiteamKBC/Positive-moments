@@ -126,10 +126,10 @@ class PublisherConfig:
     caption_language: str = "en"
     caption_label: str = "English"
     # -- automatic release (off by default) ----------------------------------------
-    # When on, the scheduler's AUTO_RELEASE task releases a lecture dated on/after auto_release_from that is
-    # verified READY, LMS-matched and never published before, through the same audited delivery.release().
+    # When on, the scheduler's AUTO_RELEASE task releases any lecture (no date restriction: live and historical
+    # backfill alike) that is verified READY, LMS-matched and never published before, through the same
+    # audited delivery.release().
     auto_release: bool = False
-    auto_release_from: date | None = None
     # -- runtime ----------------------------------------------------------------
     workers: int = 2
     max_imports_in_flight: int = 2
@@ -236,12 +236,8 @@ class PublisherConfig:
             found.append(f"PUBLISHER_CDN_TOKEN_AUTH must be one of {', '.join(CDN_POLICIES)}")
         if not self.approved_referrers:
             found.append("PUBLISHER_APPROVED_REFERRERS must name at least one LMS domain")
-        if self.auto_release:
-            if self.mode != PRODUCTION_WRITE:
-                found.append("PUBLISHER_AUTO_RELEASE needs PUBLISHER_MODE=PRODUCTION_WRITE")
-            if self.auto_release_from is None:
-                found.append("PUBLISHER_AUTO_RELEASE needs PUBLISHER_AUTO_RELEASE_FROM (YYYY-MM-DD): "
-                             "lectures before it are never released automatically")
+        if self.auto_release and self.mode != PRODUCTION_WRITE:
+            found.append("PUBLISHER_AUTO_RELEASE needs PUBLISHER_MODE=PRODUCTION_WRITE")
         return found
 
     def validate(self) -> "PublisherConfig":
@@ -266,7 +262,6 @@ class PublisherConfig:
             "approved_referrers": list(self.approved_referrers),
             "require_block_none_referrer": self.require_block_none_referrer,
             "auto_release": self.auto_release,
-            "auto_release_from": self.auto_release_from.isoformat() if self.auto_release_from else None,
             "lookback_days": self.lookback_days, "workers": self.workers,
             "max_imports_in_flight": self.max_imports_in_flight,
             "discovery_interval_seconds": self.discovery_interval.total_seconds(),
@@ -304,16 +299,14 @@ class PublisherConfig:
             return int(raw) if raw.isdigit() else None
 
         start, end = text("PUBLISHER_START_DATE"), text("PUBLISHER_END_DATE")
-        auto_from = text("PUBLISHER_AUTO_RELEASE_FROM")
         full_at = text("PUBLISHER_FULL_RECONCILE_AT", "05:00")
         try:
             start_date = date.fromisoformat(start) if start else None
             end_date = date.fromisoformat(end) if end else None
-            auto_release_from = date.fromisoformat(auto_from) if auto_from else None
             full_reconcile_at = time.fromisoformat(full_at)
         except ValueError:
-            raise ConfigError(["PUBLISHER_START_DATE / PUBLISHER_END_DATE / PUBLISHER_AUTO_RELEASE_FROM must be "
-                               "YYYY-MM-DD and PUBLISHER_FULL_RECONCILE_AT HH:MM"]) from None
+            raise ConfigError(["PUBLISHER_START_DATE / PUBLISHER_END_DATE must be YYYY-MM-DD and "
+                               "PUBLISHER_FULL_RECONCILE_AT HH:MM"]) from None
         return cls(
             mode=text("PUBLISHER_MODE", SHADOW).upper(),
             # The publisher's own (direct) URL first; the generic name only as a fallback.
@@ -342,7 +335,7 @@ class PublisherConfig:
             approved_referrers=tuple(sorted({d.strip().lower() for d in text(
                 "PUBLISHER_APPROVED_REFERRERS", APPROVED_REFERRERS_DEFAULT).split(",") if d.strip()})),
             require_block_none_referrer=flag("PUBLISHER_REQUIRE_BLOCK_NONE_REFERRER", True),
-            auto_release=flag("PUBLISHER_AUTO_RELEASE"), auto_release_from=auto_release_from,
+            auto_release=flag("PUBLISHER_AUTO_RELEASE"),
             workers=number("PUBLISHER_WORKERS", 2),
             max_imports_in_flight=number("PUBLISHER_MAX_IMPORTS_IN_FLIGHT", 2),
             poll_seconds=number("PUBLISHER_POLL_SECONDS", 5.0, float),

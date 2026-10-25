@@ -6,7 +6,8 @@ releases them through the SAME audited delivery.release() - same verification un
 lock, same library security check, same PUBLICATION_RELEASED event (actor "publisher:auto-release").
 
 A lecture is released automatically only when ALL of these hold:
-  * it is dated on or after PUBLISHER_AUTO_RELEASE_FROM and has a CURRENT link to an LMS occurrence;
+  * it has a CURRENT link to an LMS occurrence - whatever its date: a historical lecture brought in by a
+    backfill through the same pipeline qualifies exactly like today's;
   * its LMS match is VERIFIED and its live state is READY (a verified video for every included part; not a
     duplicate, not cancelled, nothing pending review). Captions are NOT required: a missing, late or failed
     transcript never holds the video back, and a caption that arrives later is attached to the same video
@@ -16,6 +17,9 @@ A lecture is released automatically only when ALL of these hold:
     gained a new part after an operator release waits for the operator, as before);
   * library 786045 passes the live learner-delivery security check (read once per run, only when
     something is eligible).
+
+Every candidate is evaluated on every run; at most MAX_PER_RUN are released per run (newest lecture first,
+so a large backfill never delays today's lectures), the rest on the following runs.
 
 Everything else is left alone and counted. A transient failure (database, Bunny security read, a busy
 lecture) releases nothing for that lecture; the next run retries. A released lecture never qualifies
@@ -40,15 +44,16 @@ CANDIDATES = """
 SELECT v.lecture_id::text
   FROM public.bunny_videos v
   JOIN public.lecture_sessions l ON l.lecture_id = v.lecture_id
- WHERE v.bunny_library_id = %(library)s AND v.retired_at IS NULL AND l.session_date >= %(since)s
+ WHERE v.bunny_library_id = %(library)s AND v.retired_at IS NULL
  GROUP BY v.lecture_id
 HAVING bool_and(v.visibility_state = 'HIDDEN') AND bool_and(v.encoding_status = 'VERIFIED')
    AND EXISTS (SELECT 1 FROM public.bunny_lms_occurrence_links k WHERE k.lecture_id = v.lecture_id AND k.is_current)
+   AND EXISTS (SELECT 1 FROM public.bunny_lms_match_evaluations m
+                WHERE m.lecture_id = v.lecture_id AND m.is_current AND m.match_status = 'VERIFIED')
    AND NOT EXISTS (SELECT 1 FROM public.bunny_publisher_events e
                     WHERE e.lecture_id = v.lecture_id AND e.event IN ('PUBLICATION_RELEASED', 'PUBLICATION_WITHDRAWN')
                       AND e.detail ->> 'library_id' = %(library)s::text)
- ORDER BY v.lecture_id
- LIMIT %(limit)s
+ ORDER BY max(l.scheduled_start) DESC NULLS LAST, v.lecture_id
 """
 
 
@@ -60,7 +65,7 @@ class AutoReleaseBlocked(Exception):
 
 class AutoReleaser:
     def __init__(self, *, config, connect, security, limit: int = MAX_PER_RUN):
-        if not config.auto_release or config.library_id is None or config.auto_release_from is None:
+        if not config.auto_release or config.library_id is None:
             raise ValueError("automatic release is not configured")
         self.config, self.connect, self.security, self.limit = config, connect, security, limit
 
@@ -70,8 +75,7 @@ class AutoReleaser:
         result = {"candidates": 0, "eligible": 0, "released": 0, "unchanged": 0, "deferred": 0}
         with self.connect() as connection:
             connection.read_only = True
-            ids = [r[0] for r in connection.execute(CANDIDATES, {"library": library, "limit": self.limit,
-                                                                 "since": self.config.auto_release_from}).fetchall()]
+            ids = [r[0] for r in connection.execute(CANDIDATES, {"library": library}).fetchall()]
             eligible = []
             for lecture_id in ids:
                 why = ineligible(connection, lecture_id, library_id=library, language=language)
@@ -80,6 +84,7 @@ class AutoReleaser:
                 else:
                     eligible.append(lecture_id)
         result.update(candidates=len(ids), eligible=len(eligible), skipped=dict(skipped))
+        eligible = eligible[:self.limit]               # the rest on the next runs (candidates are newest first)
         if not eligible:
             return {**result, "refused": {}}
         security = self.security()                     # an exception here = task FAILED, retried next run
