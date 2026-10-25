@@ -185,6 +185,41 @@ or `POST /api/operations/publisher/lectures/<lecture uuid>/withdraw/` with `{"re
 
 Nothing is deleted from Bunny or the database in any rollback.
 
+## Automatic release of new lectures (optional, off by default)
+
+**What it does:** the publisher's scheduler gains an `AUTO_RELEASE` task. It runs every discovery interval (5 min), right after discovery, inside `bunny-publisher.service`; there is no new service.
+
+**A lecture is released automatically only when all of these hold:**
+- it is dated on or after `PUBLISHER_AUTO_RELEASE_FROM`;
+- it has a current link to an LMS occurrence, and its LMS match is VERIFIED;
+- its live state is READY: verified video, plus a verified and content-checked English caption, for every included part;
+- it is not a duplicate, not cancelled and not under review;
+- every part is still HIDDEN, and it has never been released or withdrawn (re-checked inside `release()`'s lock);
+- library 786045 passes the live security check.
+
+The release goes through the same audited `release()` as the operator command, recorded with actor `publisher:auto-release`.
+
+**Never released automatically:**
+- unmatched, duplicate, incomplete or unverified lectures;
+- lectures before the start date;
+- withdrawn lectures: an operator's withdrawal is never undone;
+- a lecture that gained a new part after an earlier release: an operator decides, as before;
+- the orphan Bunny video, which has no publisher record.
+
+**Failures:** a temporary failure (database, the security read, a busy lecture) releases nothing and is retried on the next run. If the library is not secure, the task records `FAILED` / `LIBRARY_NOT_SECURE` and releases nothing.
+
+**To turn it on** (needs approval; deploy the code first):
+1. Add these to `backend/config/publisher.env`:
+   ```
+   PUBLISHER_AUTO_RELEASE=true
+   PUBLISHER_AUTO_RELEASE_FROM=<first lecture day to release automatically, YYYY-MM-DD>
+   ```
+2. Check the configuration: `validate-config --check-library` must report `"auto_release": true` and `"problems": []`.
+3. Restart the publisher: `systemctl restart --no-block bunny-publisher.service`.
+4. Watch the result: `status` shows the `AUTO_RELEASE` schedule row, and each automatic release writes one `PUBLICATION_RELEASED` event by `publisher:auto-release`.
+
+**To turn it off:** set `PUBLISHER_AUTO_RELEASE=false`, then restart the publisher. Lectures already released stay released; withdraw any of them per lecture if needed.
+
 ## Never, in any phase
 
 - Re-import or delete a Bunny video, or switch to another library. Library 785080 is refused in code.

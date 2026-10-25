@@ -3,6 +3,7 @@ The continuous publisher daemon: one supervised process, 24/7.
 
     scheduler thread   heartbeat -> final-attempt sweep -> due periodic tasks
                          DISCOVERY        every 5 min (planner tick: calendar, LMS, plan jobs)
+                         AUTO_RELEASE     every 5 min, only when PUBLISHER_AUTO_RELEASE=true (auto_release.py)
                          RECONCILE_LIGHT  every 6 h
                          RECONCILE_FULL   daily at 05:00 Africa/Cairo (+ catch-up, Bunny scan, digest)
     N worker threads   claim one job (FOR UPDATE SKIP LOCKED + lease) -> its handler -> repeat
@@ -37,6 +38,7 @@ from app.db.repositories.publisher_queue import PublisherQueueRepository
 log = logging.getLogger(__name__)
 DAEMON_VERSION = "publisher_daemon_v1"
 DISCOVERY, RECONCILE_LIGHT, RECONCILE_FULL = "DISCOVERY", "RECONCILE_LIGHT", "RECONCILE_FULL"
+AUTO_RELEASE = "AUTO_RELEASE"                 # only when an AutoReleaser is configured (off by default)
 TASK_LOCK_NAMESPACE = 0x4B42_5054            # "KBPT"
 TRACK_KINDS = ("ACQUIRE_TRANSCRIPT", "RESOLVE_RECORDING")
 BUNNY_KINDS = ("IMPORT_VIDEO", "POLL_ENCODING", "PUBLISH_CAPTION")
@@ -53,12 +55,13 @@ def last_full_boundary(now: datetime, at) -> datetime:
 
 class PublisherDaemon:
     def __init__(self, *, config, connect, handlers: dict, planner, reconciler, queue=None, clock=None,
-                 identity: str | None = None):
+                 identity: str | None = None, auto_releaser=None):
         self.config = config
         self.connect = connect
         self.handlers = dict(handlers)
         self.planner = planner
         self.reconciler = reconciler
+        self.auto_releaser = auto_releaser
         self.queue = queue or PublisherQueueRepository()
         self.schedule = PublisherScheduleRepository()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -140,6 +143,9 @@ class PublisherDaemon:
             due.append(RECONCILE_FULL)
         if started(DISCOVERY) is None or now - started(DISCOVERY) >= self.config.discovery_interval:
             due.append(DISCOVERY)
+        if self.auto_releaser is not None and (
+                started(AUTO_RELEASE) is None or now - started(AUTO_RELEASE) >= self.config.discovery_interval):
+            due.append(AUTO_RELEASE)                 # after DISCOVERY: it sees this tick's matches
         if started(RECONCILE_LIGHT) is None or now - started(RECONCILE_LIGHT) >= self.config.light_reconcile_interval:
             if RECONCILE_FULL not in due:            # FULL includes everything LIGHT checks
                 due.append(RECONCILE_LIGHT)
@@ -173,6 +179,8 @@ class PublisherDaemon:
     def _execute(self, task, previous, now) -> dict:
         if task == DISCOVERY:
             return self.planner.tick(calendar_days=self._discovery_days(previous, now))
+        if task == AUTO_RELEASE:
+            return self.auto_releaser.run()
         if task == RECONCILE_LIGHT:
             return self.reconciler.run("LIGHT")
         return self.reconciler.run("FULL")

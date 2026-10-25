@@ -93,8 +93,15 @@ def build_daemon(config: PublisherConfig, *, graph=None, bunny=None, core=None, 
     planner = Planner(config=config, connect=connect, lms_source=lms_source, calendar=calendar, **kwargs)
     reconciler = Reconciler(config=config, connect=connect, bunny=bunny if config.writes_bunny else None,
                             planner=planner, **kwargs)
+    auto_releaser = None
+    if config.auto_release:                      # config.validate(): PRODUCTION_WRITE + a from-date
+        from app.publisher.auto_release import AutoReleaser
+        from app.publisher.library_security import DeliveryPolicy, read_delivery_security
+        policy, library = DeliveryPolicy.from_config(config), config.library_id
+        auto_releaser = AutoReleaser(config=config, connect=connect,
+                                     security=lambda: read_delivery_security(core, library, policy))
     return PublisherDaemon(config=config, connect=connect, handlers=handlers, planner=planner,
-                           reconciler=reconciler, **kwargs)
+                           reconciler=reconciler, auto_releaser=auto_releaser, **kwargs)
 
 
 def _cdn_open(request, timeout):

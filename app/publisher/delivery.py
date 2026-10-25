@@ -332,13 +332,21 @@ def decode_cursor(cursor: str) -> tuple[datetime, str]:
 
 # =========================================================================== RELEASE / WITHDRAW
 def release(connection, lecture_id, *, library_id: int, actor: str, reason: str, security: dict | None,
-            language: str = "en") -> dict:
-    """Make a verified lecture available to the LMS. Idempotent; refuses anything not verified right now."""
+            language: str = "en", require_unpublished: bool = False) -> dict:
+    """
+    Make a verified lecture available to the LMS. Idempotent; refuses anything not verified right now.
+
+    require_unpublished (automatic release): additionally refuse - under the same lock - unless every live
+    video of the lecture is still HIDDEN and the lecture has never been released or withdrawn. Automation
+    therefore never undoes an operator's withdrawal and never re-releases a lecture whose new part an
+    operator has not looked at.
+    """
     actor, reason = _who(actor, reason)
     if not security or security.get("secure") is not True or int(security.get("library_id", -1)) != int(library_id):
         raise OperatorActionRefused("LIBRARY_NOT_SECURE", "the library failed the learner-delivery security check: "
                                     + "; ".join((security or {}).get("problems") or ["no check supplied"]))
-    return _change(connection, lecture_id, library_id, actor, reason, language, releasing=True)
+    return _change(connection, lecture_id, library_id, actor, reason, language, releasing=True,
+                   require_unpublished=require_unpublished)
 
 
 def withdraw(connection, lecture_id, *, library_id: int, actor: str, reason: str, language: str = "en") -> dict:
@@ -347,7 +355,8 @@ def withdraw(connection, lecture_id, *, library_id: int, actor: str, reason: str
     return _change(connection, lecture_id, library_id, actor, reason, language, releasing=False)
 
 
-def _change(connection, lecture_id, library_id, actor, reason, language, *, releasing: bool) -> dict:
+def _change(connection, lecture_id, library_id, actor, reason, language, *, releasing: bool,
+            require_unpublished: bool = False) -> dict:
     lecture_id = str(lecture_id)
     try:
         with connection.transaction():
@@ -360,6 +369,9 @@ def _change(connection, lecture_id, library_id, actor, reason, language, *, rele
             view = lecture_delivery(connection, lecture_id, library_id=library_id, language=language)
             if view is None:
                 raise OperatorActionRefused("LECTURE_NOT_FOUND", "no such lecture")
+            if require_unpublished and (any(r[2] != HIDDEN for r in rows) or connection.execute(
+                    LIFECYCLE, (lecture_id, str(library_id))).fetchone() is not None):
+                raise OperatorActionRefused("ALREADY_PUBLISHED", "released or withdrawn before: an operator decides")
             if releasing:
                 if not view["verified_ready"]:
                     raise OperatorActionRefused(
