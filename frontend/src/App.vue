@@ -28,6 +28,7 @@ const NAV = [
   { label: 'Social Media', to: '/social-media', icon: 'sparkle', match: /^\/social-media/ },
   { label: 'Operations', to: '/operations', icon: 'operations', match: /^\/operations/ },
   { label: 'Lectures', to: '/lectures', icon: 'lectures', match: /^\/lectures/ },
+  { label: 'Publishing', to: '/publishing', icon: 'video', match: /^\/publishing/ },
 ]
 
 const active = computed(() => NAV.find((item) => item.match.test(route.path))?.to ?? '')

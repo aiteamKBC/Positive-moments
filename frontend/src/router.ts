@@ -11,6 +11,7 @@ import OperationsMediaView from './views/OperationsMediaView.vue'
 import OperationsRunsView from './views/OperationsRunsView.vue'
 import PositiveMomentDetailView from './views/PositiveMomentDetailView.vue'
 import PositiveMomentsView from './views/PositiveMomentsView.vue'
+import PublishingMonitorView from './views/PublishingMonitorView.vue'
 import SocialMediaDetailView from './views/SocialMediaDetailView.vue'
 import SocialMediaView from './views/SocialMediaView.vue'
 
@@ -21,6 +22,7 @@ import SocialMediaView from './views/SocialMediaView.vue'
  *   /lectures          the lecture workspace, and one lecture in full
  *   /positive-moments  the learner-moments feature
  *   /social-media      AI-suggested social media opportunities
+ *   /publishing        Lecture Publishing Monitor: Teams -> Bunny -> LMS (read-only)
  *
  * The canonical lecture detail is keyed by `lecture_id`, which is always a
  * UUID. The constraint on the parameter is what lets the old bookmark shape
@@ -69,6 +71,9 @@ const router = createRouter({
       path: `/lectures/:lectureId(${UUID})`, name: 'lecture',
       component: LectureDetailView, meta: { title: 'Lecture' },
     },
+
+    // --- Publishing (read-only Lecture Publishing Monitor) ---------------
+    { path: '/publishing', name: 'publishing', component: PublishingMonitorView, meta: { title: 'Lecture Publishing Monitor' } },
 
     // --- Positive Moments ------------------------------------------------
     { path: '/positive-moments', name: 'positive-moments', component: PositiveMomentsView, meta: { title: 'Positive Moments' } },

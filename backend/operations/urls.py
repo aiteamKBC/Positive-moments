@@ -7,7 +7,7 @@ there is no route here that will perform an action named by the caller.
 """
 from django.urls import path
 
-from . import actions, backfill_views, media_views, publisher_views, views
+from . import actions, backfill_views, media_views, publisher_views, publishing_monitor_views, views
 
 urlpatterns = [
     path("day/", views.day_view, name="operations-day"),
@@ -96,4 +96,14 @@ urlpatterns = [
          name="operations-publisher-lecture-withdraw"),
     path("publisher/lectures/<uuid:lecture_id>/parts/<int:part_index>/decision/",
          publisher_views.part_decision_view, name="operations-publisher-part-decision"),
+
+    # Lecture Publishing Monitor: read-only (GET only), every query on a READ ONLY connection.
+    path("publishing-monitor/health/", publishing_monitor_views.health_view,
+         name="operations-publishing-monitor-health"),
+    path("publishing-monitor/summary/", publishing_monitor_views.summary_view,
+         name="operations-publishing-monitor-summary"),
+    path("publishing-monitor/lectures/", publishing_monitor_views.lectures_view,
+         name="operations-publishing-monitor-lectures"),
+    path("publishing-monitor/lectures/<uuid:lecture_id>/", publishing_monitor_views.lecture_view,
+         name="operations-publishing-monitor-lecture"),
 ]
