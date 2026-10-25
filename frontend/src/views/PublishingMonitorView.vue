@@ -24,6 +24,7 @@ import LoadingSkeleton from '../components/LoadingSkeleton.vue'
 import PageHeader from '../components/PageHeader.vue'
 import SectionPanel from '../components/SectionPanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import PublisherAlertsPanel from '../components/publishing/PublisherAlertsPanel.vue'
 import PublishingLectureDrawer from '../components/publishing/PublishingLectureDrawer.vue'
 import { getPublisherHealth, getPublishingLectures, getPublishingSummary } from '../services/publishing'
 import type { PublisherHealth, PublishingFilters, PublishingPage, PublishingSummary } from '../types/publishing'
@@ -172,9 +173,13 @@ onBeforeUnmount(() => {
 const discovery = computed(() => health.value?.tasks.DISCOVERY ?? null)
 const autoRelease = computed(() => health.value?.tasks.AUTO_RELEASE ?? null)
 const alerts = computed(() => Object.entries(health.value?.open_alerts ?? {}).filter(([severity]) => severity !== 'DIGEST'))
+const showAlerts = ref(false)
+/** The figure that answers the page's question: what the LMS can play right now (StatTile's `lead`). */
+const LEAD_KPI = 'playable'
+const releasedCount = computed(() => summary.value?.kpis.find(k => k.key === 'released')?.count ?? 0)
 /** Colour only when the number is not zero (zeros are muted above). Full class names for Tailwind. */
 const KPI_TONE: Record<string, string> = {
-  playable: 'text-emerald-700', missing: 'text-amber-700', attention: 'text-orange-700',
+  missing: 'text-amber-700', attention: 'text-orange-700',
 }
 </script>
 
@@ -253,12 +258,23 @@ const KPI_TONE: Record<string, string> = {
         <div>
           <dt class="tile-label">Open alerts</dt>
           <dd class="mt-1">
-            <template v-if="alerts.length"><span v-for="[severity, count] in alerts" :key="severity" class="mr-2 font-semibold text-orange-700">{{ count }} {{ severity.toLowerCase() }}</span></template>
+            <button
+              v-if="alerts.length" type="button" class="row-link text-left font-semibold text-orange-700"
+              :aria-expanded="showAlerts" @click="showAlerts = !showAlerts"
+            >
+              <span v-for="[severity, count] in alerts" :key="severity" class="mr-2">{{ count }} {{ severity.toLowerCase() }}</span>
+              <span class="text-2xs font-semibold text-brand-700 underline">{{ showAlerts ? 'Hide' : 'View' }}</span>
+            </button>
             <span v-else class="text-muted">None</span>
           </dd>
         </div>
       </dl>
     </section>
+
+    <PublisherAlertsPanel
+      v-if="showAlerts" :refresh-key="refreshedAt"
+      @close="showAlerts = false" @open-lecture="(id) => { openLecture = id }"
+    />
 
     <!-- Range -->
     <section class="flex flex-wrap items-center gap-2" aria-label="Date range">
@@ -290,18 +306,28 @@ const KPI_TONE: Record<string, string> = {
       <p v-if="error" class="notice-warn" role="status"><AppIcon name="alert" :size="16" class="mt-0.5" />{{ error }} Showing the last data received.</p>
 
       <!-- B. KPIs: each one is also the filter for its rows -->
-      <section class="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8" aria-label="Publishing KPIs">
+      <section class="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-9" aria-label="Publishing KPIs">
         <button
           v-for="kpi in summary.kpis" :key="kpi.key" type="button"
-          class="tile text-left transition hover:ring-2 hover:ring-brand-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
-          :class="(filters.kpi || 'discovered') === kpi.key ? 'ring-2 ring-brand-600' : ''"
+          class="text-left transition hover:ring-2 hover:ring-brand-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+          :class="[kpi.key === LEAD_KPI ? 'tile-lead sm:col-span-2 xl:col-span-2' : 'tile',
+                   (filters.kpi || 'discovered') === kpi.key ? (kpi.key === LEAD_KPI ? 'ring-2 ring-gold-400' : 'ring-2 ring-brand-600') : '']"
           :title="kpi.definition" :aria-pressed="(filters.kpi || 'discovered') === kpi.key"
           @click="chooseKpi(kpi.key)"
         >
-          <p class="tile-label">{{ kpi.label }}</p>
-          <p class="tile-value" :class="kpi.count === 0 && kpi.key !== 'discovered' ? '!text-faint' : (KPI_TONE[kpi.key] ?? 'text-ink')">
-            {{ kpi.count }}
-          </p>
+          <template v-if="kpi.key === LEAD_KPI">
+            <p class="tile-label !text-white/75">{{ kpi.label }}</p>
+            <p class="tile-value !text-4xl !text-white">{{ kpi.count }}</p>
+            <p class="tile-note !text-white/75">
+              of {{ summary.total }} lecture{{ summary.total === 1 ? '' : 's' }} in range · {{ releasedCount }} released
+            </p>
+          </template>
+          <template v-else>
+            <p class="tile-label">{{ kpi.label }}</p>
+            <p class="tile-value" :class="kpi.count === 0 && kpi.key !== 'discovered' ? '!text-faint' : (KPI_TONE[kpi.key] ?? 'text-ink')">
+              {{ kpi.count }}
+            </p>
+          </template>
         </button>
       </section>
       <p v-if="summary.playable_without_captions" class="-mt-3 text-xs text-muted">

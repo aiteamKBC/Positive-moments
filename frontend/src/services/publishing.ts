@@ -4,7 +4,7 @@
  */
 import { api } from './api'
 import type {
-  PublisherHealth, PublishingDetail, PublishingFilters, PublishingPage, PublishingSummary,
+  PublisherAlerts, PublisherHealth, PublishingDetail, PublishingFilters, PublishingPage, PublishingSummary,
 } from '../types/publishing'
 
 const BASE = '/operations/publishing-monitor'
@@ -13,6 +13,10 @@ const RANGE_TIMEOUT_MS = 60_000
 
 export async function getPublisherHealth() {
   return (await api.get<PublisherHealth>(`${BASE}/health/`)).data
+}
+
+export async function getPublisherAlerts() {
+  return (await api.get<PublisherAlerts>(`${BASE}/alerts/`)).data
 }
 
 export async function getPublishingSummary(dateFrom: string, dateTo: string) {

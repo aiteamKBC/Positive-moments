@@ -9,6 +9,7 @@ from datetime import timedelta
 
 import psycopg
 
+from app.db.repositories.publisher_ops import PublisherAlertRepository
 from app.publisher import monitor
 from tests.integration.test_publisher_delivery import LIBRARY_ID, act, delivered, production
 from tests.integration.test_publisher_runtime import END, START, World, url  # noqa: F401 - fixture
@@ -105,3 +106,26 @@ def test_the_detail_shows_identity_parts_jobs_and_timeline_without_secrets(url):
     text = json.dumps(detail, default=str).lower()
     for secret in ("join_url", "drive_id", "item_id", "tempauth", "http://", "https://", "payload"):
         assert secret not in text, secret
+
+
+def test_open_alerts_are_read_as_stored_and_resolved_ones_are_not_shown(url):
+    world = World(url)
+    alerts = PublisherAlertRepository()
+    with psycopg.connect(url, autocommit=True) as c:
+        alerts.raise_alert(c, severity="WARNING", kind="ORPHAN_BUNNY_VIDEO", dedupe_key="orphan:demo",
+                           summary="Bunny video with no publisher row", detail={"bunny_video_id": "v-1", "token": None})
+        alerts.raise_alert(c, severity="CRITICAL", kind="VIDEO_MISSING_IN_BUNNY", dedupe_key="missing:demo",
+                           summary="part 1 video is not in Bunny", detail={"bunny_video_id": "v-2", "job_id": "j-9"},
+                           lecture_id=world.lecture_id)
+        alerts.raise_alert(c, severity="WARNING", kind="ORPHAN_BUNNY_VIDEO", dedupe_key="orphan:gone",
+                           summary="resolved one", detail={})
+        alerts.resolve_absent(c, "ORPHAN_BUNNY_VIDEO", ["orphan:demo"])
+    with psycopg.connect(url, prepare_threshold=None) as c:
+        c.read_only = True
+        found = monitor.open_alerts(c)
+    assert [a["severity"] for a in found] == ["CRITICAL", "WARNING"]           # critical first; resolved gone
+    critical, warning = found
+    assert critical["lecture"]["lecture_id"] == str(world.lecture_id) and critical["lecture"]["subject"]
+    assert critical["job_id"] == "j-9" and critical["detail"] == {"bunny_video_id": "v-2"}
+    assert warning["lecture"] is None and warning["job_id"] is None                # nothing invented
+    assert warning["summary"] == "Bunny video with no publisher row" and warning["first_seen_at"]

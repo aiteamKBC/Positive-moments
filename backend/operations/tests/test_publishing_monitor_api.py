@@ -57,7 +57,8 @@ def patched(test):
                              PUBLISHER_LMS_SERVICE_TOKENS=[SERVICE_TOKEN])(test)
 
 
-ROUTES = (("operations-publishing-monitor-health", {}), ("operations-publishing-monitor-summary", {}),
+ROUTES = (("operations-publishing-monitor-health", {}), ("operations-publishing-monitor-alerts", {}),
+          ("operations-publishing-monitor-summary", {}),
           ("operations-publishing-monitor-lectures", {}),
           ("operations-publishing-monitor-lecture", {"lecture_id": LECTURE}))
 
@@ -150,6 +151,21 @@ class MonitorApiTests(TestCase):
         with mock.patch("operations.publishing_monitor_views.monitor.lecture_detail", return_value=None):
             missing = self.client.get(reverse("operations-publishing-monitor-lecture", kwargs={"lecture_id": LECTURE}))
         self.assertEqual((missing.status_code, missing.json()["code"]), (404, "LECTURE_NOT_FOUND"))
+
+    @patched
+    def test_alerts_are_served_as_stored_with_counts_by_severity(self):
+        stored = [{"alert_id": "a1", "severity": "WARNING", "kind": "ORPHAN_BUNNY_VIDEO", "summary": "x",
+                   "lecture": None, "job_id": None, "detail": {"bunny_video_id": "v"}},
+                  {"alert_id": "a2", "severity": "WARNING", "kind": "ORPHAN_BUNNY_VIDEO", "summary": "y",
+                   "lecture": None, "job_id": None, "detail": {}},
+                  {"alert_id": "a3", "severity": "DIGEST", "kind": "DAILY_DIGEST", "summary": "z",
+                   "lecture": None, "job_id": None, "detail": {}}]
+        with mock.patch("operations.publishing_monitor_views.monitor.open_alerts", return_value=stored):
+            response = self.client.get(reverse("operations-publishing-monitor-alerts"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["counts"], {"WARNING": 2, "DIGEST": 1})
+        self.assertEqual([a["alert_id"] for a in response.json()["alerts"]], ["a1", "a2", "a3"])
+        self.assertNotIn(SERVICE_TOKEN, response.content.decode())
 
     @patched
     def test_an_unavailable_database_is_reported_not_hidden(self):

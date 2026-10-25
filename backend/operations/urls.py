@@ -100,6 +100,8 @@ urlpatterns = [
     # Lecture Publishing Monitor: read-only (GET only), every query on a READ ONLY connection.
     path("publishing-monitor/health/", publishing_monitor_views.health_view,
          name="operations-publishing-monitor-health"),
+    path("publishing-monitor/alerts/", publishing_monitor_views.alerts_view,
+         name="operations-publishing-monitor-alerts"),
     path("publishing-monitor/summary/", publishing_monitor_views.summary_view,
          name="operations-publishing-monitor-summary"),
     path("publishing-monitor/lectures/", publishing_monitor_views.lectures_view,

@@ -111,6 +111,12 @@ export const AUTO_RELEASE: Record<string, Badge> = {
   NEVER_RAN: badge('Never ran', 'neutral'),
 }
 
+export const ALERT_SEVERITY: Record<string, Badge> = {
+  CRITICAL: badge('Critical', 'error'),
+  WARNING: badge('Warning', 'review'),
+  DIGEST: badge('Digest', 'quiet'),
+}
+
 export const label = {
   state: (v?: string | null) => lookup(MONITOR_STATE, v),
   lms: (v?: string | null) => lookup(LMS_MATCH, v),
@@ -122,6 +128,7 @@ export const label = {
   release: (v?: string | null) => lookup(RELEASE, v),
   health: (v?: string | null) => lookup(HEALTH, v),
   autoRelease: (v?: string | null) => lookup(AUTO_RELEASE, v),
+  alert: (v?: string | null) => lookup(ALERT_SEVERITY, v),
 }
 
 /** "45 s", "4 min", "2 h 5 min" - a heartbeat age, never a raw number of seconds. */

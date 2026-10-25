@@ -165,3 +165,23 @@ export interface PublishingDetail {
   timeline: TimelineEvent[]
   library_id: number
 }
+
+/** One OPEN publisher alert, exactly as stored (bunny_publisher_alerts). */
+export interface PublisherAlert {
+  alert_id: string
+  severity: 'CRITICAL' | 'WARNING' | 'DIGEST' | string
+  kind: string
+  summary: string
+  occurrences: number
+  first_seen_at: string | null
+  last_seen_at: string | null
+  notification_status: string | null
+  lecture: { lecture_id: string; subject: string | null; session_date: string | null } | null
+  job_id: string | null
+  detail: Record<string, unknown>
+}
+
+export interface PublisherAlerts {
+  alerts: PublisherAlert[]
+  counts: Record<string, number>
+}

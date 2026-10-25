@@ -468,6 +468,40 @@ def health(connection, *, library_id, playback_enabled: bool) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- open alerts
+OPEN_ALERTS = """
+SELECT a.alert_id::text, a.severity, a.kind, a.summary, a.detail, a.lecture_id::text, a.occurrences,
+       a.first_seen_at, a.last_seen_at, a.notification_status, l.subject, l.session_date
+  FROM public.bunny_publisher_alerts a
+  LEFT JOIN public.lecture_sessions l ON l.lecture_id = a.lecture_id
+ WHERE a.status = 'OPEN'
+ ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, a.last_seen_at DESC
+ LIMIT %s
+"""
+
+
+def open_alerts(connection, *, limit: int = 200) -> list[dict]:
+    """The publisher's OPEN alerts exactly as stored (the reconciler raises and resolves them).
+
+    `detail` is passed through as stored - a CHECK constraint keeps URLs out of it. A lecture or job is
+    reported only when the alert itself names one; nothing is inferred.
+    """
+    out = []
+    for (alert_id, severity, kind, summary, detail, lecture_id, occurrences, first_seen, last_seen, notified,
+         subject, session_date) in connection.execute(OPEN_ALERTS, (limit,)).fetchall():
+        detail = detail or {}
+        out.append({
+            "alert_id": alert_id, "severity": severity, "kind": kind, "summary": summary,
+            "occurrences": occurrences, "first_seen_at": _iso(first_seen), "last_seen_at": _iso(last_seen),
+            "notification_status": notified,
+            "lecture": ({"lecture_id": lecture_id, "subject": subject, "session_date": _iso(session_date)}
+                        if lecture_id else None),
+            "job_id": str(detail["job_id"]) if detail.get("job_id") else None,
+            "detail": {k: v for k, v in detail.items() if k != "job_id"},
+        })
+    return out
+
+
 # --------------------------------------------------------------------------- one lecture
 DISCOVERY_DETAIL = """
 SELECT status, reason_code, review_reason, expected_part_count, located_part_count, missing_part_count,

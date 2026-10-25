@@ -160,6 +160,18 @@ def health_view(request):
 
 @api_view(["GET"])
 @_handle
+def alerts_view(request):
+    """The publisher's open alerts as stored: severity, kind, message, related lecture/job if named, times."""
+    with reading() as connection:
+        alerts = monitor.open_alerts(connection)
+    counts = {}
+    for alert in alerts:
+        counts[alert["severity"]] = counts.get(alert["severity"], 0) + 1
+    return Response({"alerts": alerts, "counts": counts})
+
+
+@api_view(["GET"])
+@_handle
 def summary_view(request):
     """The KPI counts for a date range (lectures, never parts or job attempts), with their definitions."""
     date_from, date_to = _range(request.query_params)

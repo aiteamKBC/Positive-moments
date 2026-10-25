@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { age, CAPTIONS, HEALTH, label, MONITOR_STATE, TRANSCRIPT } from '../src/utils/publishing'
+import { age, ALERT_SEVERITY, CAPTIONS, HEALTH, label, MONITOR_STATE, TRANSCRIPT } from '../src/utils/publishing'
 
 describe('Lecture Publishing Monitor vocabulary', () => {
   it('never shows a caption or transcript status as an error: captions are optional', () => {
@@ -28,5 +28,12 @@ describe('Lecture Publishing Monitor vocabulary', () => {
     expect(age(240)).toBe('4 min')
     expect(age(7500)).toBe('2 h 5 min')
     expect(age(null)).toBe('—')
+  })
+
+  it('shows stored alert severities as they are, critical as an error and digests quietly', () => {
+    expect(ALERT_SEVERITY.CRITICAL.tone).toBe('error')
+    expect(ALERT_SEVERITY.WARNING.tone).toBe('review')
+    expect(ALERT_SEVERITY.DIGEST.tone).toBe('quiet')
+    expect(label.alert('NEW_SEVERITY')).toEqual({ label: 'New severity', tone: 'neutral' })
   })
 })
