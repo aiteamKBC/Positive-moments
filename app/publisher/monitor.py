@@ -24,6 +24,7 @@ Nothing here writes, calls Microsoft Graph or Bunny, or returns a URL, key or tr
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 
 # --------------------------------------------------------------------------- monitor states
@@ -65,6 +66,54 @@ AUTO_RELEASE_RECENT_SECONDS = 900  # AUTO_RELEASE runs every discovery interval 
 SCHEDULE_TASKS = ("DISCOVERY", "AUTO_RELEASE", "RECONCILE_LIGHT", "RECONCILE_FULL")
 SAFE_DETAIL_KEYS = ("candidates", "eligible", "released", "unchanged", "deferred", "skipped", "refused", "error",
                     "code")
+
+# --------------------------------------------------------------------------- redaction
+# Defence in depth for everything this module returns to a browser. The publisher stores codes,
+# identifiers and counts (CHECK constraints already refuse URL-like text in its jsonb columns), but
+# nothing here relies on that: a credential, bearer / Graph token, signing key or signed URL is masked
+# wherever it appears - in a secret-named field at any depth, or inside any text - and everything
+# else passes through unchanged. Stored rows are never modified; only the response is.
+REDACTED = "[redacted]"
+_SECRET_KEY = re.compile(
+    r"(pass(word|wd)?|secret|api[_-]?key|apikey|access[_-]?key|private[_-]?key|signing[_-]?key|token[_-]?key|"
+    r"auth(orization)?|bearer|cookie|credential|signature|^sig$|^sas$|jwt|session[_-]?(id|key)|"
+    r"(access|refresh|id|bearer|session|api|auth|sas)[_-]?token|^token$|^key$|connection[_-]?string|dsn|"
+    r"tempauth|download[_-]?url|signed[_-]?url|playback[_-]?url|embed[_-]?url)", re.IGNORECASE)
+_RECORDING_TOKEN = re.compile(r"^rec-[0-9a-f]{8}$")      # app/bunny/identity.py: a hash prefix, not a secret
+_TEXT_SECRETS = (
+    (re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE), "[url redacted]"),           # any URL, any scheme
+    (re.compile(r"\bbearer\s+[^\s,;\"']+", re.IGNORECASE), "Bearer " + REDACTED),
+    (re.compile(r"\b(basic|token)\s+[A-Za-z0-9+/=._-]{16,}", re.IGNORECASE), r"\1 " + REDACTED),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*"), REDACTED),  # JWT (Graph tokens)
+    (re.compile(r"(?i)\b((?:[a-z]+[_-])?(?:sig|signature|token|secret|password|pwd|tempauth|sas|"
+                r"access[_-]?token|api[_-]?key|access[_-]?key|signing[_-]?key|private[_-]?key|x-amz-signature))"
+                r"(\s*[=:]\s*)([^\s&,;\"']+)"), r"\1\2" + REDACTED),
+    (re.compile(r"(?i)\btempauth\S*"), REDACTED),
+)
+
+
+def scrub_text(text: str) -> str:
+    for pattern, replacement in _TEXT_SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def redact(value, *, key: str | None = None, depth: int = 0):
+    """A copy of `value` with secrets masked at any depth (dicts, lists, text). Nothing else changes."""
+    if depth > 12:
+        return REDACTED
+    if key is not None and _SECRET_KEY.search(key):
+        if key.lower() == "token" and isinstance(value, str) and _RECORDING_TOKEN.match(value):
+            return value                               # the recording identity tag: kept, it is useful
+        return None if value is None else REDACTED
+    if isinstance(value, dict):
+        return {k: redact(v, key=str(k), depth=depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact(v, depth=depth + 1) for v in value]
+    if isinstance(value, str):
+        return scrub_text(value)
+    return value
+
 
 # --------------------------------------------------------------------------- the batched facts
 _FACTS_SELECT = """
@@ -295,7 +344,7 @@ def classify(fact: dict, view: dict | None, *, playback_enabled: bool, library_i
         else:
             reason = "Bunny is encoding the video; it is verified when encoding finishes."
 
-    return {
+    return redact({
         "lecture_id": fact["lecture_id"], "session_date": _iso(fact["session_date"]),
         "scheduled_start": _iso(fact["scheduled_start"]), "scheduled_end": _iso(fact["scheduled_end"]),
         "subject": fact["subject"], "module": fact["module"],
@@ -311,7 +360,7 @@ def classify(fact: dict, view: dict | None, *, playback_enabled: bool, library_i
         "state": state, "reason": reason, "needs_attention": state in ATTENTION,
         "automatic": state in AUTOMATIC, "retry_at": _iso(retry_at),
         "updated_at": _iso(fact["updated_at"]),
-    }
+    })
 
 
 # --------------------------------------------------------------------------- KPIs = filters
@@ -465,7 +514,7 @@ def health(connection, *, library_id, playback_enabled: bool) -> dict:
                            "RUNNING_RECENTLY" if age <= AUTO_RELEASE_RECENT_SECONDS else "NOT_RUNNING_RECENTLY")
     out["open_alerts"] = {s: n for s, n in connection.execute(
         "SELECT severity, count(*) FROM public.bunny_publisher_alerts WHERE status = 'OPEN' GROUP BY 1").fetchall()}
-    return out
+    return redact(out)
 
 
 # --------------------------------------------------------------------------- open alerts
@@ -490,7 +539,7 @@ def open_alerts(connection, *, limit: int = 200) -> list[dict]:
     for (alert_id, severity, kind, summary, detail, lecture_id, occurrences, first_seen, last_seen, notified,
          subject, session_date) in connection.execute(OPEN_ALERTS, (limit,)).fetchall():
         detail = detail or {}
-        out.append({
+        out.append(redact({
             "alert_id": alert_id, "severity": severity, "kind": kind, "summary": summary,
             "occurrences": occurrences, "first_seen_at": _iso(first_seen), "last_seen_at": _iso(last_seen),
             "notification_status": notified,
@@ -498,7 +547,7 @@ def open_alerts(connection, *, limit: int = 200) -> list[dict]:
                         if lecture_id else None),
             "job_id": str(detail["job_id"]) if detail.get("job_id") else None,
             "detail": {k: v for k, v in detail.items() if k != "job_id"},
-        })
+        }))
     return out
 
 
@@ -539,7 +588,7 @@ def lecture_detail(connection, lecture_id: str, *, library_id: int, playback_ena
     base = operations.lecture_detail(connection, lecture_id, library_id=library_id, language=language)
     discovery = connection.execute(DISCOVERY_DETAIL, (lecture_id,)).fetchone()
     match = connection.execute(MATCH_DETAIL, (lecture_id,)).fetchone()
-    return {
+    return redact({
         "row": row,
         "lms": {"match": dict(zip(("status", "rule_version", "requires_review", "last_evaluated_at"),
                                   [_iso(x) for x in match])) if match else None,
@@ -563,4 +612,4 @@ def lecture_detail(connection, lecture_id: str, *, library_id: int, playback_ena
         "jobs": base["jobs"],
         "timeline": list(reversed(base["history"]))[:60],
         "library_id": library_id,
-    }
+    })

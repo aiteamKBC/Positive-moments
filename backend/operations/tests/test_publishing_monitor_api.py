@@ -6,6 +6,7 @@ reach Graph or Bunny. They pin the HTTP layer - authentication, GET only, read-o
 validation, pagination, that the summary and the table agree, and that no token leaks. The
 classification itself is covered in tests/unit and tests/integration.
 """
+import json
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from unittest import mock
@@ -166,6 +167,37 @@ class MonitorApiTests(TestCase):
         self.assertEqual(response.json()["counts"], {"WARNING": 2, "DIGEST": 1})
         self.assertEqual([a["alert_id"] for a in response.json()["alerts"]], ["a1", "a2", "a3"])
         self.assertNotIn(SERVICE_TOKEN, response.content.decode())
+
+    @patched
+    def test_no_secret_stored_in_an_alert_reaches_the_browser(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXBhcnQ"
+        rows = [("a1", "WARNING", "ORPHAN_BUNNY_VIDEO", f"Graph refused Bearer {jwt} at https://graph.example/x?sig=Q1",
+                 {"token": "rec-0a1b2c3d", "nested": {"api_key": "AK-1", "list": [{"password": "pw-2"}]},
+                  "job_id": "j-1"}, None, 1, NOW, NOW, "NOT_SENT", None, None)]
+
+        @contextmanager
+        def stored():
+            connection = mock.MagicMock()
+            connection.execute.return_value.fetchall.return_value = rows
+            yield connection
+
+        with mock.patch("operations.publishing_monitor_views.reading", stored):
+            response = self.client.get(reverse("operations-publishing-monitor-alerts"))
+        body = response.content.decode()
+        self.assertEqual(response.status_code, 200)
+        for secret in (jwt, "graph.example", "AK-1", "pw-2", "sig=Q1", SERVICE_TOKEN):
+            self.assertNotIn(secret, body)
+        alert = response.json()["alerts"][0]
+        self.assertEqual((alert["detail"]["token"], alert["job_id"]), ("rec-0a1b2c3d", "j-1"))
+
+    def test_the_shape_of_a_lecture_detail_is_redacted_as_a_whole(self):
+        detail = {"row": {"reason": "see Bearer abc123"}, "timeline": [{"detail": {"refresh_token": "rt-9"}}],
+                  "jobs": [{"subject_key": "IMPORT_VIDEO:part-1", "last_error_code": "BUNNY_FETCH_FAILED"}]}
+        text = json.dumps(monitor.redact(detail))
+        self.assertNotIn("rt-9", text)
+        self.assertNotIn("abc123", text)
+        self.assertIn("IMPORT_VIDEO:part-1", text)                 # operational fields stay readable
+        self.assertIn("BUNNY_FETCH_FAILED", text)
 
     @patched
     def test_an_unavailable_database_is_reported_not_hidden(self):

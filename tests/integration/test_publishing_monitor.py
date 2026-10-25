@@ -129,3 +129,25 @@ def test_open_alerts_are_read_as_stored_and_resolved_ones_are_not_shown(url):
     assert critical["job_id"] == "j-9" and critical["detail"] == {"bunny_video_id": "v-2"}
     assert warning["lecture"] is None and warning["job_id"] is None                # nothing invented
     assert warning["summary"] == "Bunny video with no publisher row" and warning["first_seen_at"]
+
+
+def test_secrets_stored_in_an_alert_never_reach_the_response_and_the_record_is_untouched(url):
+    World(url)
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXBhcnQ"
+    detail = {"token": "rec-0a1b2c3d", "bunny_video_id": "v-3",
+              "nested": {"password": "hunter2", "headers": [{"Authorization": "Bearer abc123"}],
+                         "graph": {"access_token": jwt}}}
+    with psycopg.connect(url, autocommit=True) as c:
+        PublisherAlertRepository().raise_alert(c, severity="WARNING", kind="ORPHAN_BUNNY_VIDEO",
+                                               dedupe_key="orphan:secret", summary=f"failed with Bearer {jwt}",
+                                               detail=detail)
+    with psycopg.connect(url, prepare_threshold=None) as c:
+        c.read_only = True
+        [alert] = [a for a in monitor.open_alerts(c) if a["kind"] == "ORPHAN_BUNNY_VIDEO"]
+        [(stored_summary, stored_detail)] = c.execute(
+            "SELECT summary, detail FROM public.bunny_publisher_alerts WHERE dedupe_key = 'orphan:secret'").fetchall()
+    text = json.dumps(alert)
+    for secret in ("hunter2", "abc123", jwt):
+        assert secret not in text, secret
+    assert alert["detail"]["token"] == "rec-0a1b2c3d" and alert["detail"]["bunny_video_id"] == "v-3"
+    assert stored_detail == detail and jwt in stored_summary           # the database record is not changed

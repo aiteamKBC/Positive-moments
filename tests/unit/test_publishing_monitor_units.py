@@ -186,3 +186,56 @@ def test_filters_search_and_attention():
     assert [r["subject"] for r in monitor.apply_filters(rows, video="NOT_IMPORTED")] == ["Leadership"]
     assert [r["subject"] for r in monitor.apply_filters(rows, transcript="NOT_STARTED")] == [
         "Data Analysis", "Leadership"]
+
+
+# =========================================================================== redaction (defence in depth)
+JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXBhcnQ"
+
+
+def test_secret_named_fields_are_masked_at_any_depth_and_identifiers_survive():
+    stored = {"bunny_video_id": "be785a53-0000-4000-8000-000000000000", "token": "rec-0a1b2c3d",
+              "nested": {"password": "hunter2", "list": [{"api_key": "AK-123"}, {"Authorization": "Bearer abc"}],
+                         "deeper": {"client_secret": "s3", "access_token": JWT, "count": 3}},
+              "status": "NO_LMS_SESSION", "lms_occurrence_id": "OCC-4493AC65DF5041459BC5A14DA8B357A0"}
+    out = monitor.redact(stored)
+    assert out["token"] == "rec-0a1b2c3d"                         # the recording identity tag is kept
+    assert out["bunny_video_id"] == stored["bunny_video_id"] and out["status"] == "NO_LMS_SESSION"
+    assert out["lms_occurrence_id"] == stored["lms_occurrence_id"] and out["nested"]["deeper"]["count"] == 3
+    assert out["nested"]["password"] == out["nested"]["deeper"]["client_secret"] == monitor.REDACTED
+    assert out["nested"]["list"] == [{"api_key": monitor.REDACTED}, {"Authorization": monitor.REDACTED}]
+    assert out["nested"]["deeper"]["access_token"] == monitor.REDACTED
+    text = str(out)
+    for secret in ("hunter2", "AK-123", "abc", "s3", JWT):
+        assert secret not in text.replace("[redacted]", ""), secret
+    assert stored["nested"]["password"] == "hunter2"              # the input (the stored record) is untouched
+
+
+def test_a_token_field_that_is_not_a_recording_identity_is_masked():
+    assert monitor.redact({"token": "abcdef123456"}) == {"token": monitor.REDACTED}
+    assert monitor.redact({"token": None}) == {"token": None}
+
+
+@pytest.mark.parametrize("text,secret", [
+    ("Bunny fetch failed for https://cdn.example.net/v.mp4?token=abc&expires=1", "cdn.example.net"),
+    ("download https://contoso.sharepoint.com/_layouts/download.aspx?tempauth=XYZ", "tempauth=XYZ"),
+    ("graph said 401 with Bearer eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJ1In0.sig-part", "eyJ0eXAi"),
+    (f"token {JWT}", JWT),
+    ("retry with api_key=AK-998877 later", "AK-998877"),
+    ("signed: sig=QWERTY123&se=2026", "QWERTY123"),
+    ("password: hunter2", "hunter2"),
+    ("blob sv=2021&ss=b&sig%3D... at wss://socket.example.net/x", "socket.example.net"),
+])
+def test_secrets_inside_message_text_are_masked(text, secret):
+    assert secret not in monitor.scrub_text(text)
+
+
+def test_operational_text_is_left_readable():
+    for text in ("2026-10-23: LMS occurrence NO_LMS_SESSION", "Bunny video with no publisher row",
+                 "part 1 video is not in Bunny", "error code: NO_RECORDING_YET", "3 Bunny videos carry rec-0a1b2c3d"):
+        assert monitor.scrub_text(text) == text
+
+
+def test_rows_returned_to_the_browser_are_redacted():
+    r = row(fact(recording_status="REVIEW_REQUIRED", recording_review_reason="see https://x.example/a?sig=1",
+                 videos=[]))
+    assert "x.example" not in r["reason"] and r["state"] == monitor.REVIEW_REQUIRED
