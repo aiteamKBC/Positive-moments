@@ -42,7 +42,10 @@ Bunny Stream becomes the primary playback source for recorded live sessions. Tea
 
 **Where it lives:**
 - **Library:** every recording is delivered from Bunny library **786045**.
-- **Captions:** each part has an English caption track, verified against the transcript.
+- **Captions are optional:** a recording becomes playable as soon as its video is verified, whether or not a transcript exists.
+  - When the Teams transcript arrives, an English caption track is built, verified against it, and attached to the **same** video. Playback, release and `state` don't change.
+  - If the transcript is late, missing or fails, the video still plays.
+  - `recording.caption_status` and `parts[].captions` always report the real caption state.
 - **Hidden until released:** a recording reaches learners only after it's *released*, and only while Kent's global delivery switch is on.
   - The switch was turned on on 24 Oct 2026 for the seven lectures above.
   - Kent can withdraw any lecture immediately, or turn the switch off for all lectures.
@@ -125,6 +128,7 @@ Treat every response as `Cache-Control: no-store`. The API sends `no-store`, but
       "encoding": "VERIFIED", "resolutions": ["480p", "720p", "1080p"], "visibility": "HIDDEN",
       "captions": [{"language": "en", "label": "English", "status": "VERIFIED", "version": 1, "content_verified": true}]
     }],
+    "caption_status": "VERIFIED",
     "excluded_parts": [{"source_part_index": 1, "reason": "OPERATOR_EXCLUDED"}]
   },
   "release": {"status": "NOT_RELEASED", "released_at": null, "withdrawn_at": null},
@@ -142,8 +146,8 @@ Treat every response as `Cache-Control: no-store`. The API sends `no-store`, but
 
    | State | Meaning |
    |---|---|
-   | `READY` | Verified |
-   | `PROCESSING` | Still being recorded, imported or captioned (normally within a few hours of the lecture's end) |
+   | `READY` | Every included video is verified (captions optional; see `caption_status`) |
+   | `PROCESSING` | Still being recorded, imported or encoded (normally within a few hours of the lecture's end) |
    | `REVIEW_REQUIRED` | A Kent operator must decide something |
    | `BLOCKED` | A duplicate calendar entry, or nothing to publish |
    | `WITHDRAWN` | Pulled by Kent |
@@ -223,7 +227,7 @@ Return `url` only inside the page you render for that learner on `lms.kentbusine
 - sign per page view;
 - the loaded player is expected to keep playing past `expires` (to be confirmed in the staff checks);
 - every reload or next part needs a fresh URL, using `t=` to resume;
-- add `captions=en` to show the English track by default.
+- add `captions=en` to show the English track by default, but only for a part whose `captions[]` has `content_verified: true`. While `caption_status` is `NOT_AVAILABLE` or `PARTIAL`, play the video without the parameter, and say "captions coming soon" if you show anything. A later caption needs no action from you: it appears on the same video.
 
 ## Learner access control (the LMS's responsibility)
 

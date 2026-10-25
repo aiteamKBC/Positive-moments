@@ -14,19 +14,25 @@ THE READ MODEL (what the LMS backend sees, contract v1)
       BLOCKED          duplicate calendar event, or every recording part excluded
       WITHDRAWN        an operator withdrew it (overrides everything below)
       REVIEW_REQUIRED  waiting for a person (fragment, ambiguous / stale match, ...)
-      PROCESSING       recording, import, encoding or caption still under way
-      READY            every included part has a VERIFIED video and a VERIFIED,
-                       content-checked caption, and the LMS link is current
+      PROCESSING       recording, import or encoding still under way
+      READY            every included part has a VERIFIED video, and the LMS link is current
+
+    CAPTIONS ARE OPTIONAL FOR PLAYBACK (2026-10-25). A missing, late or failed transcript/caption
+    never keeps a verified video from READY, release or playback. The caption track is produced
+    independently and attached to the SAME Bunny video when it is ready - no re-upload, no
+    withdrawal, no re-release. Its real state is reported, never assumed: per part in
+    `captions[]` (status, content_verified) and per lecture in `recording.caption_status`
+    (VERIFIED | PARTIAL | NOT_AVAILABLE; VERIFIED = every part has a content-checked caption).
 
     playback.available is true ONLY when state is READY, the lecture is
     RELEASED, and delivery is switched on (PUBLISHER_LMS_PLAYBACK_ENABLED).
-    Anything else - a withdrawal, a caption superseded by an unverified one, a
-    match gone STALE - makes it false on the very next request.
+    Anything else - a withdrawal, a video no longer verified, a match gone
+    STALE - makes it false on the very next request.
 
 THE PUBLICATION LIFECYCLE (audited operator actions)
     RELEASE   HIDDEN | WITHDRAWN -> READY_FOR_LMS on every INCLUDED part's live
-              video, only when the lecture is verified ready right now AND the
-              library passes the learner-delivery security check.
+              video, only when every included video is verified right now (captions
+              are not required) AND the library passes the learner-delivery security check.
     WITHDRAW  any -> WITHDRAWN on every live video of the lecture.
     Both run in ONE transaction under a per-lecture transaction advisory lock
     with the video rows locked FOR UPDATE: two operators, or an operator and a
@@ -165,7 +171,8 @@ def lecture_delivery(connection, lecture_id, *, library_id: int, language: str =
         captions.setdefault(str(row[0]), []).append(
             {"language": row[1], "label": row[2], "status": row[3], "version": row[4],
              "content_verified": row[5] in CONTENT_VERIFIED})
-    parts, excluded, blocking, sequence = [], [], list(state.blocking), 0
+    # Video-level blocking only: an outstanding caption is reported (caption_status), never blocking.
+    parts, excluded, blocking, sequence = [], [], list(state.video_blocking), 0
     for part in sorted(facts.parts, key=lambda p: p["part_index"]):
         policy = facts.policy(part)
         index = part["part_index"]
@@ -179,8 +186,7 @@ def lecture_delivery(connection, lecture_id, *, library_id: int, language: str =
         video_id = str(video[2]) if video and video[2] else None
         part_captions = captions.get(video_id, []) if video_id else []
         current = next((c for c in part_captions if c["language"] == language), None)
-        if current and current["status"] == "VERIFIED" and not current["content_verified"]:
-            blocking.append(f"PART_{index}_CAPTION_CONTENT_UNVERIFIED")
+        caption_ok = bool(current and current["status"] == "VERIFIED" and current["content_verified"])
         duration = video[5] if video and video[5] is not None else (
             round(float(part["duration_seconds"])) if part.get("duration_seconds") is not None else None)
         parts.append({
@@ -195,12 +201,17 @@ def lecture_delivery(connection, lecture_id, *, library_id: int, language: str =
             "captions": part_captions,
             "visibility": video[8] if video else None,
             "_record_id": str(video[0]) if video else None,
+            "_caption_ok": caption_ok,
         })
     if not link_current:
         blocking.append("LMS_LINK_NOT_CURRENT")
     lifecycle = {r[0]: r[1] for r in connection.execute(LIFECYCLE, (facts.lecture_id, str(library_id))).fetchall()}
     release = _release_status(parts)
-    verified_ready = state.fully_ready and not blocking       # verification only: release is a separate fact
+    # Verification of the VIDEOS only (captions optional); release is a separate fact.
+    verified_ready = state.video_ready and not blocking
+    with_caption = sum(1 for p in parts if p["_caption_ok"])
+    caption_status = ("VERIFIED" if parts and with_caption == len(parts)
+                      else "PARTIAL" if with_caption else "NOT_AVAILABLE")
     unreleased = [f"PART_{p['source_part_index']}_NOT_RELEASED" for p in parts
                   if release == NOT_RELEASED and any(q["visibility"] == READY_FOR_LMS for q in parts)
                   and p["visibility"] != READY_FOR_LMS]
@@ -209,7 +220,7 @@ def lecture_delivery(connection, lecture_id, *, library_id: int, language: str =
         "facts": facts, "readiness": state, "verified_ready": verified_ready,
         "state": _state(facts, state, blocking, verified_ready, release),
         "blocking": _dedupe(blocking + unreleased), "verification_blocking": _dedupe(blocking),
-        "parts": parts, "excluded_parts": excluded,
+        "parts": parts, "excluded_parts": excluded, "caption_status": caption_status,
         "teams_part_count": len(facts.parts), "release": release,
         "released_at": _iso(lifecycle.get(RELEASE_EVENT)), "withdrawn_at": _iso(lifecycle.get(WITHDRAW_EVENT)),
         "match": {"status": match[0], "rule_version": match[1]} if match else {"status": "PENDING", "rule_version": None},
@@ -235,8 +246,7 @@ def _state(facts, state, blocking, verified_ready, release) -> str:
         return WITHDRAWN
     if verified_ready:
         return READY
-    if state.state == "REVIEW_REQUIRED" or any(
-            b in REVIEW_BLOCKS or b.endswith(("_NEEDS_DECISION", "_CAPTION_CONTENT_UNVERIFIED")) for b in blocking):
+    if state.state == "REVIEW_REQUIRED" or any(b in REVIEW_BLOCKS or b.endswith("_NEEDS_DECISION") for b in blocking):
         return REVIEW_REQUIRED
     return PROCESSING
 
@@ -277,6 +287,7 @@ def occurrence_recording(connection, occurrence_id: str, *, library_id: int, pla
             "teams_part_count": view["teams_part_count"], "published_part_count": len(view["parts"]),
             "total_duration_seconds": sum(p["duration_seconds"] or 0 for p in view["parts"]) or None,
             "parts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in view["parts"]],
+            "caption_status": view["caption_status"],
             "excluded_parts": view["excluded_parts"]},
         "release": {"status": view["release"], "released_at": view["released_at"],
                     "withdrawn_at": view["withdrawn_at"]},
@@ -375,8 +386,8 @@ def _change(connection, lecture_id, library_id, actor, reason, language, *, rele
             if releasing:
                 if not view["verified_ready"]:
                     raise OperatorActionRefused(
-                        "NOT_VERIFIED", "only a lecture whose every included part has a verified video and a "
-                        "verified, content-checked caption can be released; blocking: "
+                        "NOT_VERIFIED", "only a lecture whose every included part has a verified video "
+                        "(captions are optional) can be released; blocking: "
                         + ", ".join(view["verification_blocking"] or [view["readiness"].state]))
                 wanted = {p["_record_id"] for p in view["parts"]}
                 target = [r for r in rows if str(r[0]) in wanted and r[2] != READY_FOR_LMS]

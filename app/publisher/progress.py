@@ -13,6 +13,11 @@ the reconciler, the CLI and the operations API:
       * no part is still waiting for an operator's fragment decision, and
       * the lecture is not blocked as a duplicate (below).
 
+    VIDEO READY (what learner delivery and release use, 2026-10-25): the same, WITHOUT the caption
+    condition. A missing, late or failed transcript/caption never holds a verified video back; the
+    caption track keeps being produced independently and is reported as `caption_pending` until
+    it is VERIFIED. FULLY READY (and its one-off LECTURE_FULLY_READY event) is unchanged.
+
 DUPLICATE CALENDAR EVENTS (P0-F: decided here, never waited for from QA)
     The publisher applies Lecture Intelligence's validated duplicate rule
     (DuplicateResolutionService.classify_lecture, read-only) itself:
@@ -164,16 +169,21 @@ class Readiness:
     state: str
     parts: list
     blocking: list
+    video_ready: bool = False                   # fully_ready without the caption condition
+    video_blocking: list = field(default_factory=list)
+    caption_pending: list = field(default_factory=list)   # included parts with a verified video, caption not VERIFIED
 
     def as_dict(self) -> dict:
         return {"lecture_id": self.lecture_id, "library_id": self.library_id, "fully_ready": self.fully_ready,
-                "state": self.state, "parts": self.parts, "blocking": self.blocking}
+                "state": self.state, "parts": self.parts, "blocking": self.blocking,
+                "video_ready": self.video_ready, "video_blocking": self.video_blocking,
+                "caption_pending": self.caption_pending}
 
 
 def readiness(connection, facts: LectureFacts, library_id: int | None, language: str = "en") -> Readiness:
     """Where this lecture stands in ONE library, part by part."""
     videos, captions = BunnyVideoRepository(), BunnyCaptionRepository()
-    parts, blocking = [], []
+    parts, blocking, caption_only = [], [], []
     if not facts.exists:
         return Readiness(facts.lecture_id, library_id, False, "UNKNOWN_LECTURE", [], ["LECTURE_NOT_FOUND"])
     if facts.cancelled or facts.suppressed:
@@ -202,12 +212,17 @@ def readiness(connection, facts: LectureFacts, library_id: int | None, language:
             blocking.append(f"PART_{part['part_index']}_FRAGMENT_NEEDS_DECISION")
         elif policy == INCLUDE and (entry["encoding"] != "VERIFIED" or entry["caption"] != "VERIFIED"):
             blocking.append(f"PART_{part['part_index']}_NOT_PUBLISHED")
+            if entry["encoding"] == "VERIFIED":     # the video is done; only its caption is outstanding
+                caption_only.append(part["part_index"])
         parts.append(entry)
     if facts.recording_status == "LOCATED" and not any(p["policy"] == INCLUDE for p in parts):
         blocking.append("NO_INCLUDED_PART")
     ready = library_id is not None and not blocking
+    video_blocking = [b for b in blocking if b not in {f"PART_{i}_NOT_PUBLISHED" for i in caption_only}]
     state = "FULLY_READY" if ready else ("REVIEW_REQUIRED" if any(
         b.endswith("NEEDS_DECISION") or b in ("LMS_AMBIGUOUS", "LMS_CONFLICT", "LMS_STALE", "RECORDING_REVIEW_REQUIRED",
                                                DUPLICATE_LOSER, DUPLICATE_AMBIGUOUS)
         for b in blocking) else "IN_PROGRESS")
-    return Readiness(facts.lecture_id, library_id, ready, state, parts, blocking)
+    return Readiness(facts.lecture_id, library_id, ready, state, parts, blocking,
+                     video_ready=library_id is not None and not video_blocking, video_blocking=video_blocking,
+                     caption_pending=caption_only)

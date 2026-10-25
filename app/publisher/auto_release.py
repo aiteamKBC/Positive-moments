@@ -7,8 +7,10 @@ lock, same library security check, same PUBLICATION_RELEASED event (actor "publi
 
 A lecture is released automatically only when ALL of these hold:
   * it is dated on or after PUBLISHER_AUTO_RELEASE_FROM and has a CURRENT link to an LMS occurrence;
-  * its LMS match is VERIFIED and its live state is READY (verified video + verified, content-checked
-    English caption for every included part; not a duplicate, not cancelled, nothing pending review);
+  * its LMS match is VERIFIED and its live state is READY (a verified video for every included part; not a
+    duplicate, not cancelled, nothing pending review). Captions are NOT required: a missing, late or failed
+    transcript never holds the video back, and a caption that arrives later is attached to the same video
+    without re-upload or re-release;
   * every live video is still HIDDEN and the lecture has NEVER been released or withdrawn
     (re-checked inside release()'s lock: an operator's withdrawal is never undone, and a lecture that
     gained a new part after an operator release waits for the operator, as before);

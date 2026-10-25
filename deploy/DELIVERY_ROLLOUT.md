@@ -192,7 +192,7 @@ Nothing is deleted from Bunny or the database in any rollback.
 **A lecture is released automatically only when all of these hold:**
 - it is dated on or after `PUBLISHER_AUTO_RELEASE_FROM`;
 - it has a current link to an LMS occurrence, and its LMS match is VERIFIED;
-- its live state is READY: verified video, plus a verified and content-checked English caption, for every included part;
+- its live state is READY: a verified video for every included part. Captions are **not** required: a missing, late or failed transcript never holds the video back, and a caption produced later is attached to the same video, with no re-upload and no new release;
 - it is not a duplicate, not cancelled and not under review;
 - every part is still HIDDEN, and it has never been released or withdrawn (re-checked inside `release()`'s lock);
 - library 786045 passes the live security check.

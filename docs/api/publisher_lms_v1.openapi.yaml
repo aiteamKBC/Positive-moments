@@ -141,8 +141,9 @@ components:
     State:
       type: string
       description: |
-        READY: every included part has a verified video and a verified, content-checked caption.
-        PROCESSING: still being recorded, imported, encoded or captioned.
+        READY: every included part has a verified video. Captions are optional and never hold a video back;
+          see `recording.caption_status` and `parts[].captions`.
+        PROCESSING: still being recorded, imported or encoded.
         REVIEW_REQUIRED: waiting for a publisher operator.
         BLOCKED: duplicate calendar entry, or every part excluded.
         WITHDRAWN: an operator withdrew it.
@@ -193,6 +194,15 @@ components:
             parts:
               type: array
               items: {$ref: "#/components/schemas/Part"}
+            caption_status:
+              type: string
+              enum: [VERIFIED, PARTIAL, NOT_AVAILABLE]
+              description: |
+                English captions across the published parts. VERIFIED = every part has a caption that was read
+                back and matched; PARTIAL = some parts do; NOT_AVAILABLE = none (missing, still being produced, or
+                failed). Captions are optional: a recording plays without them, and a caption produced later is
+                added to the same video with no change to `state`, `release` or `playback`. Show a captions
+                control only for parts whose `captions[].content_verified` is true.
             excluded_parts:
               type: array
               items:
@@ -225,6 +235,7 @@ components:
         visibility: {type: string, nullable: true, enum: [HIDDEN, READY_FOR_LMS, WITHDRAWN]}
         captions:
           type: array
+          description: The current caption track per language, as it really is (possibly empty). Optional for playback.
           items:
             type: object
             properties:

@@ -136,13 +136,51 @@ def test_an_unmatched_recording_is_never_released(url):
     assert world.security.calls == 0
 
 
-def test_a_missing_transcript_keeps_the_lecture_unreleased(url):
+def released_without_captions(world, body):
+    assert body["state"] == "READY" and body["release"]["status"] == "RELEASED" and body["blocking"] == []
+    assert body["playback"]["available"] is True and body["recording"]["caption_status"] == "NOT_AVAILABLE"
+    assert lifecycle_events(world) == ["PUBLICATION_RELEASED"] and visibility(world) == ["READY_FOR_LMS"]
+
+
+def test_a_missing_transcript_never_blocks_the_verified_video(url):
     world = auto_world(url)
     world.part(START + timedelta(minutes=1), END - timedelta(minutes=2), transcript=False)
     world.run(rounds=12)
-    body = answer(world)
-    assert body["state"] != "READY" and body["release"]["status"] == "NOT_RELEASED"
-    assert lifecycle_events(world) == [] and world.security.calls == 0
+    released_without_captions(world, answer(world))
+    assert all(c["content_verified"] is not True for p in answer(world)["recording"]["parts"] for c in p["captions"])
+
+
+def test_a_late_transcript_attaches_captions_to_the_released_video_without_re_release(url):
+    world = auto_world(url)
+    start, end = START + timedelta(minutes=1), END - timedelta(minutes=2)
+    recording = world.part(start, end, transcript=False)
+    world.run(rounds=10)
+    before = answer(world)
+    released_without_captions(world, before)
+    video_ids = [p["bunny"]["video_id"] for p in before["recording"]["parts"]]
+    fetches, released_at = len(world.bunny.fetch_calls), before["release"]["released_at"]
+    # The transcript turns up hours later (well inside the 72 h caption window).
+    world.transcript(start, end, recording["contentCorrelationId"])
+    world.run(rounds=12, step=timedelta(minutes=50))
+    after = answer(world)
+    assert after["recording"]["caption_status"] == "VERIFIED"
+    assert after["recording"]["parts"][0]["captions"][0]["content_verified"] is True
+    assert [p["bunny"]["video_id"] for p in after["recording"]["parts"]] == video_ids          # same video
+    assert len(world.bunny.fetch_calls) == fetches and world.bunny.delete_calls == []          # no re-upload
+    assert after["release"] == {**before["release"], "released_at": released_at}               # untouched
+    assert lifecycle_events(world) == ["PUBLICATION_RELEASED"] and after["playback"]["available"] is True
+    assert world.events().count("LECTURE_FULLY_READY") == 1                    # fully ready once captions land
+
+
+def test_a_failed_transcript_never_blocks_the_video(url):
+    world = auto_world(url)
+    world.part(START + timedelta(minutes=1), END - timedelta(minutes=2), transcript=False)
+    world.run(rounds=10)
+    released_without_captions(world, answer(world))
+    world.run(rounds=5, step=timedelta(hours=20))                  # past the 72 h window: caption work gives up
+    released_without_captions(world, answer(world))
+    captions = world.jobs("PUBLISH_CAPTION")
+    assert captions and all(j[2] != "SUCCEEDED" for j in captions)
 
 
 def test_incomplete_encoding_is_never_released(url):
@@ -154,13 +192,16 @@ def test_incomplete_encoding_is_never_released(url):
     assert world.security.calls == 0
 
 
-def test_a_caption_never_content_checked_is_never_released(url):
+def test_a_caption_never_content_checked_is_released_and_reported_honestly(url):
     world = World(url, **production(auto_release=True, auto_release_from=START.date()))   # no CDN read-back
     world.security = Security()
     attach(world)
     one_part(world)
     world.run(rounds=12)
-    assert answer(world)["state"] == "REVIEW_REQUIRED" and lifecycle_events(world) == []
+    body = answer(world)
+    released_without_captions(world, body)
+    [caption] = body["recording"]["parts"][0]["captions"]
+    assert caption["status"] == "VERIFIED" and caption["content_verified"] is False         # never claimed
 
 
 def test_a_lecture_that_became_a_duplicate_is_never_released(url):

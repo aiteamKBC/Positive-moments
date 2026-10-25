@@ -164,29 +164,36 @@ def test_readiness_is_computed_live_not_from_the_historical_event(url):
     world = ready_world(url)
     act(world, "release")
     assert answer(world)["playback"]["available"] is True
-    # The current caption stops being verified: the LECTURE_FULLY_READY event stays, delivery stops.
+    assert answer(world)["recording"]["caption_status"] == "VERIFIED"
+    # The current caption stops being verified: captions are optional, so playback continues and the
+    # caption is reported as not available (never claimed verified).
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("UPDATE public.bunny_caption_publications SET publication_status = 'REVIEW_REQUIRED', "
                   "last_error_code = 'TEST' WHERE lecture_id = %s", (world.lecture_id,))
     body = answer(world)
-    assert world.ready() and body["state"] != "READY" and body["playback"]["available"] is False
-    assert any(b.endswith("NOT_PUBLISHED") for b in body["blocking"])
+    assert body["state"] == "READY" and body["playback"]["available"] is True and body["blocking"] == []
+    assert body["recording"]["caption_status"] == "NOT_AVAILABLE"
+    # The VIDEO can never stop being verified while visible: the schema refuses it outright.
+    with psycopg.connect(url, autocommit=True) as c, pytest.raises(psycopg.errors.CheckViolation):
+        c.execute("UPDATE public.bunny_videos SET encoding_status = 'REVIEW_REQUIRED' WHERE lecture_id = %s",
+                  (world.lecture_id,))
     # A cancelled lecture is not applicable, whatever was released.
     with psycopg.connect(url, autocommit=True) as c:
         c.execute("UPDATE public.lecture_sessions SET is_cancelled = true WHERE lecture_id = %s", (world.lecture_id,))
     assert answer(world)["state"] == "NOT_APPLICABLE"
 
 
-def test_a_caption_never_content_checked_cannot_be_released(url):
+def test_a_caption_never_content_checked_is_reported_and_does_not_block_the_video(url):
     world = World(url)                                           # no CDN read-back: content check NOT_ATTEMPTED
     world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
     world.run(rounds=10)
     body = answer(world)
-    assert world.ready() and body["state"] == "REVIEW_REQUIRED"
-    assert body["blocking"] == ["PART_1_CAPTION_CONTENT_UNVERIFIED"]
-    with pytest.raises(OperatorActionRefused) as refused:
-        act(world, "release")
-    assert refused.value.code == "NOT_VERIFIED" and lifecycle_events(world) == []
+    assert world.ready() and body["state"] == "READY" and body["blocking"] == []
+    [caption] = body["recording"]["parts"][0]["captions"]
+    assert caption["status"] == "VERIFIED" and caption["content_verified"] is False      # reported as it is
+    assert body["recording"]["caption_status"] == "NOT_AVAILABLE"
+    assert act(world, "release")["changed"] and lifecycle_events(world) == ["PUBLICATION_RELEASED"]
+    assert answer(world)["playback"]["available"] is True
 
 
 # =========================================================================== multipart and fragments
@@ -328,22 +335,24 @@ def test_a_wrong_cdn_key_never_counts_as_a_content_check(url):
     world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
     world.run(rounds=10)
     body = answer(world)
-    assert world.ready() and body["blocking"] == ["PART_1_CAPTION_CONTENT_UNVERIFIED"]
+    assert world.ready() and body["blocking"] == [] and body["recording"]["caption_status"] == "NOT_AVAILABLE"
+    assert body["recording"]["parts"][0]["captions"][0]["content_verified"] is False
     [(check,)] = world.q("SELECT readback ->> 'content_check' FROM public.bunny_caption_publications "
                          "WHERE lecture_id = %s", world.lecture_id)
     assert check == "CDN_UNAVAILABLE"
 
 
-def test_cdn_protection_turned_on_while_policy_is_deferred_blocks_release_not_playback(url):
+def test_cdn_protection_turned_on_while_policy_is_deferred_leaves_only_the_caption_unverified(url):
     # Someone enables CDN token authentication on the pull zone without switching the policy: the unsigned
-    # read-back gets 403, the caption is registered but not content-checked, and release refuses it.
+    # read-back gets 403 and the caption is registered but not content-checked. Captions are optional, so the
+    # verified video stays READY and releasable; the caption is reported as not available, never as verified.
     world = delivered(url, cdn_key=CDN_KEY, **production())
     world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
     world.run(rounds=10)
-    assert world.ready() and answer(world)["blocking"] == ["PART_1_CAPTION_CONTENT_UNVERIFIED"]
-    with pytest.raises(OperatorActionRefused) as refused:
-        act(world, "release")
-    assert refused.value.code == "NOT_VERIFIED"
+    body = answer(world)
+    assert world.ready() and body["state"] == "READY" and body["blocking"] == []
+    assert body["recording"]["caption_status"] == "NOT_AVAILABLE"
+    assert act(world, "release")["changed"] and answer(world)["playback"]["available"] is True
 
 
 # =========================================================================== unknown, LMS-only and the feed
