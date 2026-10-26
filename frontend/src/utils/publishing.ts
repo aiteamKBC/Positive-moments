@@ -131,6 +131,36 @@ export const label = {
   alert: (v?: string | null) => lookup(ALERT_SEVERITY, v),
 }
 
+/** The stored severity of an informational digest; every other stored severity is listed as an alert. */
+export const DIGEST = 'DIGEST'
+
+const SEVERITY_ORDER = ['CRITICAL', 'WARNING']
+
+export interface AlertCount { severity: string; count: number; text: string; digest: boolean }
+
+/**
+ * Open alerts per stored severity, worst first and the digest last: "3 Warnings", "1 Digest".
+ * Severities without a count (or a zero count) are left out; an unmapped severity is shown as itself.
+ */
+export function alertCounts(counts?: Record<string, number> | null): AlertCount[] {
+  const rank = (severity: string) =>
+    severity === DIGEST ? SEVERITY_ORDER.length + 1
+      : SEVERITY_ORDER.includes(severity) ? SEVERITY_ORDER.indexOf(severity) : SEVERITY_ORDER.length
+  return Object.entries(counts ?? {})
+    .filter(([, count]) => count > 0)
+    .sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
+    .map(([severity, count]) => {
+      const name = label.alert(severity).label
+      return { severity, count, text: `${count} ${name}${count === 1 ? '' : 's'}`, digest: severity === DIGEST }
+    })
+}
+
+/** "3 Warnings · 1 Digest" - or "None". */
+export function alertCountText(counts?: Record<string, number> | null): string {
+  const parts = alertCounts(counts)
+  return parts.length ? parts.map(part => part.text).join(' · ') : 'None'
+}
+
 /** "45 s", "4 min", "2 h 5 min" - a heartbeat age, never a raw number of seconds. */
 export function age(seconds?: number | null): string {
   if (seconds === null || seconds === undefined) return '—'

@@ -30,7 +30,7 @@ import { getPublisherHealth, getPublishingLectures, getPublishingSummary } from 
 import type { PublisherHealth, PublishingFilters, PublishingPage, PublishingSummary } from '../types/publishing'
 import { businessDate, cairoDateTime, cairoTimeRange, shiftBusinessDate, sinceNow } from '../utils/datetime'
 import { errorMessage } from '../utils/format'
-import { age, CAPTIONS, label, MONITOR_STATE, TRANSCRIPT } from '../utils/publishing'
+import { age, alertCounts, CAPTIONS, label, MONITOR_STATE, TRANSCRIPT } from '../utils/publishing'
 
 const REFRESH_MS = 60_000
 const PAGE_SIZE = 25
@@ -172,7 +172,9 @@ onBeforeUnmount(() => {
 
 const discovery = computed(() => health.value?.tasks.DISCOVERY ?? null)
 const autoRelease = computed(() => health.value?.tasks.AUTO_RELEASE ?? null)
-const alerts = computed(() => Object.entries(health.value?.open_alerts ?? {}).filter(([severity]) => severity !== 'DIGEST'))
+/** Every stored severity, counted separately: "3 Warnings · 1 Digest" (the digest is informational). */
+const alerts = computed(() => alertCounts(health.value?.open_alerts))
+const ALERT_TONE: Record<string, string> = { CRITICAL: 'text-rose-700', WARNING: 'text-orange-700' }
 const showAlerts = ref(false)
 /** The figure that answers the page's question: what the LMS can play right now (StatTile's `lead`). */
 const LEAD_KPI = 'playable'
@@ -259,11 +261,15 @@ const KPI_TONE: Record<string, string> = {
           <dt class="tile-label">Open alerts</dt>
           <dd class="mt-1">
             <button
-              v-if="alerts.length" type="button" class="row-link text-left font-semibold text-orange-700"
-              :aria-expanded="showAlerts" @click="showAlerts = !showAlerts"
+              v-if="alerts.length" type="button" class="row-link text-left font-semibold"
+              :aria-expanded="showAlerts" aria-controls="publisher-alerts" data-test="alert-counts"
+              @click="showAlerts = !showAlerts"
             >
-              <span v-for="[severity, count] in alerts" :key="severity" class="mr-2">{{ count }} {{ severity.toLowerCase() }}</span>
-              <span class="text-2xs font-semibold text-brand-700 underline">{{ showAlerts ? 'Hide' : 'View' }}</span>
+              <template v-for="(part, index) in alerts" :key="part.severity">
+                <span v-if="index" class="text-faint" aria-hidden="true"> · </span>
+                <span :class="part.digest ? 'font-normal text-muted' : (ALERT_TONE[part.severity] ?? 'text-ink')">{{ part.text }}</span>
+              </template>
+              <span class="ml-2 text-2xs font-semibold text-brand-700 underline">{{ showAlerts ? 'Hide' : 'View' }}</span>
             </button>
             <span v-else class="text-muted">None</span>
           </dd>
@@ -272,7 +278,7 @@ const KPI_TONE: Record<string, string> = {
     </section>
 
     <PublisherAlertsPanel
-      v-if="showAlerts" :refresh-key="refreshedAt"
+      v-if="showAlerts" id="publisher-alerts" :refresh-key="refreshedAt"
       @close="showAlerts = false" @open-lecture="(id) => { openLecture = id }"
     />
 
