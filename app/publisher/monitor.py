@@ -25,7 +25,7 @@ Nothing here writes, calls Microsoft Graph or Bunny, or returns a URL, key or tr
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 # --------------------------------------------------------------------------- monitor states
 SCHEDULED = "SCHEDULED"                        # the lecture has not ended yet
@@ -517,38 +517,147 @@ def health(connection, *, library_id, playback_enabled: bool) -> dict:
     return redact(out)
 
 
-# --------------------------------------------------------------------------- open alerts
-OPEN_ALERTS = """
+# --------------------------------------------------------------------------- publisher alerts
+DIGEST = "DIGEST"           # the informational daily digest's stored severity
+# What each LMS coverage status means (the CHECK in migration 025 and app.lms.matching).
+COVERAGE_MEANING = {
+    "NOT_YET_DUE": "In scope; the session has not ended (plus its grace period) yet.",
+    "MATCHED": "A verified Lecture Intelligence lecture is linked to this session.",
+    "LMS_ONLY_PENDING": "Ended; no Lecture Intelligence lecture yet, still inside the discovery grace period.",
+    "LMS_SESSION_NOT_DISCOVERED": "Ended past the grace period and no Lecture Intelligence lecture was matched "
+                                  "to its Teams meeting and start time.",
+    "TEST_EXCLUDED": "Belongs to a configured test programme.",
+    "INACTIVE": "Cancelled occurrence, or a superseded / cancelled series.",
+}
+_ALERTS_SELECT = """
 SELECT a.alert_id::text, a.severity, a.kind, a.summary, a.detail, a.lecture_id::text, a.occurrences,
-       a.first_seen_at, a.last_seen_at, a.notification_status, l.subject, l.session_date
+       a.first_seen_at, a.last_seen_at, a.notification_status, l.subject, l.session_date, a.status, a.resolved_at,
+       c.lms_occurrence_id, c.lms_live_session_id, c.lms_module_catalogue_id, c.lms_programme_name,
+       c.lms_meeting_type, c.lms_occurrence_status, c.lms_series_status, c.lms_scheduled_start, c.lms_scheduled_end,
+       c.meeting_key_hash IS NOT NULL, c.scope_status, c.coverage_status, c.matched_lecture_id::text, c.evidence,
+       c.first_seen_at, c.status_changed_at,
+       e.match_status, e.rule_version, e.evidence ->> 'reason', e.candidate_count, e.last_evaluated_at
   FROM public.bunny_publisher_alerts a
   LEFT JOIN public.lecture_sessions l ON l.lecture_id = a.lecture_id
+  LEFT JOIN public.bunny_lms_occurrence_coverage c ON c.lms_occurrence_id = a.detail ->> 'lms_occurrence_id'
+  LEFT JOIN public.bunny_lms_match_evaluations e ON e.lecture_id = a.lecture_id AND e.is_current
+"""
+OPEN_ALERTS = _ALERTS_SELECT + """
  WHERE a.status = 'OPEN'
  ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'WARNING' THEN 1 ELSE 2 END, a.last_seen_at DESC
  LIMIT %s
 """
+RESOLVED_ALERTS = _ALERTS_SELECT + """
+ WHERE a.status = 'RESOLVED' AND a.resolved_at >= now() - make_interval(days => %s)
+ ORDER BY a.resolved_at DESC
+ LIMIT %s
+"""
+ALERT_REF = "SELECT alert_id::text, severity, status FROM public.bunny_publisher_alerts WHERE alert_id = %s"
+
+
+def _alert(row) -> dict:
+    (alert_id, severity, kind, summary, detail, lecture_id, occurrences, first_seen, last_seen, notified,
+     subject, session_date, status, resolved_at,
+     occurrence, series, module, programme, meeting_type, occurrence_status, series_status, start, end, keyed,
+     scope, coverage, matched, coverage_evidence, coverage_first_seen, coverage_changed,
+     match_status, rule_version, match_reason, candidates, evaluated_at) = row
+    detail = detail or {}
+    return {
+        "alert_id": alert_id, "severity": severity, "kind": kind, "summary": summary, "status": status,
+        "occurrences": occurrences, "first_seen_at": _iso(first_seen), "last_seen_at": _iso(last_seen),
+        "resolved_at": _iso(resolved_at), "notification_status": notified,
+        "lecture": ({"lecture_id": lecture_id, "subject": subject, "session_date": _iso(session_date)}
+                    if lecture_id else None),
+        "job_id": str(detail["job_id"]) if detail.get("job_id") else None,
+        "detail": {k: v for k, v in detail.items() if k != "job_id"},
+        # The LMS session an alert names (detail.lms_occurrence_id), as the publisher's LMS coverage recorded it.
+        "lms": ({"occurrence_id": occurrence, "series_id": series, "module_catalogue_id": module,
+                 "programme": programme, "meeting_type": meeting_type, "occurrence_status": occurrence_status,
+                 "series_status": series_status, "scheduled_start": _iso(start), "scheduled_end": _iso(end),
+                 "has_teams_meeting": bool(keyed), "scope_status": scope, "coverage_status": coverage,
+                 "coverage_meaning": COVERAGE_MEANING.get(coverage), "matched_lecture_id": matched,
+                 "evidence": coverage_evidence or {}, "first_seen_at": _iso(coverage_first_seen),
+                 "status_changed_at": _iso(coverage_changed), "source": None}
+                if occurrence else None),
+        # The named lecture's current LMS match evaluation (why it has, or has no, LMS session).
+        "match": ({"status": match_status, "rule_version": rule_version, "reason": match_reason,
+                   "candidates": candidates, "evaluated_at": _iso(evaluated_at)}
+                  if lecture_id and match_status else None),
+    }
 
 
 def open_alerts(connection, *, limit: int = 200) -> list[dict]:
     """The publisher's OPEN alerts exactly as stored (the reconciler raises and resolves them).
 
-    `detail` is passed through as stored - a CHECK constraint keeps URLs out of it. A lecture or job is
-    reported only when the alert itself names one; nothing is inferred.
+    `detail` is passed through as stored - a CHECK constraint keeps URLs out of it. A lecture, job or LMS
+    session is reported only when the alert itself names one; nothing is inferred.
     """
-    out = []
-    for (alert_id, severity, kind, summary, detail, lecture_id, occurrences, first_seen, last_seen, notified,
-         subject, session_date) in connection.execute(OPEN_ALERTS, (limit,)).fetchall():
-        detail = detail or {}
-        out.append(redact({
-            "alert_id": alert_id, "severity": severity, "kind": kind, "summary": summary,
-            "occurrences": occurrences, "first_seen_at": _iso(first_seen), "last_seen_at": _iso(last_seen),
-            "notification_status": notified,
-            "lecture": ({"lecture_id": lecture_id, "subject": subject, "session_date": _iso(session_date)}
-                        if lecture_id else None),
-            "job_id": str(detail["job_id"]) if detail.get("job_id") else None,
-            "detail": {k: v for k, v in detail.items() if k != "job_id"},
-        }))
+    return [redact(_alert(row)) for row in connection.execute(OPEN_ALERTS, (limit,)).fetchall()]
+
+
+def resolved_alerts(connection, *, days: int = 30, limit: int = 200) -> list[dict]:
+    """Alerts the reconciler resolved in the last `days` days, newest first (the history)."""
+    return [redact(_alert(row)) for row in connection.execute(RESOLVED_ALERTS, (days, limit)).fetchall()]
+
+
+def alert_ref(connection, alert_id: str) -> dict | None:
+    row = connection.execute(ALERT_REF, (str(alert_id),)).fetchone()
+    return dict(zip(("alert_id", "severity", "status"), row)) if row else None
+
+
+# The LMS's own record of a session (title, session number, whether it took place). Read from the LMS
+# database on a READ ONLY session; only these columns are selected - never a join URL, meeting id or code,
+# passcode, organiser, attendee or presenter.
+LMS_SESSIONS = """
+SELECT o.id, o.session_number, o.status, o.scheduled_start, o.scheduled_end, o.actual_start, o.actual_end,
+       o.participant_count, coalesce(o.attendance_report_id, '') <> '', s.module_title, s.status, s.meeting_type,
+       s.repeat_occurrences, m.title, m.programme_name, m.group_name, m.cohort_name,
+       (m.deleted_at IS NOT NULL OR coalesce(m.is_programme_deleted, false))
+  FROM curriculum.live_session_occurrences o
+  JOIN curriculum.live_sessions s ON s.id = o.live_session_id
+  LEFT JOIN curriculum.modules m ON m.module_catalogue_id = s.module_catalogue_id
+ WHERE o.id = ANY(%s)
+"""
+
+
+def _utc(value):
+    # LMS timestamps are naive UTC (app.lms.sources).
+    return value.replace(tzinfo=timezone.utc) if isinstance(value, datetime) and value.tzinfo is None else value
+
+
+def lms_session_rows(rows) -> dict[str, dict]:
+    """LMS_SESSIONS rows -> occurrence id -> the LMS's own record of it."""
+    out = {}
+    for (oid, number, status, start, end, actual_start, actual_end, participants, report, series_title,
+         series_status, meeting_type, planned, module_title, programme, group, cohort, deleted) in rows:
+        out[oid] = redact({
+            "status": "OK", "title": series_title or module_title or None, "module_title": module_title or None,
+            "session_number": number, "series_sessions": planned, "occurrence_status": status,
+            "series_status": series_status, "meeting_type": meeting_type,
+            "scheduled_start": _iso(_utc(start)), "scheduled_end": _iso(_utc(end)),
+            "actual_start": _iso(_utc(actual_start)), "actual_end": _iso(_utc(actual_end)),
+            "participant_count": participants, "attendance_report": bool(report),
+            "programme": programme or None, "group": group or None, "cohort": cohort or None,
+            "module_deleted": bool(deleted),
+        })
     return out
+
+
+def lms_sessions(database_url: str, occurrence_ids) -> dict[str, dict]:
+    """occurrence id -> the LMS's own record of it (unknown ids are absent). Raises psycopg.Error."""
+    import psycopg
+    from psycopg import ClientCursor
+    ids = sorted({str(i) for i in occurrence_ids if i})[:50]
+    if not ids:
+        return {}
+    # The LMS sits behind a transaction pooler: no startup statement_timeout, no prepared statements; the
+    # timeout is SET LOCAL inside one READ ONLY transaction.
+    with psycopg.connect(database_url, connect_timeout=5, prepare_threshold=None, cursor_factory=ClientCursor,
+                         options="-c default_transaction_read_only=on") as connection:
+        connection.read_only = True
+        with connection.transaction():
+            connection.execute("SET LOCAL statement_timeout = 5000")
+            return lms_session_rows(connection.execute(LMS_SESSIONS, (ids,)).fetchall())
 
 
 # --------------------------------------------------------------------------- one lecture

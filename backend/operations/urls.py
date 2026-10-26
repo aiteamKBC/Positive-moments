@@ -97,11 +97,19 @@ urlpatterns = [
     path("publisher/lectures/<uuid:lecture_id>/parts/<int:part_index>/decision/",
          publisher_views.part_decision_view, name="operations-publisher-part-decision"),
 
-    # Lecture Publishing Monitor: read-only (GET only), every query on a READ ONLY connection.
+    # Lecture Publishing Monitor: every publisher query on a READ ONLY connection; the only writes are
+    # the signed-in user's own alert review state (positive_mentions.PublisherAlertReview).
     path("publishing-monitor/health/", publishing_monitor_views.health_view,
          name="operations-publishing-monitor-health"),
     path("publishing-monitor/alerts/", publishing_monitor_views.alerts_view,
          name="operations-publishing-monitor-alerts"),
+    # The signed-in user's own read / dismiss state for an alert (never the publisher's alert itself).
+    path("publishing-monitor/alerts/<uuid:alert_id>/read/", publishing_monitor_views.alert_read_view,
+         name="operations-publishing-monitor-alert-read"),
+    path("publishing-monitor/alerts/<uuid:alert_id>/dismiss/", publishing_monitor_views.alert_dismiss_view,
+         name="operations-publishing-monitor-alert-dismiss"),
+    path("publishing-monitor/alerts/<uuid:alert_id>/restore/", publishing_monitor_views.alert_restore_view,
+         name="operations-publishing-monitor-alert-restore"),
     path("publishing-monitor/summary/", publishing_monitor_views.summary_view,
          name="operations-publishing-monitor-summary"),
     path("publishing-monitor/lectures/", publishing_monitor_views.lectures_view,

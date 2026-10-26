@@ -49,6 +49,17 @@ def fact(index, **over):
 
 
 FACTS = [fact(i) for i in range(1, 31)] + [fact(31, match_status="CONFLICT", match_review=True)]
+A1, A2, A3 = (f"aaaaaaaa-0000-0000-0000-00000000000{n}" for n in (1, 2, 3))
+
+
+def stored_alert(alert_id, *, severity="WARNING", kind="ORPHAN_BUNNY_VIDEO", status="OPEN", detail=None, **over):
+    """An alert as monitor.open_alerts / resolved_alerts return it."""
+    base = {"alert_id": alert_id, "severity": severity, "kind": kind, "summary": f"{kind} {alert_id[-1]}",
+            "status": status, "occurrences": 1, "first_seen_at": NOW.isoformat(), "last_seen_at": NOW.isoformat(),
+            "resolved_at": NOW.isoformat() if status == "RESOLVED" else None, "notification_status": "NOT_SENT",
+            "lecture": None, "job_id": None, "detail": detail or {}, "lms": None, "match": None}
+    base.update(over)
+    return base
 
 
 def patched(test):
@@ -155,30 +166,28 @@ class MonitorApiTests(TestCase):
 
     @patched
     def test_alerts_are_served_as_stored_with_counts_by_severity(self):
-        stored = [{"alert_id": "a1", "severity": "WARNING", "kind": "ORPHAN_BUNNY_VIDEO", "summary": "x",
-                   "lecture": None, "job_id": None, "detail": {"bunny_video_id": "v"}},
-                  {"alert_id": "a2", "severity": "WARNING", "kind": "ORPHAN_BUNNY_VIDEO", "summary": "y",
-                   "lecture": None, "job_id": None, "detail": {}},
-                  {"alert_id": "a3", "severity": "DIGEST", "kind": "DAILY_DIGEST", "summary": "z",
-                   "lecture": None, "job_id": None, "detail": {}}]
-        with mock.patch("operations.publishing_monitor_views.monitor.open_alerts", return_value=stored):
+        stored = [stored_alert(A1, detail={"bunny_video_id": "v"}), stored_alert(A2),
+                  stored_alert(A3, severity="DIGEST", kind="DAILY_DIGEST")]
+        with mock.patch("operations.publishing_monitor_views.monitor.open_alerts", return_value=stored), \
+                mock.patch("operations.publishing_monitor_views.monitor.resolved_alerts", return_value=[]):
             response = self.client.get(reverse("operations-publishing-monitor-alerts"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["counts"], {"WARNING": 2, "DIGEST": 1})
-        self.assertEqual([a["alert_id"] for a in response.json()["alerts"]], ["a1", "a2", "a3"])
+        self.assertEqual([a["alert_id"] for a in response.json()["alerts"]], [A1, A2, A3])
         self.assertNotIn(SERVICE_TOKEN, response.content.decode())
 
     @patched
     def test_no_secret_stored_in_an_alert_reaches_the_browser(self):
         jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2lnbmF0dXJlLXBhcnQ"
-        rows = [("a1", "WARNING", "ORPHAN_BUNNY_VIDEO", f"Graph refused Bearer {jwt} at https://graph.example/x?sig=Q1",
+        rows = [(A1, "WARNING", "ORPHAN_BUNNY_VIDEO", f"Graph refused Bearer {jwt} at https://graph.example/x?sig=Q1",
                  {"token": "rec-0a1b2c3d", "nested": {"api_key": "AK-1", "list": [{"password": "pw-2"}]},
-                  "job_id": "j-1"}, None, 1, NOW, NOW, "NOT_SENT", None, None)]
+                  "job_id": "j-1"}, None, 1, NOW, NOW, "NOT_SENT", None, None, "OPEN", None) + (None,) * 21]
 
         @contextmanager
         def stored():
             connection = mock.MagicMock()
-            connection.execute.return_value.fetchall.return_value = rows
+            connection.execute.side_effect = lambda sql, *a: mock.MagicMock(
+                fetchall=mock.MagicMock(return_value=rows if "a.status = 'OPEN'" in sql else []))
             yield connection
 
         with mock.patch("operations.publishing_monitor_views.reading", stored):

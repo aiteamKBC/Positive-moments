@@ -226,3 +226,40 @@ class SocialMediaUsageEvent(models.Model):
                            | (~models.Q(cost_status="unknown") & models.Q(cost_usd__isnull=False))),
                 name="qa_social_media_usage_events_cost_value"),
         ]
+
+
+ALERT_DISMISS_REASONS = ("TEST_LMS_SESSION", "NO_LMS_SESSION_INTENDED", "KNOWN_TEST_UPLOAD", "OTHER")
+
+
+class PublisherAlertReview(models.Model):
+    """
+    One signed-in user's review of one Bunny publisher alert: read, and optionally dismissed.
+
+    This is the user's notification state only. The publisher's own alert
+    (public.bunny_publisher_alerts, raised and resolved by its reconciler) is
+    never written: reading or dismissing does not resolve the technical issue.
+
+    `alert_id` is the publisher's alert row. A repeated sighting of the same
+    open condition refreshes that row (same id), so a read or dismissed alert
+    stays so; a resolved condition that recurs, or a different video or
+    occurrence, is a NEW row with a new id - and therefore new again.
+    """
+    user = models.ForeignKey("auth.User", on_delete=models.CASCADE, db_constraint=False, related_name="+")
+    alert_id = models.UUIDField()
+    read_at = models.DateTimeField(null=True, blank=True)
+    dismissed_at = models.DateTimeField(null=True, blank=True)
+    dismiss_reason = models.TextField(blank=True, default="")
+    dismiss_note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "qa_publisher_alert_reviews"
+        constraints = [
+            models.UniqueConstraint(fields=("user", "alert_id"), name="qa_publisher_alert_reviews_user_alert"),
+            models.CheckConstraint(condition=models.Q(dismiss_reason__in=("",) + ALERT_DISMISS_REASONS),
+                                   name="qa_publisher_alert_reviews_reason"),
+            models.CheckConstraint(condition=models.Q(dismissed_at__isnull=True, dismiss_reason="")
+                                   | models.Q(dismissed_at__isnull=False) & ~models.Q(dismiss_reason=""),
+                                   name="qa_publisher_alert_reviews_dismissed"),
+        ]

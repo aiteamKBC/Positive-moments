@@ -1,9 +1,14 @@
 """
-Lecture Publishing Monitor: read-only operations API (GET only).
+Lecture Publishing Monitor: read-only operations API.
 
 Authenticated like every other operations route (DRF TokenAuthentication + IsAuthenticated,
-config/settings.py). Every query runs on a READ ONLY connection (platform.reading); nothing here
-writes, calls Microsoft Graph or Bunny, or returns a URL, key, token or transcript text.
+config/settings.py). Every publisher query runs on a READ ONLY connection (platform.reading); nothing
+here writes publisher, LMS or Bunny state, calls Microsoft Graph or Bunny, or returns a URL, key,
+token or transcript text.
+
+The ONE kind of write is the signed-in user's own notification state for an alert (read / dismissed,
+positive_mentions.PublisherAlertReview, the Django database). It never touches the publisher's alert:
+reading or dismissing does not resolve the technical issue - only the reconciler does that.
 
 The rules live in app.publisher.monitor (facts, classification, KPI definitions) and
 app.publisher.delivery (READY / release / LMS playback - the same rule the LMS API uses). This module
@@ -20,6 +25,9 @@ from zoneinfo import ZoneInfo
 
 import psycopg
 from django.conf import settings
+from django.db.models import DateTimeField, F, Value
+from django.db.models.functions import Coalesce
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -27,6 +35,9 @@ from rest_framework.response import Response
 from app.common.errors import PlatformError
 from app.publisher import monitor
 
+from positive_mentions.models import ALERT_DISMISS_REASONS, PublisherAlertReview
+
+from . import platform
 from .platform import reading
 
 CAIRO = ZoneInfo("Africa/Cairo")
@@ -158,16 +169,184 @@ def health_view(request):
                                        playback_enabled=bool(settings.PUBLISHER_LMS_PLAYBACK_ENABLED)))
 
 
+# --------------------------------------------------------------------------- alerts and reviews
+HISTORY_DAYS = 30
+NOTE_MAX = 300
+DISMISS_REASONS = {"TEST_LMS_SESSION": "Test LMS session", "NO_LMS_SESSION_INTENDED": "Intentionally no LMS session",
+                   "KNOWN_TEST_UPLOAD": "Known test upload", "OTHER": "Other"}
+assert tuple(DISMISS_REASONS) == ALERT_DISMISS_REASONS
+LMS_CACHE_SECONDS, LMS_RETRY_SECONDS = 600, 60
+_lms_cache: dict = {}
+_lms_lock = threading.Lock()
+
+
+class NotFound(Exception):
+    pass
+
+
+def _lms_records(occurrence_ids) -> dict:
+    """The LMS's own record of each occurrence (title, session number, whether it took place), cached.
+
+    Optional: without LMS_DATABASE_URL, or when the LMS cannot answer, the publisher's coverage row is
+    still shown and `source.status` says why the LMS record is missing.
+    """
+    wanted = sorted({o for o in occurrence_ids if o})
+    if not wanted:
+        return {}
+    url = platform.settings().lms_database_url
+    if not url:
+        return {o: {"status": "NOT_CONFIGURED"} for o in wanted}
+    now = time.monotonic()
+    with _lms_lock:
+        fresh = {o: hit[1] for o in wanted if (hit := _lms_cache.get(o)) and now < hit[0]}
+    missing = [o for o in wanted if o not in fresh]
+    if missing:
+        try:
+            found = monitor.lms_sessions(url, missing)
+            got = {o: found.get(o) or {"status": "NOT_FOUND"} for o in missing}
+            until = now + LMS_CACHE_SECONDS
+        except psycopg.Error:
+            got = {o: {"status": "UNAVAILABLE"} for o in missing}
+            until = now + LMS_RETRY_SECONDS
+        with _lms_lock:
+            for o, record in got.items():
+                _lms_cache[o] = (until, record)
+        fresh.update(got)
+    return fresh
+
+
+def review_state(alert: dict, review) -> str:
+    """NEW / READ / DISMISSED / RESOLVED for the signed-in user; INFO for the informational digest."""
+    if alert["severity"] == monitor.DIGEST:
+        return "INFO"
+    if review is not None and review.dismissed_at:
+        return "DISMISSED"
+    if alert["status"] == "RESOLVED":
+        return "RESOLVED"
+    if review is not None and review.read_at:
+        return "READ"
+    return "NEW"
+
+
+def _review(alert: dict, review) -> dict:
+    return monitor.redact({
+        "state": review_state(alert, review),
+        "read_at": review.read_at.isoformat() if review and review.read_at else None,
+        "dismissed_at": review.dismissed_at.isoformat() if review and review.dismissed_at else None,
+        "dismiss_reason": (review.dismiss_reason or None) if review else None,
+        "dismiss_note": (review.dismiss_note or None) if review else None,
+    })
+
+
 @api_view(["GET"])
 @_handle
 def alerts_view(request):
-    """The publisher's open alerts as stored: severity, kind, message, related lecture/job if named, times."""
+    """The publisher's alerts as stored - open ones, and those resolved in the last 30 days - each with
+    the signed-in user's own review state (NEW / READ / DISMISSED / RESOLVED; the digest is INFO)."""
     with reading() as connection:
         alerts = monitor.open_alerts(connection)
-    counts = {}
-    for alert in alerts:
-        counts[alert["severity"]] = counts.get(alert["severity"], 0) + 1
-    return Response({"alerts": alerts, "counts": counts})
+        history = monitor.resolved_alerts(connection, days=HISTORY_DAYS)
+    records = _lms_records(a["lms"]["occurrence_id"] for a in alerts + history if a["lms"])
+    reviews = {str(r.alert_id): r for r in PublisherAlertReview.objects.filter(
+        user=request.user, alert_id__in=[a["alert_id"] for a in alerts + history])}
+    counts, review_counts = {}, {"new": 0, "new_by_severity": {}, "read": 0, "dismissed": 0, "resolved": 0}
+    for alert in alerts + history:
+        if alert["lms"]:
+            alert["lms"]["source"] = records.get(alert["lms"]["occurrence_id"])
+        alert["review"] = _review(alert, reviews.get(alert["alert_id"]))
+        state = alert["review"]["state"]
+        if alert["status"] == "OPEN":
+            counts[alert["severity"]] = counts.get(alert["severity"], 0) + 1
+            if state == "NEW":
+                by_severity = review_counts["new_by_severity"]
+                by_severity[alert["severity"]] = by_severity.get(alert["severity"], 0) + 1
+        if state != "INFO":
+            review_counts[state.lower()] += 1
+    return Response({"alerts": alerts, "history": history, "history_days": HISTORY_DAYS, "counts": counts,
+                     "review_counts": review_counts,
+                     "dismiss_reasons": [{"code": c, "label": t} for c, t in DISMISS_REASONS.items()]})
+
+
+def _reviewable(alert_id) -> dict:
+    with reading() as connection:
+        ref = monitor.alert_ref(connection, str(alert_id))
+    if ref is None:
+        raise NotFound()
+    if ref["severity"] == monitor.DIGEST:
+        raise BadRequest("INFORMATIONAL", "the daily digest is informational and has no read or dismiss state")
+    return ref
+
+
+def _mine(request, alert_id):
+    """The user's review row for the alert, created if absent - safe under concurrency (ON CONFLICT DO NOTHING)."""
+    PublisherAlertReview.objects.bulk_create([PublisherAlertReview(user=request.user, alert_id=alert_id)],
+                                             ignore_conflicts=True)
+    return PublisherAlertReview.objects.filter(user=request.user, alert_id=alert_id)
+
+
+def _answer(ref: dict, rows) -> Response:
+    return Response({"alert_id": ref["alert_id"], "review": _review(ref, rows.first())})
+
+
+def _review_action(view):
+    def wrapper(request, alert_id):
+        try:
+            return view(request, alert_id, _reviewable(alert_id))
+        except NotFound:
+            return Response({"code": "ALERT_NOT_FOUND", "detail": "no such publisher alert"},
+                            status=status.HTTP_404_NOT_FOUND)
+    wrapper.__name__ = view.__name__
+    wrapper.__doc__ = view.__doc__
+    return wrapper
+
+
+def _at(now):
+    return Value(now, output_field=DateTimeField())
+
+
+@api_view(["POST"])
+@_handle
+@_review_action
+def alert_read_view(request, alert_id, ref):
+    """Mark the alert read for the signed-in user (idempotent: the first read time is kept)."""
+    now = timezone.now()
+    rows = _mine(request, alert_id)
+    rows.update(read_at=Coalesce(F("read_at"), _at(now)), updated_at=now)
+    return _answer(ref, rows)
+
+
+@api_view(["POST"])
+@_handle
+@_review_action
+def alert_dismiss_view(request, alert_id, ref):
+    """Dismiss an open alert for the signed-in user, with a reason (and a note, required for OTHER)."""
+    reason = str(request.data.get("reason") or "").strip().upper()
+    note = monitor.scrub_text(" ".join(str(request.data.get("note") or "").split()))
+    if reason not in DISMISS_REASONS:
+        raise BadRequest("INVALID_REASON", f"reason must be one of {', '.join(DISMISS_REASONS)}")
+    if len(note) > NOTE_MAX:
+        raise BadRequest("NOTE_TOO_LONG", f"the note is at most {NOTE_MAX} characters")
+    if reason == "OTHER" and not note:
+        raise BadRequest("NOTE_REQUIRED", "describe the reason when it is Other")
+    if ref["status"] != "OPEN":
+        return Response({"code": "ALERT_RESOLVED", "detail": "the publisher has already resolved this alert"},
+                        status=status.HTTP_409_CONFLICT)
+    now = timezone.now()
+    rows = _mine(request, alert_id)
+    rows.update(dismissed_at=Coalesce(F("dismissed_at"), _at(now)), dismiss_reason=reason, dismiss_note=note,
+                read_at=Coalesce(F("read_at"), _at(now)), updated_at=now)
+    return _answer(ref, rows)
+
+
+@api_view(["POST"])
+@_handle
+@_review_action
+def alert_restore_view(request, alert_id, ref):
+    """Undo the signed-in user's dismissal (the alert stays read)."""
+    rows = PublisherAlertReview.objects.filter(user=request.user, alert_id=alert_id)
+    rows.filter(dismissed_at__isnull=False).update(dismissed_at=None, dismiss_reason="", dismiss_note="",
+                                                   updated_at=timezone.now())
+    return _answer(ref, rows)
 
 
 @api_view(["GET"])

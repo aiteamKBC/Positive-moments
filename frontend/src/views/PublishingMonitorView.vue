@@ -26,11 +26,11 @@ import SectionPanel from '../components/SectionPanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import PublisherAlertsPanel from '../components/publishing/PublisherAlertsPanel.vue'
 import PublishingLectureDrawer from '../components/publishing/PublishingLectureDrawer.vue'
-import { getPublisherHealth, getPublishingLectures, getPublishingSummary } from '../services/publishing'
-import type { PublisherHealth, PublishingFilters, PublishingPage, PublishingSummary } from '../types/publishing'
+import { getPublisherAlerts, getPublisherHealth, getPublishingLectures, getPublishingSummary } from '../services/publishing'
+import type { PublisherAlerts, PublisherHealth, PublishingFilters, PublishingPage, PublishingSummary } from '../types/publishing'
 import { businessDate, cairoDateTime, cairoTimeRange, shiftBusinessDate, sinceNow } from '../utils/datetime'
 import { errorMessage } from '../utils/format'
-import { age, alertCounts, CAPTIONS, label, MONITOR_STATE, TRANSCRIPT } from '../utils/publishing'
+import { age, CAPTIONS, label, MONITOR_STATE, newAlertCounts, TRANSCRIPT } from '../utils/publishing'
 
 const REFRESH_MS = 60_000
 const PAGE_SIZE = 25
@@ -73,6 +73,8 @@ const search = ref(filters.value.q ?? '')
 
 const health = ref<PublisherHealth | null>(null)
 const healthError = ref('')
+const alertData = ref<PublisherAlerts | null>(null)
+const alertsError = ref('')
 const summary = ref<PublishingSummary | null>(null)
 const table = ref<PublishingPage | null>(null)
 const loading = ref(true)
@@ -86,6 +88,16 @@ const activeCount = computed(() => Object.values(filters.value).filter(v => v ==
 const hiddenActive = computed(() => ['captions', 'transcript'].filter(k => filters.value[k as keyof PublishingFilters]).length)
 const pages = computed(() => Math.max(1, Math.ceil((table.value?.total ?? 0) / PAGE_SIZE)))
 const activeKpi = computed(() => summary.value?.kpis.find(k => k.key === filters.value.kpi))
+
+/** The publisher's alerts with the signed-in user's own read / dismissed state. */
+async function loadAlerts() {
+  try {
+    alertData.value = await getPublisherAlerts()
+    alertsError.value = ''
+  } catch (caught) {
+    alertsError.value = errorMessage(caught, 'The publisher alerts could not be read.')
+  }
+}
 
 async function loadHealth() {
   try {
@@ -118,7 +130,7 @@ async function loadData(quiet: boolean) {
 
 async function refresh(quiet = true) {
   refreshing.value = true
-  await Promise.all([loadHealth(), loadData(quiet)])
+  await Promise.all([loadHealth(), loadAlerts(), loadData(quiet)])
   refreshedAt.value = new Date().toISOString()
   refreshing.value = false
 }
@@ -173,7 +185,10 @@ onBeforeUnmount(() => {
 const discovery = computed(() => health.value?.tasks.DISCOVERY ?? null)
 const autoRelease = computed(() => health.value?.tasks.AUTO_RELEASE ?? null)
 /** Every stored severity, counted separately: "3 Warnings · 1 Digest" (the digest is informational). */
-const alerts = computed(() => alertCounts(health.value?.open_alerts))
+/** NEW (unread) actionable alerts for the signed-in user, per stored severity; the digest is never unread. */
+const newAlerts = computed(() => newAlertCounts(alertData.value?.review_counts.new_by_severity))
+/** Open alerts the user has read but not dismissed: still open, no longer new. */
+const readOpen = computed(() => alertData.value?.review_counts.read ?? 0)
 const ALERT_TONE: Record<string, string> = { CRITICAL: 'text-rose-700', WARNING: 'text-orange-700' }
 const showAlerts = ref(false)
 /** The figure that answers the page's question: what the LMS can play right now (StatTile's `lead`). */
@@ -258,28 +273,31 @@ const KPI_TONE: Record<string, string> = {
           <dd class="mt-1"><StatusBadge :label="health.playback_enabled ? 'Switched on' : 'Switched off'" :tone="health.playback_enabled ? 'ok' : 'neutral'" /></dd>
         </div>
         <div>
-          <dt class="tile-label">Open alerts</dt>
+          <dt class="tile-label">Alerts</dt>
           <dd class="mt-1">
             <button
-              v-if="alerts.length" type="button" class="row-link text-left font-semibold"
+              v-if="alertData" type="button" class="row-link text-left font-semibold"
               :aria-expanded="showAlerts" aria-controls="publisher-alerts" data-test="alert-counts"
               @click="showAlerts = !showAlerts"
             >
-              <template v-for="(part, index) in alerts" :key="part.severity">
+              <template v-for="(part, index) in newAlerts" :key="part.severity">
                 <span v-if="index" class="text-faint" aria-hidden="true"> · </span>
-                <span :class="part.digest ? 'font-normal text-muted' : (ALERT_TONE[part.severity] ?? 'text-ink')">{{ part.text }}</span>
+                <span :class="ALERT_TONE[part.severity] ?? 'text-ink'">{{ part.text }}</span>
               </template>
+              <span v-if="!newAlerts.length" class="font-normal text-muted">No new alerts</span>
+              <span v-if="readOpen" class="font-normal text-muted"> · {{ readOpen }} read, still open</span>
               <span class="ml-2 text-2xs font-semibold text-brand-700 underline">{{ showAlerts ? 'Hide' : 'View' }}</span>
             </button>
-            <span v-else class="text-muted">None</span>
+            <span v-else-if="alertsError" class="text-xs text-muted">{{ alertsError }}</span>
+            <span v-else class="text-muted">—</span>
           </dd>
         </div>
       </dl>
     </section>
 
     <PublisherAlertsPanel
-      v-if="showAlerts" id="publisher-alerts" :refresh-key="refreshedAt"
-      @close="showAlerts = false" @open-lecture="(id) => { openLecture = id }"
+      v-if="showAlerts" id="publisher-alerts" :data="alertData" :error="alertsError"
+      @close="showAlerts = false" @open-lecture="(id) => { openLecture = id }" @changed="loadAlerts"
     />
 
     <!-- Range -->

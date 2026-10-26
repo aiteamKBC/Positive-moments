@@ -161,6 +161,40 @@ export function alertCountText(counts?: Record<string, number> | null): string {
   return parts.length ? parts.map(part => part.text).join(' · ') : 'None'
 }
 
+/** New (unread) alerts per stored severity, worst first: "1 new Critical", "2 new Warnings". */
+export function newAlertCounts(bySeverity?: Record<string, number> | null): AlertCount[] {
+  return alertCounts(bySeverity).map(part => ({
+    ...part, text: `${part.count} new ${label.alert(part.severity).label}${part.count === 1 ? '' : 's'}`,
+  }))
+}
+
+/** The signed-in user's own state for an alert; the alert itself is resolved only by the publisher. */
+export const REVIEW_STATE: Record<string, Badge> = {
+  NEW: badge('New', 'review'),
+  READ: badge('Read', 'neutral'),
+  DISMISSED: badge('Dismissed', 'quiet'),
+  RESOLVED: badge('Resolved', 'ok'),
+  INFO: badge('Informational', 'quiet'),
+}
+export const reviewBadge = (v?: string | null) => lookup(REVIEW_STATE, v)
+
+/** The alert list's views. Dismissed and resolved alerts leave the attention views but stay in history. */
+export const ALERT_VIEWS = [
+  { key: 'new', label: 'New' },
+  { key: 'read', label: 'Read' },
+  { key: 'history', label: 'Dismissed & history' },
+  { key: 'all', label: 'All' },
+] as const
+export type AlertView = typeof ALERT_VIEWS[number]['key']
+
+export function inAlertView(state: string, view: AlertView): boolean {
+  if (state === 'INFO') return false                    // the digest has its own section
+  if (view === 'new') return state === 'NEW'
+  if (view === 'read') return state === 'READ'
+  if (view === 'history') return state === 'DISMISSED' || state === 'RESOLVED'
+  return true
+}
+
 /** "45 s", "4 min", "2 h 5 min" - a heartbeat age, never a raw number of seconds. */
 export function age(seconds?: number | null): string {
   if (seconds === null || seconds === undefined) return '—'

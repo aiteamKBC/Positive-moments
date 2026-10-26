@@ -167,21 +167,110 @@ export interface PublishingDetail {
 }
 
 /** One OPEN publisher alert, exactly as stored (bunny_publisher_alerts). */
+/** The signed-in user's own state for an alert. INFO: the informational digest (never unread). */
+export type AlertReviewState = 'NEW' | 'READ' | 'DISMISSED' | 'RESOLVED' | 'INFO'
+
+export interface AlertReview {
+  state: AlertReviewState
+  read_at: string | null
+  dismissed_at: string | null
+  dismiss_reason: string | null
+  dismiss_note: string | null
+}
+
+/** The LMS's own record of a session (LMS database, read-only); `status` says why it may be missing. */
+export interface LmsSessionRecord {
+  status: 'OK' | 'NOT_CONFIGURED' | 'UNAVAILABLE' | 'NOT_FOUND' | string
+  title?: string | null
+  module_title?: string | null
+  session_number?: number | null
+  series_sessions?: number | null
+  occurrence_status?: string | null
+  series_status?: string | null
+  meeting_type?: string | null
+  scheduled_start?: string | null
+  scheduled_end?: string | null
+  actual_start?: string | null
+  actual_end?: string | null
+  participant_count?: number | null
+  attendance_report?: boolean
+  programme?: string | null
+  group?: string | null
+  cohort?: string | null
+  module_deleted?: boolean
+}
+
+/** The LMS session an alert names, as the publisher's LMS coverage recorded it. */
+export interface AlertLmsSession {
+  occurrence_id: string
+  series_id: string | null
+  module_catalogue_id: string | null
+  programme: string | null
+  meeting_type: string | null
+  occurrence_status: string | null
+  series_status: string | null
+  scheduled_start: string | null
+  scheduled_end: string | null
+  has_teams_meeting: boolean
+  scope_status: string | null
+  coverage_status: string | null
+  coverage_meaning: string | null
+  matched_lecture_id: string | null
+  evidence: Record<string, unknown>
+  first_seen_at: string | null
+  status_changed_at: string | null
+  source: LmsSessionRecord | null
+}
+
+export interface AlertMatch {
+  status: string
+  rule_version: string | null
+  reason: string | null
+  candidates: number | null
+  evaluated_at: string | null
+}
+
 export interface PublisherAlert {
   alert_id: string
   severity: 'CRITICAL' | 'WARNING' | 'DIGEST' | string
   kind: string
   summary: string
+  status: 'OPEN' | 'RESOLVED' | string
   occurrences: number
   first_seen_at: string | null
   last_seen_at: string | null
+  resolved_at: string | null
   notification_status: string | null
   lecture: { lecture_id: string; subject: string | null; session_date: string | null } | null
   job_id: string | null
   detail: Record<string, unknown>
+  lms: AlertLmsSession | null
+  /** The named lecture's current LMS match evaluation. */
+  match: AlertMatch | null
+  review: AlertReview
+}
+
+export interface AlertReviewCounts {
+  new: number
+  new_by_severity: Record<string, number>
+  read: number
+  dismissed: number
+  resolved: number
 }
 
 export interface PublisherAlerts {
+  /** Open alerts. */
   alerts: PublisherAlert[]
+  /** Alerts the publisher resolved in the last `history_days` days. */
+  history: PublisherAlert[]
+  history_days: number
+  /** Open alerts per stored severity. */
   counts: Record<string, number>
+  review_counts: AlertReviewCounts
+  dismiss_reasons: { code: string; label: string }[]
+}
+
+export interface AlertReviewAnswer {
+  alert_id: string
+  review: AlertReview
 }

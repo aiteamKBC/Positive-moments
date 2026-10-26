@@ -1,10 +1,11 @@
 /**
- * Lecture Publishing Monitor API client. Read-only: every call is a GET with the operator's own
- * session token (services/api.ts). No publisher or LMS service token ever reaches the browser.
+ * Lecture Publishing Monitor API client, with the operator's own session token (services/api.ts). No
+ * publisher or LMS service token ever reaches the browser. Every call is a GET except the three alert
+ * review calls, which change only the signed-in user's own read / dismiss state - never the alert.
  */
 import { api } from './api'
 import type {
-  PublisherAlerts, PublisherHealth, PublishingDetail, PublishingFilters, PublishingPage, PublishingSummary,
+  AlertReviewAnswer, PublisherAlerts, PublisherHealth, PublishingDetail, PublishingFilters, PublishingPage, PublishingSummary,
 } from '../types/publishing'
 
 const BASE = '/operations/publishing-monitor'
@@ -17,6 +18,18 @@ export async function getPublisherHealth() {
 
 export async function getPublisherAlerts() {
   return (await api.get<PublisherAlerts>(`${BASE}/alerts/`)).data
+}
+
+export async function markAlertRead(alertId: string) {
+  return (await api.post<AlertReviewAnswer>(`${BASE}/alerts/${alertId}/read/`, {})).data
+}
+
+export async function dismissAlert(alertId: string, reason: string, note: string) {
+  return (await api.post<AlertReviewAnswer>(`${BASE}/alerts/${alertId}/dismiss/`, { reason, note })).data
+}
+
+export async function restoreAlert(alertId: string) {
+  return (await api.post<AlertReviewAnswer>(`${BASE}/alerts/${alertId}/restore/`, {})).data
 }
 
 export async function getPublishingSummary(dateFrom: string, dateTo: string) {

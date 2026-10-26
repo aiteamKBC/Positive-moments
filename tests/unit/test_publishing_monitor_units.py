@@ -239,3 +239,27 @@ def test_rows_returned_to_the_browser_are_redacted():
     r = row(fact(recording_status="REVIEW_REQUIRED", recording_review_reason="see https://x.example/a?sig=1",
                  videos=[]))
     assert "x.example" not in r["reason"] and r["state"] == monitor.REVIEW_REQUIRED
+
+
+def test_the_lms_record_of_a_session_is_mapped_without_inventing_anything():
+    row = ("OCC-1", 3, "scheduled", datetime(2026, 10, 23, 8, 0), datetime(2026, 10, 23, 10, 0), None, None, 0,
+           False, "MarTech Foundations - TEST", "active", "live-session", 11, "MarTech Foundations - TEST",
+           "Marketing Executive Level 4", "", None, False)
+    [(occurrence, record)] = monitor.lms_session_rows([row]).items()
+    assert occurrence == "OCC-1" and record["status"] == "OK"
+    assert (record["title"], record["session_number"], record["series_sessions"]) == ("MarTech Foundations - TEST", 3, 11)
+    assert record["scheduled_start"] == "2026-10-23T08:00:00+00:00"            # LMS times are naive UTC
+    assert (record["actual_start"], record["participant_count"], record["attendance_report"]) == (None, 0, False)
+    assert record["group"] is None and record["cohort"] is None                # empty text is "not recorded"
+
+
+def test_the_lms_query_never_selects_join_details_or_people():
+    sql = monitor.LMS_SESSIONS.lower()
+    for column in ("join_url", "online_meeting_id", "join_meeting_code", "join_passcode", "graph_event_id",
+                   "organizer", "attendees", "presenters", "web_link", "dial_in", "tutor_email"):
+        assert column not in sql, column
+
+
+def test_every_coverage_status_has_a_meaning():
+    assert set(monitor.COVERAGE_MEANING) == {"NOT_YET_DUE", "MATCHED", "LMS_ONLY_PENDING",
+                                             "LMS_SESSION_NOT_DISCOVERED", "TEST_EXCLUDED", "INACTIVE"}
