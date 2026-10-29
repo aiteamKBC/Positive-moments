@@ -206,6 +206,21 @@ class Planner:
             if lms_status == "VERIFIED" and recording_status == "LOCATED":
                 self._plan_parts(connection, lecture_id, summary)
 
+    def plan_lecture(self, lecture_id) -> dict:
+        """
+        Step 4 for ONE lecture, whatever its date: an operator re-selection may concern a lecture older than
+        the lookback window, which the tick no longer plans. Same rules and idempotency as the tick.
+        """
+        summary = PlanSummary()
+        connection = self.connect()
+        connection.autocommit = True
+        try:
+            self._plan_parts(connection, str(lecture_id), summary)
+        finally:
+            connection.close()
+        return {"jobs_created": summary.jobs_created, "fragments_needing_decision": summary.fragments_needing_decision,
+                "duplicates_blocked": summary.duplicates_blocked}
+
     @staticmethod
     def _blocked_duplicate(connection, lecture_id) -> bool:
         from app.publisher.progress import DUPLICATE_LOSER

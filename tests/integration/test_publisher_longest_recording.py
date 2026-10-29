@@ -260,3 +260,80 @@ def test_an_old_import_job_waiting_for_review_is_named_and_an_operator_retry_imp
         operations.operator_retry(c, stalled["job_id"], actor=ACTOR, reason="import the selected recording")
     world.run(rounds=12)
     assert len(world.bunny.fetch_calls) == fetches + 1 and _view(world)["verified_ready"]
+
+
+# =========================================================================== re-selection older than the lookback
+def _past_lookback(world):
+    world.clock.advance(timedelta(days=world.config.lookback_days + 2))     # the tick no longer plans it
+
+
+def test_reselected_lecture_older_than_the_lookback_is_queued_and_imported_once(url):
+    """Production 2026-10-27 Marketing: only the 3-min video imported, released, deleted by hand, then re-selected
+    days later. Before the fix the 2-hour part was INCLUDE but no IMPORT_VIDEO job was ever created."""
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE", p2="EXCLUDE")
+    world.run(rounds=12)
+    assert act(world, "release")["changed"]                   # the 3-minute video was what learners got
+    _before_the_rule(world)
+    short_video, fetches = _video_id(world, 1), len(world.bunny.fetch_calls)
+    del world.bunny.videos[short_video]
+    _past_lookback(world)
+
+    reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                      library_id=LIBRARY_ID)                   # without a planner: the pre-fix behaviour
+    world.run(rounds=6)
+    assert not [j for j in world.jobs("IMPORT_VIDEO") if j[1].endswith(":part:2")]          # the root cause
+    assert len(world.bunny.fetch_calls) == fetches
+
+    # The fix: re-running reselect-recording (now with the planner) queues the selected part at once.
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["planned_action"] == reselection.IMPORT_PENDING
+    assert result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    world.run(rounds=14)
+    assert len(world.bunny.fetch_calls) == fetches + 1        # exactly one upload: the 2-hour recording
+    assert [v[0] for v in world.videos(live=True)] == [2] and _view(world)["verified_ready"]
+    # the daemon's own 05:00 FULL reconciliation already retired the hand-deleted 3-minute video's row
+    assert world.q("SELECT retire_reason FROM public.bunny_videos WHERE bunny_video_id = %s", short_video) == [
+        ("VIDEO_DELETED_IN_BUNNY_PART_NOT_DELIVERED",)]
+    again = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                              library_id=LIBRARY_ID, planner=world.planner)
+    assert again["applied"] is False                          # NO_CHANGE: nothing queued, nothing re-uploaded
+    act(world, "release")
+    body = _view(world)
+    assert [p["source_part_index"] for p in body["parts"]] == [2] and body["release"] == "RELEASED"
+    assert world.reconciler.run("FULL")["video_missing_in_bunny"] == 0
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == fetches + 1 and not world.bunny.delete_calls
+
+
+def test_an_uncertain_import_in_review_is_never_requeued_and_keeps_its_operator_retry(url):
+    """Production 2026-10-27 AI In Marketing: the selected part's import is REVIEW_REQUIRED with
+    UNCERTAIN_SUBMISSION_UNRESOLVED; re-selection must not create a second upload."""
+    from app.publisher import operations
+    start = START + timedelta(minutes=30)
+    world = World(url, start=start, end=start + timedelta(hours=2))
+    world.part(start + timedelta(minutes=1), start + timedelta(minutes=1, seconds=62), call_id="call-1")
+    world.part(start + timedelta(minutes=6), start + timedelta(minutes=6, seconds=6118), call_id="call-3")
+    world.bunny.fetch_plan.append("uncertain_absent")
+    world.run(rounds=6)
+    world.clock.advance(timedelta(hours=3))
+    world.run(rounds=4)
+    [(_, status, *_)] = world.videos(live=True)
+    assert status == "REVIEW_REQUIRED" and len(world.bunny.fetch_calls) == 1
+    _past_lookback(world)
+    plan = _plan(world)
+    assert plan["import_waits_for"] == "OPERATOR_RETRY"
+    [stalled] = plan["operator_retry_needed"]
+    assert (stalled["job_kind"], stalled["last_error_code"]) == ("IMPORT_VIDEO", "UNCERTAIN_SUBMISSION_UNRESOLVED")
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["queued"]["jobs_created"] == {} and result["operator_retry_needed"] == [stalled]
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == 1                   # never resubmitted on its own
+    with psycopg.connect(world.url, autocommit=True) as c:
+        operations.operator_retry(c, stalled["job_id"], actor=ACTOR, reason="confirmed nothing reached Bunny")
+    world.run(rounds=12)
+    assert len(world.bunny.fetch_calls) == 2 and _view(world)["verified_ready"]
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]

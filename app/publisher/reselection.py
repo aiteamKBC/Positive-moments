@@ -124,15 +124,14 @@ def plan_lecture(connect, worker, lecture_id, *, library_id, bunny=None) -> dict
                for kind, j in jobs.items() if j is not None and j["status"] in ("REVIEW_REQUIRED", "FAILED")]
     if stalled:
         plan["operator_retry_needed"] = stalled
-    if video is not None and video["import_status"] in ("FAILED", "REVIEW_REQUIRED"):
-        plan["blocking"].append(f"SELECTED_PART_VIDEO_{video['import_status']}")
-        return plan
-    imported = video is not None
+    imported = video is not None and video["import_status"] not in ("FAILED", "REVIEW_REQUIRED")
+    if video is not None and not imported:
+        plan["import_waits_for"] = "OPERATOR_RETRY"          # its safe retry path, unchanged
     if included != [selected]:
         plan["action"] = RESELECT_KEEP_VIDEO if imported else RESELECT_AND_IMPORT
     else:
         plan["action"] = NO_CHANGE if imported else IMPORT_PENDING
-    if not imported and facts.lms_status != "VERIFIED":
+    if not imported and facts.lms_status != "VERIFIED" and "import_waits_for" not in plan:
         plan["import_waits_for"] = f"LMS_NOT_VERIFIED:{facts.lms_status}"   # the import gate, unchanged
     return plan
 
@@ -150,8 +149,14 @@ def preview_day(connect, worker, day, *, library_id, bunny=None) -> dict:
             "plans": plans}
 
 
-def apply(connect, worker, lecture_id, *, actor: str, reason: str, library_id) -> dict:
-    """Persist the re-selection of ONE lecture (recording discovery only) and audit it."""
+def apply(connect, worker, lecture_id, *, actor: str, reason: str, library_id, planner=None) -> dict:
+    """
+    Persist the re-selection of ONE lecture (recording discovery only), audit it, and - with a planner -
+    queue the selected part's next Bunny job at once: the planner's tick only plans lectures inside its
+    lookback window, and a re-selected lecture is usually older than that. Same planning rules as the tick
+    (a live video row, a job waiting for review and a live job are all respected), so nothing is uploaded
+    twice; the job itself still passes the import gate.
+    """
     actor, reason = str(actor or "").strip()[:120], str(reason or "").strip()
     if not actor or not reason:
         raise OperatorActionRefused("ACTOR_AND_REASON_REQUIRED", "a re-selection needs an actor and a reason")
@@ -174,6 +179,8 @@ def apply(connect, worker, lecture_id, *, actor: str, reason: str, library_id) -
                         "previously_included": [p["part_index"] for p in before["current"] if p["policy"] == INCLUDE],
                         "stop_delivering": [p["part_index"] for p in before["stop_delivering"]],
                         "planned_action": before["action"]})
+    queued = planner.plan_lecture(before["lecture_id"]) if planner is not None else None
     return {"lecture_id": before["lecture_id"], "applied": True, "outcome": outcome.summary(),
             "selected_part": selection.get("part_index"), "planned_action": before["action"],
-            "stop_delivering": before["stop_delivering"]}
+            "stop_delivering": before["stop_delivering"], "queued": queued,
+            "operator_retry_needed": before.get("operator_retry_needed")}

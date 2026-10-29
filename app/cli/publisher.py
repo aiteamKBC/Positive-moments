@@ -176,8 +176,10 @@ def main(argv=None) -> int:
             connect = lambda: _connect(config)  # noqa: E731
             worker = build_recording_worker(config, connect=connect)
             if args.command == "reselect-recording":
+                from app.publisher.planner import Planner
                 return _print(reselection.apply(connect, worker, args.lecture_id, actor=args.actor,
-                                                reason=args.reason, library_id=config.library_id))
+                                                reason=args.reason, library_id=config.library_id,
+                                                planner=Planner(config=config, connect=connect)))
             bunny = None
             if config.writes_bunny and config.library_id is not None:
                 from app.bunny.client import BunnyStreamClient
