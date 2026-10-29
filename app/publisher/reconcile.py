@@ -255,12 +255,53 @@ class Reconciler:
                 found["DUPLICATE_BUNNY_VIDEO"].append((f"duplicate:{token}", CRITICAL,
                                                        f"{len(guids)} Bunny videos carry {token}",
                                                        {"token": token, "bunny_video_ids": sorted(guids)}, None))
+        retired = 0
         for guid, row in live.items():
             if guid not in present:
+                if self._retire_unselected_deleted(connection, row):
+                    retired += 1
+                    continue
                 found["VIDEO_MISSING_IN_BUNNY"].append((f"missing_in_bunny:{guid}", CRITICAL,
                                                         f"part {row['recording_part_index']} video is not in Bunny",
                                                         {"bunny_video_id": guid}, str(row["lecture_id"])))
+        found["_retired_deleted_unselected_videos"] = retired
         return found
+
+    def _retire_unselected_deleted(self, connection, row) -> bool:
+        """
+        A live row whose Bunny video an operator deleted, for a part the lecture no longer delivers
+        (EXCLUDE: not the selected recording, or an operator's exclusion). Retired - never deleted -
+        once Bunny itself answers 404 for that exact video id, with an audit event; the source's
+        generation count is untouched. An INCLUDED part's missing video stays a CRITICAL alert.
+        """
+        from app.bunny.client import BunnyError
+        from app.publisher.progress import EXCLUDE
+        lecture_id, part_index = str(row["lecture_id"]), row["recording_part_index"]
+        with connection.transaction():
+            facts = load_facts(connection, lecture_id)
+        part = facts.part(part_index)
+        if part is None or facts.policy(part) != EXCLUDE:
+            return False
+        try:
+            self.bunny.get_video(str(row["bunny_video_id"]))
+            return False                                   # still there: the listing was incomplete
+        except BunnyError as error:
+            if error.status != 404:
+                return False
+        changes = {"visibility_state": "WITHDRAWN"} if row["visibility_state"] == "READY_FOR_LMS" else {}
+        with connection.transaction():
+            done = BunnyVideoRepository().transition(
+                connection, row["bunny_video_record_id"],
+                expect={"retired_at": None, "bunny_video_id": row["bunny_video_id"]},
+                retired_at=self.clock(), retire_reason="VIDEO_DELETED_IN_BUNNY_PART_NOT_DELIVERED",
+                metadata={"cleanup": "DELETED_OUTSIDE_PUBLISHER"}, **changes)
+            if done is None:
+                return False
+            self.queue.event(connection, "VIDEO_RETIRED_DELETED_IN_BUNNY", lecture_id=lecture_id, detail={
+                "part": part_index, "bunny_video_id": str(row["bunny_video_id"]),
+                "record_id": str(row["bunny_video_record_id"]), "previous_visibility": row["visibility_state"],
+                "selected_part": facts.selected_part})
+        return True
 
     # -- alerts ------------------------------------------------------------------------------
     def _publish(self, connection, findings, now) -> dict:

@@ -26,9 +26,16 @@ No database, no Graph, no clock. Every rule reuses an existing validated one:
   createdDateTime within 2 s, exactly as alignment pairs them. A transcript part
   that belongs to a recording OUTSIDE this occurrence, or call ids that do not
   intersect, is a conflict. No transcript at all is fine.
+* SELECTION (2026-10-28, longest_recording_v1): when the occurrence has several
+  recordings (false starts, a meeting stopped and restarted), the lecture is the
+  LONGEST one by actual duration - the matched MP4's measured length, or Graph's
+  createdDateTime -> endDateTime for a part without a verified file. Ties: the
+  earlier recording, then the lower recording id. A part of unknown length
+  decides nothing. Only the selected part is imported and delivered; the others
+  stay on record, unimported.
 
 Nothing is guessed: a part that cannot be proven keeps an explicit status, and
-a lecture is LOCATED only when every one of its parts is.
+a lecture is LOCATED only when its selected part is.
 """
 from __future__ import annotations
 
@@ -47,6 +54,12 @@ from app.transcripts.selection import MAX_PART_GAP, WINDOW_AFTER, WINDOW_BEFORE,
 
 MAPPING_VERSION = "recording_parts_v1"
 VERIFICATION_METHOD = "graph_recording_file_lead_duration_v1"
+SELECTION_VERSION = "longest_recording_v1"
+
+# Recording selection rules / undecided reasons (bunny_recording_discoveries.metadata.recording_selection).
+RULE_SINGLE_RECORDING = "single_recording"
+RULE_LONGEST_RECORDING = "longest_recording"
+DURATION_UNKNOWN = "RECORDING_DURATION_UNKNOWN"
 
 # Per-part statuses (bunny_recording_sources.locate_status).
 LOCATED = "LOCATED"
@@ -302,6 +315,60 @@ def map_part(index: int, part: RecordingPart, kept: list, shared: int, *, expect
     status, reason, origin, difference = check_duration(part, exact.candidate.duration_seconds, exact.lead)
     return PartMapping(locate_status=status, reason=reason, candidate=exact.candidate, lead_seconds=exact.lead,
                        duration_difference_seconds=difference, media_origin=origin, candidate_count=considered, **base)
+
+
+@dataclass(frozen=True)
+class RecordingSelection:
+    """Which part IS the lecture. `part_index` None = undecided, `rule` then says why."""
+    part_index: int | None
+    rule: str
+    candidates: tuple = ()
+
+    def as_detail(self) -> dict:
+        return {"version": SELECTION_VERSION, "rule": self.rule, "part_index": self.part_index,
+                "candidates": list(self.candidates)}
+
+
+def part_duration(mapping: PartMapping, stored_row: dict | None = None) -> tuple[float | None, str | None]:
+    """
+    (seconds, source). A LOCATED part: its matched MP4's measured video duration (or the stored one,
+    for a part kept from an earlier verification). Any other part: Graph's own recording window.
+    Never a file size, never a guess.
+    """
+    if mapping.located:
+        if mapping.candidate is not None and mapping.candidate.duration_seconds:
+            return float(mapping.candidate.duration_seconds), "video_facet"
+        if stored_row and stored_row.get("source_duration_seconds"):
+            return float(stored_row["source_duration_seconds"]), "stored_video_facet"
+    if mapping.recording.duration_seconds:
+        return mapping.recording.duration_seconds, "graph_recording"
+    return None, None
+
+
+def select_recording(mappings, stored: dict | None = None) -> RecordingSelection:
+    """
+    The longest of the occurrence's recordings. Every input part already passed the identity rule
+    (same meeting, Cairo date, occurrence window and cluster; its file by subject, date and lead), so
+    this decides only WHICH of this lecture's own recordings is the delivery. Graph order, file
+    order, start time and size play no part, except as the deterministic tie-break.
+    """
+    stored = stored or {}
+    measured, candidates = [], []
+    for m in sorted(mappings, key=lambda m: m.part_index):
+        duration, source = part_duration(m, stored.get(m.recording.recording_id))
+        measured.append((m, duration))
+        candidates.append({"part_index": m.part_index, "graph_recording_id": m.recording.recording_id,
+                           "duration_seconds": round(duration, 3) if duration is not None else None,
+                           "duration_source": source, "locate_status": m.locate_status})
+    if not measured:
+        return RecordingSelection(None, "NO_RECORDING")
+    if len(measured) == 1:
+        return RecordingSelection(measured[0][0].part_index, RULE_SINGLE_RECORDING, tuple(candidates))
+    if any(duration is None for _, duration in measured):
+        # A recording of unknown length may be the delivery: nothing shorter is chosen around it.
+        return RecordingSelection(None, DURATION_UNKNOWN, tuple(candidates))
+    chosen, _ = min(measured, key=lambda md: (-round(md[1]), md[0].recording.created_at, md[0].recording.recording_id))
+    return RecordingSelection(chosen.part_index, RULE_LONGEST_RECORDING, tuple(candidates))
 
 
 def claimed_twice(mappings) -> list:

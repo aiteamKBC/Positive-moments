@@ -25,7 +25,7 @@ STATUS_FOR_KIND = {"LOCATED": "LOCATED", "WAITING": "WAITING", "RETRY": "RETRY_S
 
 LOAD_DISCOVERY = """
 SELECT status, reason_code, expected_part_count, located_part_count, located_at, last_verified_at,
-       attempt_count, last_checked_at, review_reason
+       attempt_count, last_checked_at, review_reason, metadata -> 'recording_selection'
   FROM public.bunny_recording_discoveries WHERE lecture_id = %s
 """
 LOAD_SOURCES = """
@@ -185,7 +185,7 @@ class RecordingSourceRepository:
         row = connection.execute(LOAD_DISCOVERY, (str(lecture_id),)).fetchone()
         discovery = None if row is None else dict(zip(
             ("status", "reason_code", "expected_part_count", "located_part_count", "located_at",
-             "last_verified_at", "attempt_count", "last_checked_at", "review_reason"), row))
+             "last_verified_at", "attempt_count", "last_checked_at", "review_reason", "recording_selection"), row))
         sources = {r[0]: dict(zip(SOURCE_FIELDS, r))
                    for r in connection.execute(LOAD_SOURCES, (str(lecture_id),)).fetchall()}
         return discovery, sources

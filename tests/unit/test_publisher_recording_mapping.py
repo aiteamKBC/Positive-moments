@@ -308,3 +308,78 @@ def test_only_duration_match_rules():
     exact = lambda c, lead: rm.Exact(c, lead, part)                                    # noqa: E731
     assert rm.only_duration_match(part, [exact(full, 71), exact(stray, 46)]).candidate is full
     assert rm.only_duration_match(part, [exact(full, 71)]) is None                     # nothing to break a tie
+
+
+# -- several recordings: the longest is the lecture (2026-10-28) ----------------------------------
+
+def _part(index, start_minute, seconds, *, located=True, file_seconds=None, rid=None):
+    created = START + timedelta(minutes=start_minute)
+    recording = rm.RecordingPart(recording_id=rid or f"rec-{index}", call_id=f"call-{index}", created_at=created,
+                                 end_at=None if seconds is None else created + timedelta(seconds=seconds))
+    candidate = None
+    if located:
+        meta = FakeRecordingGraph().mp4(started=created - timedelta(seconds=30),
+                                        duration_seconds=seconds if file_seconds is None else file_seconds)
+        candidate = candidate_from_drive_item(meta, "onedrive_recordings")
+    return rm.PartMapping(part_index=index, recording=recording, candidate=candidate,
+                          locate_status=rm.LOCATED if located else rm.NOT_FOUND, reason="test")
+
+
+def test_one_recording_is_selected_whatever_its_length():
+    selection = rm.select_recording([_part(1, 0, 180)])
+    assert (selection.part_index, selection.rule) == (1, rm.RULE_SINGLE_RECORDING)
+
+
+def test_3_minutes_vs_2_hours_selects_the_2_hours_in_either_order():
+    for parts in ([_part(1, 0, 180), _part(2, 5, 7200)], [_part(2, 5, 7200), _part(1, 0, 180)]):
+        selection = rm.select_recording(parts)
+        assert (selection.part_index, selection.rule) == (2, rm.RULE_LONGEST_RECORDING)
+        assert [c["part_index"] for c in selection.candidates] == [1, 2]
+
+
+def test_1m02s_vs_1h41m58s_selects_the_long_one_even_when_it_comes_first():
+    selection = rm.select_recording([_part(1, 0, 6118), _part(2, 110, 62)])
+    assert selection.part_index == 1
+    assert [c["duration_seconds"] for c in selection.candidates] == [6118, 62]
+
+
+def test_measured_media_length_decides_not_graph_order_start_or_size():
+    early_big = _part(1, 0, 3000)
+    late_small = _part(2, 55, 3300)
+    selection = rm.select_recording([early_big, late_small])
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "video_facet"
+
+
+def test_an_unlocated_part_counts_by_its_graph_length_so_a_shorter_file_never_wins():
+    selection = rm.select_recording([_part(1, 0, 180), _part(2, 5, 7000, located=False)])
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "graph_recording"
+
+
+def test_a_kept_part_uses_its_stored_measured_duration():
+    kept = rm.PartMapping(part_index=2, recording=_part(2, 5, 7000).recording, locate_status=rm.LOCATED,
+                          reason="PREVIOUSLY_VERIFIED_SOURCE_KEPT")
+    selection = rm.select_recording([_part(1, 0, 180), kept], {"rec-2": {"source_duration_seconds": 6990.5}})
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "stored_video_facet"
+
+
+def test_missing_or_invalid_duration_decides_nothing():
+    invalid = rm.RecordingPart(recording_id="rec-2", call_id="c", created_at=START, end_at=START)  # end == start
+    for parts in ([_part(1, 0, 180), _part(2, 5, None, located=False)],
+                  [_part(1, 0, 180), rm.PartMapping(part_index=2, recording=invalid, locate_status=rm.NOT_FOUND,
+                                                    reason="test")]):
+        selection = rm.select_recording(parts)
+        assert (selection.part_index, selection.rule) == (None, rm.DURATION_UNKNOWN)
+    assert rm.select_recording([]).part_index is None
+
+
+def test_equal_lengths_tie_break_on_the_earlier_recording_then_the_recording_id():
+    a, b = _part(1, 0, 3600, rid="rec-b"), _part(2, 61, 3600.4, rid="rec-a")
+    assert rm.select_recording([b, a]).part_index == 1                     # same whole seconds: earlier
+    same_start = [_part(1, 0, 3600, rid="rec-z"), _part(2, 0, 3600, rid="rec-m")]
+    assert rm.select_recording(same_start).part_index == 2                 # same start: lower recording id
+    assert rm.select_recording(list(reversed(same_start))).part_index == 2
+
+
+def test_selection_detail_carries_no_url_or_file_name():
+    detail = rm.select_recording([_part(1, 0, 180), _part(2, 5, 7200)]).as_detail()
+    assert detail["version"] == rm.SELECTION_VERSION and "http" not in repr(detail) and ".mp4" not in repr(detail)

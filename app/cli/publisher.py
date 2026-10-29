@@ -62,6 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--decision", required=True, choices=("INCLUDE", "EXCLUDE"))
     decide.add_argument("--actor", required=True)
     decide.add_argument("--reason", required=True)
+    preview = sub.add_parser("recording-preview", help="read-only: what re-selecting the longest recording would "
+                                                         "include, keep, import and stop delivering")
+    target = preview.add_mutually_exclusive_group(required=True)
+    target.add_argument("--date", help="every lecture of this Cairo business date (YYYY-MM-DD)")
+    target.add_argument("--lecture-id")
+    reselect = sub.add_parser("reselect-recording", help="re-select ONE lecture's recording under the "
+                                                         "longest-recording rule (audited; no Bunny call)")
+    reselect.add_argument("--lecture-id", required=True)
+    reselect.add_argument("--actor", required=True)
+    reselect.add_argument("--reason", required=True)
     security = sub.add_parser("security-check", help="read-only learner-delivery security check of the library "
                                                      "and its pull zone against the approved policy (CDN token "
                                                      "authentication reported as DEFERRED or REQUIRED; nothing "
@@ -160,6 +170,24 @@ def main(argv=None) -> int:
                 connection.autocommit = True
                 return _print(operations.decide_part(connection, args.lecture_id, args.part, decision=args.decision,
                                                      actor=args.actor, reason=args.reason))
+        if args.command in ("recording-preview", "reselect-recording"):
+            from app.publisher import reselection
+            from app.publisher.factory import build_recording_worker
+            connect = lambda: _connect(config)  # noqa: E731
+            worker = build_recording_worker(config, connect=connect)
+            if args.command == "reselect-recording":
+                return _print(reselection.apply(connect, worker, args.lecture_id, actor=args.actor,
+                                                reason=args.reason, library_id=config.library_id))
+            bunny = None
+            if config.writes_bunny and config.library_id is not None:
+                from app.bunny.client import BunnyStreamClient
+                bunny = BunnyStreamClient(config.library_id, config.api_key)     # Get Video only
+            if args.lecture_id:
+                return _print(reselection.plan_lecture(connect, worker, args.lecture_id,
+                                                       library_id=config.library_id, bunny=bunny))
+            from datetime import date
+            return _print(reselection.preview_day(connect, worker, date.fromisoformat(args.date),
+                                                  library_id=config.library_id, bunny=bunny))
         if args.command == "security-check":
             report = _security(config)
             if args.caption_readback_video_id:

@@ -197,26 +197,21 @@ def test_a_caption_never_content_checked_is_reported_and_does_not_block_the_vide
 
 
 # =========================================================================== multipart and fragments
-def test_multi_part_order_and_an_excluded_fragment(url):
+def test_several_recordings_deliver_only_the_longest(url):
     world = delivered(url)
     world.part(START + timedelta(minutes=1), START + timedelta(minutes=3), transcript=False)      # false start
     middle = START + timedelta(minutes=60)
-    world.part(START + timedelta(minutes=5), middle + timedelta(minutes=1), call_id="call-1")
-    world.part(middle, END - timedelta(minutes=2), call_id="call-1")
+    world.part(START + timedelta(minutes=5), middle + timedelta(minutes=1), call_id="call-1")    # 56 min
+    world.part(middle, END - timedelta(minutes=2), call_id="call-1")                            # 58 min: longest
     world.run(rounds=12)
-    pending = answer(world)
-    assert pending["state"] == "REVIEW_REQUIRED" and "PART_1_FRAGMENT_NEEDS_DECISION" in pending["blocking"]
-    with psycopg.connect(url, autocommit=True) as c:
-        operations.decide_part(c, world.lecture_id, 1, decision="EXCLUDE", actor="ops-test", reason="false start")
-    world.run(rounds=4)
     body = answer(world)
-    assert body["state"] == "READY"
-    assert [(p["sequence"], p["source_part_index"]) for p in body["recording"]["parts"]] == [(1, 2), (2, 3)]
-    assert body["recording"]["excluded_parts"] == [{"source_part_index": 1, "reason": "OPERATOR_EXCLUDED"}]
-    assert body["recording"]["teams_part_count"] == 3 and body["recording"]["published_part_count"] == 2
-    assert len({p["bunny"]["video_id"] for p in body["recording"]["parts"]}) == 2
+    assert body["state"] == "READY"                            # no fragment decision needed
+    assert [(p["sequence"], p["source_part_index"]) for p in body["recording"]["parts"]] == [(1, 3)]
+    assert body["recording"]["excluded_parts"] == [{"source_part_index": 1, "reason": "OPERATOR_EXCLUDED"},
+                                                   {"source_part_index": 2, "reason": "OPERATOR_EXCLUDED"}]
+    assert body["recording"]["teams_part_count"] == 3 and body["recording"]["published_part_count"] == 1
     result = act(world, "release")
-    assert result["parts_changed"] == [2, 3] and answer(world)["release"]["status"] == "RELEASED"
+    assert result["parts_changed"] == [3] and answer(world)["release"]["status"] == "RELEASED"
 
 
 # =========================================================================== release and withdraw

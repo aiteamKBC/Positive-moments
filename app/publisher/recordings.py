@@ -29,6 +29,18 @@ A stored LOCATED lecture is re-checked at bounded points (24 h after its
 scheduled end) or on request: same recordings, same files, unchanged size
 and duration. A failed re-check read keeps the verified mapping.
 
+SEVERAL RECORDINGS (2026-10-28). The occurrence's recordings are mapped as
+before, then ONE is selected: the longest by actual duration
+(recording_mapping.select_recording). The lecture is LOCATED when that part
+is; the shorter ones stay on record, are never imported, and nothing of theirs
+blocks the lecture. While the selected recording is still a fragment of the
+slot and the occurrence window (scheduled end + 3 h) is open, a longer one may
+still appear: WAITING. The selection is persisted in the discovery's metadata
+(`recording_selection`) and carried through every later re-check; a lecture
+located before this rule has none and keeps its parts as they were, until an
+operator re-selects it (`rediscover` on a LOCATED lecture: a fresh evaluation
+that replaces the stored one only when it is LOCATED itself).
+
 TRANSACTIONS AND LOCKING
 ------------------------
 One autocommit connection per run; the per-lecture SESSION advisory lock is
@@ -57,8 +69,8 @@ from app.orchestration.locks import LectureLockManager
 from app.publisher import recording_mapping as rm
 from app.recordings.graph_lookup import recordings_path
 from app.recordings.models import DriveItemCandidate, RecordingTarget
-from app.recordings.resolution import DEFAULT_POLICY
-from app.transcripts.selection import SELECTION_VERSION
+from app.recordings.resolution import DEFAULT_POLICY, FRAGMENT
+from app.transcripts.selection import SELECTION_VERSION, WINDOW_AFTER
 
 WORKER_VERSION = "publisher_recordings_v1"
 
@@ -223,18 +235,24 @@ class RecordingWorker:
         self.log = logging.getLogger(__name__)
 
     # -- entry point ------------------------------------------------------------------
-    def run(self, lecture_id, *, attempt: int = 1, verify: bool = False, rediscover: bool = False) -> RecordingOutcome:
-        """`verify`: re-check a LOCATED lecture now. `rediscover`: an operator re-opens a REVIEW_REQUIRED one."""
+    def run(self, lecture_id, *, attempt: int = 1, verify: bool = False, rediscover: bool = False,
+            dry_run: bool = False) -> RecordingOutcome:
+        """
+        `verify`: re-check a LOCATED lecture now. `rediscover`: an operator re-opens a REVIEW_REQUIRED one, or
+        re-evaluates a LOCATED one. `dry_run`: evaluate on a READ ONLY connection and persist nothing.
+        """
         lecture_id = str(lecture_id)
         try:
             connection = self.connect()
             connection.autocommit = True
+            if dry_run:
+                connection.read_only = True
         except Exception as exc:  # noqa: BLE001 - any connect failure is a database outage
             return RecordingOutcome(lecture_id, RETRY, f"DATABASE_UNAVAILABLE:{type(exc).__name__}",
                                     retry_after=self.policy.retry_delay(attempt))
         counters = {"graph_calls": 0}
         try:
-            outcome = self._run(connection, lecture_id, attempt, verify, rediscover, counters)
+            outcome = self._run(connection, lecture_id, attempt, verify, rediscover, counters, dry_run)
         except _Deferred as deferred:
             outcome = RecordingOutcome(lecture_id, DEFERRED, deferred.reason, retry_after=self.policy.defer_delay)
         except (psycopg.Error, PlatformError) as exc:
@@ -250,7 +268,7 @@ class RecordingWorker:
         outcome.graph_calls = counters["graph_calls"]
         return outcome
 
-    def _run(self, connection, lecture_id, attempt, verify, rediscover, counters) -> RecordingOutcome:
+    def _run(self, connection, lecture_id, attempt, verify, rediscover, counters, dry_run=False) -> RecordingOutcome:
         lecture = self._load(connection, lecture_id)
         if not lecture.exists:
             return RecordingOutcome(lecture_id, PERMANENT, "LECTURE_NOT_FOUND")
@@ -263,7 +281,7 @@ class RecordingWorker:
             outcome, write = self._evaluate(connection, lecture, discovery, stored, now, attempt, verify,
                                             rediscover, counters)
             outcome = self._deadline(lecture, now, outcome)
-            if write is not None:
+            if write is not None and not dry_run:
                 self._persist(connection, lecture, outcome, write, now)
             if outcome.kind == LOCATED:
                 outcome.next_refresh_at = self.policy.next_verify_at(lecture.scheduled_end, now)
@@ -297,10 +315,21 @@ class RecordingWorker:
 
         located_before = discovery is not None and discovery["status"] == "LOCATED"
         if located_before:
+            selection = discovery.get("recording_selection")
+            if rediscover:
+                # Operator re-selection: the stored, verified mapping stays unless the fresh one is LOCATED.
+                outcome, write = self._discover(connection, lecture, stored, now, attempt, counters)
+                if outcome.kind == LOCATED:
+                    return outcome, write
+                return self._stored(lid, "RESELECTION_INCONCLUSIVE_STORED_KEPT", stored, selection=selection,
+                                    detail={"reselection": outcome.reason}), None
             checked = discovery["last_verified_at"] or discovery["located_at"]
             if not verify and not self.policy.verify_due(lecture.scheduled_end, checked, now):
-                return self._stored(lid, "STORED_SOURCE_REUSED", stored), None
-            return self._verify(connection, lecture, stored, now, counters)
+                return self._stored(lid, "STORED_SOURCE_REUSED", stored, selection=selection), None
+            outcome, write = self._verify(connection, lecture, stored, now, counters, selection)
+            if selection and "recording_selection" not in outcome.detail:
+                outcome.detail["recording_selection"] = selection       # a re-check never forgets the choice
+            return outcome, write
         return self._discover(connection, lecture, stored, now, attempt, counters)
 
     def _discover(self, connection, lecture, stored, now, attempt, counters):
@@ -382,31 +411,50 @@ class RecordingWorker:
         mappings, merge_conflict = rm.merge_with_stored(mappings, stored)
         if merge_conflict:
             return self._review(lid, merge_conflict, expected, detail), {"call_ids": call_ids}
-        return self._aggregate(lid, mappings, pairing, detail, since_end), {
+        return self._aggregate(lid, mappings, pairing, detail, since_end, lecture, now, stored), {
             "call_ids": call_ids, "pairing": pairing, "mappings": mappings}
 
-    def _aggregate(self, lid, mappings, pairing, detail, since_end) -> RecordingOutcome:
-        located = sum(1 for m in mappings if m.located)
+    def _aggregate(self, lid, mappings, pairing, detail, since_end, lecture, now, stored) -> RecordingOutcome:
+        selection = rm.select_recording(mappings, stored)
+        detail["recording_selection"] = selection.as_detail()
         parts = [{"part_index": m.part_index, "locate_status": m.locate_status, "reason": m.reason,
-                  "classification": m.classification, "transcript_pairing": m.transcript_pairing} for m in mappings]
-        base = {"expected_part_count": len(mappings), "located_part_count": located,
+                  "classification": m.classification, "transcript_pairing": m.transcript_pairing,
+                  "selected": m.part_index == selection.part_index} for m in mappings]
+        if selection.part_index is None:
+            self.log.info("recording selection undecided for %s: %s", lid, selection.rule)
+            return RecordingOutcome(lid, WAITING, selection.rule, retry_after=self.policy.waiting_delay(since_end),
+                                    expected_part_count=len(mappings),
+                                    located_part_count=sum(1 for m in mappings if m.located),
+                                    transcript_pairing=pairing, parts=parts, detail=detail)
+        chosen = next(m for m in mappings if m.part_index == selection.part_index)
+        # Expected = the ONE selected recording; the shorter ones are on record, never required.
+        base = {"expected_part_count": 1, "located_part_count": 1 if chosen.located else 0,
                 "transcript_pairing": pairing, "parts": parts, "detail": detail}
-        review = [m for m in mappings if m.locate_status in (rm.AMBIGUOUS, rm.DURATION_MISMATCH)]
-        if review:
-            first = review[0]
-            return RecordingOutcome(lid, REVIEW, first.reason, review_reason=f"PART_{first.part_index}:{first.reason}",
-                                    **base)
-        if located == len(mappings):
-            return RecordingOutcome(lid, LOCATED, "ALL_PARTS_LOCATED", **base)
-        first = next(m for m in mappings if not m.located)
-        reason = ("FILE_DURATION_UNAVAILABLE" if first.locate_status == rm.DURATION_PENDING
-                  else "RECORDING_FILE_NOT_FOUND")
-        return RecordingOutcome(lid, WAITING, reason, retry_after=self.policy.waiting_delay(since_end), **base)
+        if chosen.locate_status in (rm.AMBIGUOUS, rm.DURATION_MISMATCH):
+            return RecordingOutcome(lid, REVIEW, chosen.reason,
+                                    review_reason=f"PART_{chosen.part_index}:{chosen.reason}", **base)
+        if not chosen.located:
+            reason = ("FILE_DURATION_UNAVAILABLE" if chosen.locate_status == rm.DURATION_PENDING
+                      else "RECORDING_FILE_NOT_FOUND")
+            return RecordingOutcome(lid, WAITING, reason, retry_after=self.policy.waiting_delay(since_end), **base)
+        window_closes = lecture.scheduled_end + WINDOW_AFTER
+        if chosen.classification == FRAGMENT and now < window_closes:
+            # The occurrence's recordings are not final until its window closes: a longer one may follow.
+            return RecordingOutcome(lid, WAITING, "LONGER_RECORDING_MAY_FOLLOW",
+                                    retry_after=min(self.policy.waiting_delay(since_end), window_closes - now), **base)
+        reason = "ALL_PARTS_LOCATED" if len(mappings) == 1 else "LONGEST_RECORDING_SELECTED"
+        return RecordingOutcome(lid, LOCATED, reason, **base)
 
-    def _verify(self, connection, lecture, stored, now, counters):
+    def _verify(self, connection, lecture, stored, now, counters, selection=None):
         """Re-check a LOCATED lecture: same recordings, same files, unchanged media, consistent transcript."""
         lid = lecture.lecture_id
         located = {k: v for k, v in stored.items() if v["locate_status"] == rm.LOCATED}
+        if selection:
+            # Only the selected recording's file is the lecture's; the set compared is every stored part.
+            on_record, located = stored, {k: v for k, v in located.items()
+                                          if v["part_index"] == selection.get("part_index")}
+        else:
+            on_record = located
         listing = self._list_recordings(lecture, counters)
         if isinstance(listing, GraphError):
             return self._stored(lid, "REVERIFY_FAILED_STORED_KEPT", stored,
@@ -417,7 +465,7 @@ class RecordingWorker:
             return self._stored(lid, "REVERIFY_FAILED_STORED_KEPT", stored,
                                 detail={"verify_failure": rm.GRAPH_RESPONSE_INVALID}), {"touch": True}
         now_ids = [p.recording_id for p in occurrence.parts]
-        stored_ids = [k for k, _ in sorted(located.items(), key=lambda kv: kv[1]["part_index"])]
+        stored_ids = [k for k, _ in sorted(on_record.items(), key=lambda kv: kv[1]["part_index"])]
         if occurrence.status != rm.SELECTED or now_ids != stored_ids:
             outcome = self._review(lid, "RECORDING_SET_CHANGED", len(now_ids),
                                    {**occurrence.detail, "stored_part_count": len(stored_ids)})
@@ -452,18 +500,18 @@ class RecordingWorker:
                 "verified": statuses, "partial": True}
         # A transcript stored since the recording was located: validate the part relationship now.
         parts = {p.recording_id: p for p in occurrence.parts}
-        mappings = [rm.PartMapping(part_index=row["part_index"], recording=parts[rid], locate_status=rm.LOCATED,
-                                   reason=KEPT) for rid, row in sorted(located.items(), key=lambda kv: kv[1]["part_index"])]
+        mappings = [rm.PartMapping(part_index=row["part_index"], recording=parts[rid], locate_status=row["locate_status"],
+                                   reason=KEPT) for rid, row in sorted(on_record.items(), key=lambda kv: kv[1]["part_index"])]
         paired, pairing, conflict = rm.pair_transcripts(mappings, occurrence.all_recordings,
                                                         self._transcript_parts(connection, lecture))
         if conflict:
             outcome = self._review(lid, conflict, len(located), {})
             outcome.located_part_count, outcome.transcript_pairing = len(located), pairing
             return outcome, {"pairing": pairing}
-        outcome = self._stored(lid, "SOURCES_VERIFIED", stored)
+        outcome = self._stored(lid, "SOURCES_VERIFIED", stored, selection=selection)
         outcome.transcript_pairing = pairing
         links = {m.recording.recording_id: (m.transcript_artifact_id, m.transcript_part_index, m.transcript_pairing)
-                 for m in paired if m.transcript_artifact_id}
+                 for m in paired if m.transcript_artifact_id and m.located}
         return outcome, {"verified": statuses, "verified_all": True, "pairing": pairing, "transcripts": links}
 
     def _transcript_parts(self, connection, lecture) -> list:
@@ -593,13 +641,17 @@ class RecordingWorker:
         return RecordingOutcome(lid, REVIEW, reason, review_reason=reason, expected_part_count=expected,
                                 detail=detail)
 
-    def _stored(self, lid, reason, stored, *, detail=None) -> RecordingOutcome:
+    def _stored(self, lid, reason, stored, *, detail=None, selection=None) -> RecordingOutcome:
         located = [r for r in stored.values() if r["locate_status"] == rm.LOCATED]
+        chosen = selection.get("part_index") if selection else None
         parts = [{"part_index": r["part_index"], "locate_status": r["locate_status"],
-                  "recording_source_id": str(r["recording_source_id"])}
+                  "recording_source_id": str(r["recording_source_id"]),
+                  **({"selected": r["part_index"] == chosen} if selection else {})}
                  for r in sorted(stored.values(), key=lambda r: r["part_index"])]
-        return RecordingOutcome(lid, LOCATED, reason, expected_part_count=len(located),
-                                located_part_count=len(located), parts=parts, detail=detail or {})
+        count = 1 if selection else len(located)
+        detail = {**(detail or {}), **({"recording_selection": selection} if selection else {})}
+        return RecordingOutcome(lid, LOCATED, reason, expected_part_count=count,
+                                located_part_count=count, parts=parts, detail=detail)
 
     def _deadline(self, lecture, now, outcome) -> RecordingOutcome:
         if outcome.kind in ACQUIRING and lecture.scheduled_end is not None \

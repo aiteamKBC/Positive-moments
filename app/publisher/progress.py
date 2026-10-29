@@ -29,9 +29,13 @@ DUPLICATE CALENDAR EVENTS (P0-F: decided here, never waited for from QA)
     the reconciler raises DUPLICATE_BLOCKED. Writing the suppression stays
     QA's/the operator's job - the publisher only reads the decision.
 
-MULTIPART / FRAGMENT POLICY (never drops or adds a part on its own)
+MULTIPART / FRAGMENT POLICY
     operator decision present            -> that decision (INCLUDE / EXCLUDE)
     part not LOCATED                     -> NOT_LOCATED
+    a recording selection is on record
+      and this is not the selected part  -> EXCLUDE  (the longest recording is the lecture: 2026-10-28,
+                                                      recording_mapping.select_recording; a lecture located
+                                                      before that rule has no selection and is unaffected)
     classification FRAGMENT, paired with
       a transcript part of the lecture   -> INCLUDE  (it carries the lecture's own speech:
                                                       identity and necessity both proven)
@@ -63,7 +67,8 @@ SELECT e.match_status,
   FROM public.bunny_lms_match_evaluations e WHERE e.lecture_id = %s AND e.is_current
 """
 DISCOVERY = """
-SELECT status, reason_code, expected_part_count, located_part_count
+SELECT status, reason_code, expected_part_count, located_part_count,
+       (metadata -> 'recording_selection' ->> 'part_index')::int
   FROM public.bunny_recording_discoveries WHERE lecture_id = %s
 """
 PARTS = """
@@ -96,6 +101,7 @@ class LectureFacts:
     recording_status: str = "PENDING"
     recording_reason: str | None = None
     expected_part_count: int | None = None
+    selected_part: int | None = None            # the recording selection's part; None = no selection on record
     transcript_status: str = "PENDING"
     parts: list = field(default_factory=list)
     decisions: dict = field(default_factory=dict)
@@ -108,14 +114,16 @@ class LectureFacts:
         return next((p for p in self.parts if p["part_index"] == index), None)
 
     def policy(self, part: dict) -> str:
-        return part_policy(part, self.decisions.get(part["part_index"]))
+        return part_policy(part, self.decisions.get(part["part_index"]), self.selected_part)
 
 
-def part_policy(part: dict, decision: str | None) -> str:
+def part_policy(part: dict, decision: str | None, selected: int | None = None) -> str:
     if decision in (INCLUDE, EXCLUDE):
         return decision
     if part["locate_status"] != "LOCATED":
         return NOT_LOCATED
+    if selected is not None and part["part_index"] != selected:
+        return EXCLUDE
     if part.get("classification") == "FRAGMENT":
         return INCLUDE if part.get("transcript_artifact_id") else NEEDS_DECISION
     return INCLUDE
@@ -136,6 +144,7 @@ def load_facts(connection, lecture_id) -> LectureFacts:
     if discovery:
         facts.recording_status, facts.recording_reason, facts.expected_part_count = discovery[0], discovery[1], \
             discovery[2]
+        facts.selected_part = discovery[4]
     facts.parts = [dict(zip(PART_FIELDS, r)) for r in connection.execute(PARTS, (lecture_id,)).fetchall()]
     transcript = connection.execute(TRANSCRIPT, (lecture_id, SELECTION_VERSION)).fetchone()
     facts.transcript_status = transcript[0] if transcript else "PENDING"

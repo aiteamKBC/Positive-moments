@@ -24,6 +24,7 @@ import psycopg
 import pytest
 
 from app.config.settings import Settings
+from app.db.repositories.publisher_ops import PartDecisionRepository
 from app.db.repositories.publisher_queue import PublisherQueueRepository
 from app.lms.sources import LmsSnapshot
 from app.orchestration.locks import SchedulerCycleLock
@@ -406,45 +407,40 @@ def test_lms_only_week_additional_session_is_detected_and_never_creates_a_lectur
 
 
 # =========================================================================== multipart and fragments
-def test_two_recording_parts_each_get_their_own_video_and_caption(url):
+def test_two_substantial_recordings_only_the_longer_gets_a_video_and_caption(url):
     world = World(url)
     middle = START + timedelta(minutes=60)
-    world.part(START + timedelta(minutes=1), middle + timedelta(minutes=1))
-    world.part(middle, END - timedelta(minutes=2))
+    world.part(START + timedelta(minutes=1), middle + timedelta(minutes=1))      # 60 min: the longer
+    world.part(middle, END - timedelta(minutes=2))                              # 58 min
     world.run(rounds=12)
     assert world.ready()
-    videos = world.videos()
-    assert [v[0] for v in videos] == [1, 2] and {v[2] for v in videos} == {"VERIFIED"}
-    assert "part 1/2" in videos[0][4] and "part 2/2" in videos[1][4]
-    assert len({v[3] for v in videos}) == 2 and [c[0] for c in world.captions()] == ["VERIFIED", "VERIFIED"]
-    first, second = (world.bunny.caption_text(v[3]) for v in videos)
-    assert first != second                                     # each part's own raw WebVTT
+    [video] = world.videos()
+    assert video[0] == 1 and video[2] == "VERIFIED" and [c[0] for c in world.captions()] == ["VERIFIED"]
 
 
-def test_unpaired_short_fragment_waits_for_an_operator_decision(url):
+def test_an_unpaired_false_start_is_never_imported_and_needs_no_decision(url):
     world = World(url)
     world.part(START + timedelta(minutes=1), START + timedelta(minutes=3), transcript=False)   # false start
     world.part(START + timedelta(minutes=5), END - timedelta(minutes=2))
     world.run(rounds=10)
-    assert not world.ready()
-    assert [v[0] for v in world.videos()] == [2]               # the fragment is never auto-published
-    world.clock.advance(timedelta(hours=24))                   # overdue: the reconciler reports it
+    assert world.ready() and [v[0] for v in world.videos()] == [2]
+    world.clock.advance(timedelta(hours=24))
     world.reconciler.run("LIGHT")
     assert world.q("SELECT count(*) FROM public.bunny_publisher_alerts WHERE kind = 'FRAGMENT_DECISION_NEEDED' "
-                   "AND status = 'OPEN'") == [(1,)]
-    with psycopg.connect(url, autocommit=True) as c:
-        operations.decide_part(c, world.lecture_id, 1, decision="EXCLUDE", actor="ops-test",
-                               reason="false start before the lecture")
-    world.run(rounds=3)
-    assert world.ready() and "OPERATOR_PART_DECISION" in world.events()
+                   "AND status = 'OPEN'") == [(0,)]
+    with psycopg.connect(url, autocommit=True) as c:          # an operator's explicit decision still overrides
+        operations.decide_part(c, world.lecture_id, 1, decision="INCLUDE", actor="ops-test",
+                               reason="the lecturer asked for the opening to be kept")
+    world.run(rounds=6)
+    assert [v[0] for v in world.videos()] == [1, 2] and "OPERATOR_PART_DECISION" in world.events()
 
 
-def test_a_fragment_carrying_the_lectures_own_speech_is_published(url):
+def test_a_fragment_with_its_own_transcript_is_still_not_imported_next_to_a_longer_recording(url):
     world = World(url)
     world.part(START + timedelta(minutes=1), START + timedelta(minutes=12), minutes=10)
     world.part(START + timedelta(minutes=14), END - timedelta(minutes=2))
     world.run(rounds=12)
-    assert world.ready() and [v[0] for v in world.videos()] == [1, 2]
+    assert world.ready() and [v[0] for v in world.videos()] == [2]
 
 
 # =========================================================================== failures and recovery
@@ -533,6 +529,10 @@ def test_at_most_two_imports_are_in_flight(url):
     third = (END - START) / 3
     for n in range(3):
         world.part(START + third * n, START + third * (n + 1) + timedelta(minutes=1 if n < 2 else -1))
+    with psycopg.connect(url, autocommit=True) as c:          # an operator keeps all three parts
+        for n in (1, 2, 3):
+            PartDecisionRepository().decide(c, world.lecture_id, n, decision="INCLUDE", reason="slot test",
+                                            actor="ops-test")
     world.bunny.polls_to_finish = 10_000                          # encodes stay in progress: slots stay taken
     world.run(rounds=8)
     assert len(world.bunny.fetch_calls) == 2

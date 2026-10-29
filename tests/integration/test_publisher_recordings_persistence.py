@@ -134,6 +134,12 @@ def _sources(url, lecture_id):
                              ORDER BY recording_part_index""", (lecture_id,)).fetchall()
 
 
+def _selection(url, lecture_id):
+    with psycopg.connect(url) as c:
+        return c.execute("SELECT metadata -> 'recording_selection' FROM public.bunny_recording_discoveries "
+                         "WHERE lecture_id = %s", (lecture_id,)).fetchone()[0]
+
+
 def _no_urls(url):
     with psycopg.connect(url) as c:
         return c.execute("""SELECT (SELECT count(*) FROM public.bunny_recording_sources s
@@ -192,32 +198,36 @@ def test_rerun_reuses_the_stored_source_without_graph(url):
 
 
 @pytest.mark.parametrize("n", [2, 3])
-def test_multipart_recording_resolved_in_order(url, n):
+def test_several_recordings_are_mapped_in_order_and_the_longest_selected(url, n):
     lecture_id, graph = _lecture(url), FakeRecordingGraph()
-    recordings, files = _parts(graph, n)
+    recordings, files = _parts(graph, n)          # parts 1..n-1 run a minute longer than the last
     outcome = _worker(url, graph).run(lecture_id)
-    assert (outcome.kind, outcome.expected_part_count, outcome.located_part_count) == (LOCATED, n, n)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert (outcome.expected_part_count, outcome.located_part_count) == (1, 1)
     rows = _sources(url, lecture_id)
-    assert [r[0] for r in rows] == list(range(1, n + 1))
+    assert [r[0] for r in rows] == list(range(1, n + 1)) and {r[2] for r in rows} == {"LOCATED"}
     assert [r[1] for r in rows] == [r["id"] for r in recordings]
     assert [r[4] for r in rows] == [f["id"] for f in files] and len({r[4] for r in rows}) == n
+    selection = _selection(url, lecture_id)       # equal longest lengths: the earlier recording
+    assert (selection["rule"], selection["part_index"]) == ("longest_recording", 1)
 
 
-def test_missing_second_part_is_never_treated_as_the_whole_lecture(url):
+def test_the_longer_recordings_file_is_waited_for_never_replaced_by_the_shorter(url):
     lecture_id, graph = _lecture(url), FakeRecordingGraph()
-    first = graph.recording(START, START + timedelta(minutes=61))
-    second = graph.recording(START + timedelta(minutes=60), END)
+    first = graph.recording(START, START + timedelta(minutes=31))
+    second = graph.recording(START + timedelta(minutes=30), END)
     graph.recorded_file(first)
     worker = _worker(url, graph)
     outcome = worker.run(lecture_id)
     assert (outcome.kind, outcome.reason) == (WAITING, "RECORDING_FILE_NOT_FOUND")
     assert outcome.summary()["missing_part_count"] == 1
-    assert _discovery(url, lecture_id)[:6] == ("WAITING", "RECORDING_FILE_NOT_FOUND", None, 2, 1, 1)
+    assert _discovery(url, lecture_id)[:6] == ("WAITING", "RECORDING_FILE_NOT_FOUND", None, 1, 0, 1)
     assert [r[2] for r in _sources(url, lecture_id)] == ["LOCATED", "NOT_FOUND"]
-    # SharePoint shows the second file later: the first part's verified mapping is kept.
+    # SharePoint shows the longer file later: it is the lecture; the first part's mapping is kept on record.
     graph.recorded_file(second)
     assert worker.run(lecture_id).kind == LOCATED
     assert [r[2] for r in _sources(url, lecture_id)] == ["LOCATED", "LOCATED"]
+    assert _selection(url, lecture_id)["part_index"] == 2
 
 
 def test_ambiguous_candidate_requires_review(url):
@@ -391,8 +401,8 @@ def test_not_ended_cancelled_duplicate_unresolved_and_unknown(url):
 
 def test_failed_reads_leave_committed_mappings_intact(url):
     lecture_id, graph = _lecture(url), FakeRecordingGraph()
-    first = graph.recording(START, START + timedelta(minutes=61))
-    graph.recording(START + timedelta(minutes=60), END)
+    first = graph.recording(START, START + timedelta(minutes=31))
+    graph.recording(START + timedelta(minutes=30), END)
     graph.recorded_file(first)
     worker = _worker(url, graph)
     assert worker.run(lecture_id).kind == WAITING
@@ -413,7 +423,9 @@ def test_verification_confirms_unchanged_files(url):
     graph.calls.clear()
     outcome = worker.run(lecture_id, verify=True)
     assert (outcome.kind, outcome.reason) == (LOCATED, "SOURCES_VERIFIED")
-    assert graph.count("recordings") == 1 and graph.count("item") == 2 and graph.count("onedrive") == 0
+    # only the selected recording's file is the lecture's: it alone is re-read; the selection is kept
+    assert graph.count("recordings") == 1 and graph.count("item") == 1 and graph.count("onedrive") == 0
+    assert _selection(url, lecture_id)["part_index"] == 1 and _discovery(url, lecture_id)[3:5] == (1, 1)
 
 
 def test_verification_is_due_at_the_bounded_point(url):
@@ -686,3 +698,159 @@ def test_rollback_refuses_while_rows_exist(url):
             c.execute(RECORDING_ROLLBACK.read_text(encoding="utf-8").replace("BEGIN;", "").replace("COMMIT;", ""))
         c.rollback()
         assert recording_applied(c) == ["bunny_recording_discoveries", "bunny_recording_sources"]
+
+
+# -- several Teams recordings: the longest one is the lecture (2026-10-28) ----------------------------
+
+def _recording_with_file(graph, start, seconds, *, call_id, file=True, **kwargs):
+    recording = graph.recording(start, start + timedelta(seconds=seconds), call_id=call_id)
+    return recording, (graph.recorded_file(recording, **kwargs) if file else None)
+
+
+@pytest.mark.parametrize("reverse_graph, reverse_files", [(False, False), (True, False), (False, True), (True, True)])
+def test_a_3_minute_false_start_never_replaces_the_2_hour_lecture_in_any_graph_order(url, reverse_graph,
+                                                                                      reverse_files):
+    """Marketing Impact and Planning, 2026-10-27: ~3 min and ~2 h recordings of one 12:00-14:00 slot."""
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a", lead=20)
+    long_recording, long_file = _recording_with_file(graph, START + timedelta(minutes=5), 2 * 3600 - 300,
+                                                     call_id="call-b", lead=30)
+    if reverse_graph:
+        graph.recordings.reverse()
+    if reverse_files:
+        graph.onedrive[LOOKUP_USER].reverse()
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    selection = _selection(url, lecture_id)
+    assert selection["part_index"] == 2 and selection["rule"] == "longest_recording"
+    assert [c["duration_source"] for c in selection["candidates"]] == ["video_facet", "video_facet"]
+    rows = _sources(url, lecture_id)
+    assert rows[1][1] == long_recording["id"] and rows[1][4] == long_file["id"]
+    assert [r[6] for r in rows] == ["FRAGMENT", "FULL"]
+    assert _discovery(url, lecture_id)[:6] == ("LOCATED", "LONGEST_RECORDING_SELECTED", None, 1, 1, 0)
+
+
+def test_repeated_starts_and_stops_select_the_1h41m58s_recording(url):
+    """AI In Marketing, 2026-10-27 (12:30-14:30): several starts/stops; 1 min 2 s and 1 h 41 min 58 s saved."""
+    start = START + timedelta(minutes=30)
+    lecture_id = _lecture(url, start=start, end=start + timedelta(hours=2))
+    graph = FakeRecordingGraph()
+    _recording_with_file(graph, start + timedelta(minutes=1), 62, call_id="call-1", lead=15)
+    _recording_with_file(graph, start + timedelta(minutes=3), 25, call_id="call-2", file=False)   # never saved
+    long_recording, _ = _recording_with_file(graph, start + timedelta(minutes=6), 6118, call_id="call-3", lead=25)
+    _recording_with_file(graph, start + timedelta(minutes=6) + timedelta(seconds=6130), 40, call_id="call-4",
+                         file=False)                                                            # never saved
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    selection = _selection(url, lecture_id)
+    chosen = next(c for c in selection["candidates"] if c["part_index"] == selection["part_index"])
+    assert chosen["graph_recording_id"] == long_recording["id"] and round(chosen["duration_seconds"]) == 6118
+    assert [r[2] for r in _sources(url, lecture_id)] == ["LOCATED", "NOT_FOUND", "LOCATED", "NOT_FOUND"]
+
+
+def test_an_unsaved_short_recording_never_blocks_the_lecture(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 90, call_id="call-a", file=False)
+    _recording_with_file(graph, START + timedelta(minutes=3), 2 * 3600 - 300, call_id="call-b")
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_a_long_recording_of_another_lecture_is_never_selected(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _, own = _recording_with_file(graph, START + timedelta(minutes=2), 2 * 3600 - 300, call_id="call-own")
+    # Same meeting and day, later in the evening (outside this occurrence's cluster): another lecture's 3 h.
+    _recording_with_file(graph, END + timedelta(hours=2, minutes=50), 3 * 3600, call_id="call-evening")
+    # Another subject's 3 h file named at this lecture's own recording time: identity rejects it.
+    graph.mp4(started=START + timedelta(minutes=2) - timedelta(seconds=30), duration_seconds=3 * 3600,
+              subject="Some Other Module")
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "ALL_PARTS_LOCATED")
+    [row] = _sources(url, lecture_id)
+    assert row[4] == own["id"] and _selection(url, lecture_id)["rule"] == "single_recording"
+
+
+def test_a_lone_fragment_waits_for_the_occurrence_window_then_a_longer_recording_wins(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a")
+    worker = _worker(url, graph)
+    outcome = worker.run(lecture_id)                           # END + 1 h: Teams may still be writing the lecture
+    assert (outcome.kind, outcome.reason) == (WAITING, "LONGER_RECORDING_MAY_FOLLOW")
+    assert outcome.retry_after <= timedelta(hours=2)
+    _recording_with_file(graph, START + timedelta(minutes=5), 2 * 3600 - 300, call_id="call-b")
+    outcome = worker.run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_a_lone_fragment_is_used_once_the_occurrence_window_has_closed(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a")
+    outcome = _worker(url, graph, clock=END + timedelta(hours=3, minutes=1)).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "ALL_PARTS_LOCATED")
+
+
+def test_the_longer_files_unindexed_duration_waits_and_decides_nothing(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a")
+    long_recording = graph.recording(START + timedelta(minutes=5), END, call_id="call-b")
+    graph.mp4(started=START + timedelta(minutes=5) - timedelta(seconds=35),
+              duration_seconds=None)                           # SharePoint has not indexed its length yet
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (WAITING, "FILE_DURATION_UNAVAILABLE")
+    assert _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_operator_reselection_of_a_lecture_located_before_the_rule(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a")
+    _recording_with_file(graph, START + timedelta(minutes=5), 2 * 3600 - 300, call_id="call-b")
+    worker = _worker(url, graph)
+    assert worker.run(lecture_id).kind == LOCATED
+    with psycopg.connect(url, autocommit=True) as c:              # the pre-rule shape: every part, no selection
+        c.execute("UPDATE public.bunny_recording_discoveries SET metadata = metadata - 'recording_selection', "
+                  "expected_part_count = 2, located_part_count = 2 WHERE lecture_id = %s", (lecture_id,))
+    before = _discovery(url, lecture_id), _sources(url, lecture_id)
+    graph.calls.clear()
+    assert worker.run(lecture_id).reason == "STORED_SOURCE_REUSED" and graph.calls == []
+    preview = worker.run(lecture_id, rediscover=True, dry_run=True)
+    assert (preview.kind, preview.detail["recording_selection"]["part_index"]) == (LOCATED, 2)
+    assert (_discovery(url, lecture_id), _sources(url, lecture_id)) == before and _selection(url, lecture_id) is None
+    applied = worker.run(lecture_id, rediscover=True)
+    assert (applied.kind, applied.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert _selection(url, lecture_id)["part_index"] == 2 and _discovery(url, lecture_id)[3:5] == (1, 1)
+    assert [r[4] for r in _sources(url, lecture_id)] == [r[4] for r in before[1]]   # same verified files
+    again = worker.run(lecture_id, rediscover=True)               # idempotent
+    assert again.kind == LOCATED and _selection(url, lecture_id)["part_index"] == 2
+    assert worker.run(lecture_id, verify=True).reason == "SOURCES_VERIFIED"
+    assert _selection(url, lecture_id)["part_index"] == 2         # a re-check keeps the choice
+
+
+def test_inconclusive_reselection_keeps_the_stored_lecture(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _one_part(graph)
+    worker = _worker(url, graph)
+    assert worker.run(lecture_id).kind == LOCATED
+    before = _discovery(url, lecture_id)
+    graph.recording_errors = [http(503)]
+    outcome = worker.run(lecture_id, rediscover=True)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "RESELECTION_INCONCLUSIVE_STORED_KEPT")
+    assert _discovery(url, lecture_id) == before
+
+
+def test_grouping_limit_a_short_recording_more_than_20_minutes_apart_on_another_call_is_reviewed(url):
+    """Unchanged occurrence rule: not grouped, yet overlapping the slot -> review, never a silent choice."""
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START, 3 * 60, call_id="call-a")
+    _recording_with_file(graph, START + timedelta(minutes=25), 90 * 60, call_id="call-b")   # 22 min gap
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (REVIEW, "AMBIGUOUS_OCCURRENCE_RECORDINGS")
+
+
+def test_a_short_recording_before_the_slot_and_far_from_the_lecture_is_simply_not_this_occurrences(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording_with_file(graph, START - timedelta(minutes=40), 3 * 60, call_id="call-a")     # test call, 11:20
+    _recording_with_file(graph, START + timedelta(minutes=2), 2 * 3600 - 300, call_id="call-b")
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "ALL_PARTS_LOCATED")
