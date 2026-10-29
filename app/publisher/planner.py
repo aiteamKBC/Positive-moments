@@ -206,20 +206,40 @@ class Planner:
             if lms_status == "VERIFIED" and recording_status == "LOCATED":
                 self._plan_parts(connection, lecture_id, summary)
 
-    def plan_lecture(self, lecture_id) -> dict:
+    def plan_lecture(self, lecture_id, *, priorities: dict | None = None, payload: dict | None = None,
+                     allow_import: bool = True) -> dict:
         """
-        Step 4 for ONE lecture, whatever its date: an operator re-selection may concern a lecture older than
-        the lookback window, which the tick no longer plans. Same rules and idempotency as the tick.
+        Step 4 for ONE lecture, whatever its date: an operator re-selection or a historical backfill may
+        concern a lecture older than the lookback window, which the tick no longer plans. Same rules and
+        idempotency as the tick. A historical backfill passes its lower `priorities`, its run tag in
+        `payload`, and `allow_import=False` while its import budget is used up (an IMPORT_VIDEO that would
+        be created is counted in `imports_deferred` instead).
         """
         summary = PlanSummary()
         connection = self.connect()
         connection.autocommit = True
         try:
-            self._plan_parts(connection, str(lecture_id), summary)
+            deferred = self._plan_parts(connection, str(lecture_id), summary, priorities=priorities, payload=payload,
+                                        allow_import=allow_import)
         finally:
             connection.close()
         return {"jobs_created": summary.jobs_created, "fragments_needing_decision": summary.fragments_needing_decision,
-                "duplicates_blocked": summary.duplicates_blocked}
+                "duplicates_blocked": summary.duplicates_blocked, "imports_deferred": deferred,
+                "would_import_parts": summary.would_import_parts}
+
+    def match_range(self, date_from: date, date_to: date) -> dict:
+        """
+        Step 2 (LMS occurrence matching and coverage) for an explicit, operator-chosen range - the tick only
+        matches its lookback window. Same matcher, same persistence; nothing else of the tick runs.
+        """
+        summary = PlanSummary()
+        connection = self.connect()
+        connection.autocommit = True
+        try:
+            self._match(connection, date_from, date_to, self.clock(), summary)
+        finally:
+            connection.close()
+        return summary.lms
 
     @staticmethod
     def _blocked_duplicate(connection, lecture_id) -> bool:
@@ -228,7 +248,8 @@ class Planner:
             facts = load_facts(connection, lecture_id)
         return facts.duplicate_block == DUPLICATE_LOSER
 
-    def _plan_parts(self, connection, lecture_id, summary) -> None:
+    def _plan_parts(self, connection, lecture_id, summary, *, priorities=None, payload=None,
+                    allow_import: bool = True) -> int:
         from app.publisher.bunny_jobs import mark_lecture_ready
         with connection.transaction():
             facts = load_facts(connection, lecture_id)
@@ -236,7 +257,8 @@ class Planner:
             # A duplicate loser or an ambiguous group never reaches Bunny; the
             # reconciler raises DUPLICATE_BLOCKED so it is visible for review.
             summary.duplicates_blocked += 1
-            return
+            return 0
+        deferred = 0
         library = self.config.library_id
         for part in facts.parts:
             policy = facts.policy(part)
@@ -255,13 +277,18 @@ class Planner:
             if latest is not None and latest["status"] in ("REVIEW_REQUIRED", "FAILED", "QUEUED", "RUNNING",
                                                             "RETRY_WAIT"):
                 continue                       # live already, or waiting for an operator
+            if kind == "IMPORT_VIDEO" and not allow_import:
+                deferred += 1
+                continue
             _, created = self.queue.enqueue(connection, job_kind=kind, subject_key=subject, lecture_id=lecture_id,
-                                            priority=BUNNY_PRIORITY[kind], max_attempts=MAX_ATTEMPTS)
+                                            priority=(priorities or BUNNY_PRIORITY)[kind], payload=payload,
+                                            max_attempts=MAX_ATTEMPTS)
             if created:
                 summary.created(kind)
         if self.config.writes_bunny and library is not None and mark_lecture_ready(
                 connection, lecture_id, library, self.config.caption_language, self.queue):
             summary.lectures_ready += 1
+        return deferred
 
     def _next_kind(self, connection, library, lecture_id, part_index) -> str | None:
         """What this part needs next, from its persisted state only."""

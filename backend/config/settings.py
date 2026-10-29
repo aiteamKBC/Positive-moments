@@ -70,6 +70,12 @@ PUBLISHER_LMS_LIBRARY_ID = int(_publisher_lms_library) if _publisher_lms_library
 PUBLISHER_LMS_PLAYBACK_ENABLED = env_bool("PUBLISHER_LMS_PLAYBACK_ENABLED", False)
 PUBLISHER_LMS_RATE = os.getenv("PUBLISHER_LMS_RATE", "600/min").strip() or "600/min"
 PUBLISHER_LMS_CAPTION_LANGUAGE = os.getenv("PUBLISHER_LMS_CAPTION_LANGUAGE", "en").strip() or "en"
+# Historical Backfill in the Publishing Monitor (operations/publisher_backfill_views.py): the longest
+# inclusive range one run may cover. Starting, cancelling and retrying a run needs membership of the
+# Django group named below (granted with `manage.py publisher_backfill_operator --grant <username>`).
+_backfill_days = os.getenv("PUBLISHER_BACKFILL_MAX_DAYS", "").strip()
+PUBLISHER_BACKFILL_MAX_DAYS = int(_backfill_days) if _backfill_days.isdigit() and 1 <= int(_backfill_days) <= 366 else 31
+PUBLISHER_BACKFILL_OPERATOR_GROUP = "kbc_publisher_backfill_operators"
 
 # Access log of the LMS delivery API (one JSON line per request; never a token or a URL).
 LOGGING = {

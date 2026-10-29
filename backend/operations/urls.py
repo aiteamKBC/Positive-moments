@@ -7,7 +7,9 @@ there is no route here that will perform an action named by the caller.
 """
 from django.urls import path
 
-from . import actions, backfill_views, media_views, publisher_views, publishing_monitor_views, views
+from . import (
+    actions, backfill_views, media_views, publisher_backfill_views, publisher_views, publishing_monitor_views, views,
+)
 
 urlpatterns = [
     path("day/", views.day_view, name="operations-day"),
@@ -116,4 +118,19 @@ urlpatterns = [
          name="operations-publishing-monitor-lectures"),
     path("publishing-monitor/lectures/<uuid:lecture_id>/", publishing_monitor_views.lecture_view,
          name="operations-publishing-monitor-lecture"),
+
+    # Historical Backfill: preview is READ ONLY; start / cancel / retry need the operator group and only
+    # write the run record - the publisher service does the publishing (publisher_backfill_views.py).
+    path("publishing-monitor/backfill/runs/", publisher_backfill_views.runs_view,
+         name="operations-publisher-backfill-runs"),
+    path("publishing-monitor/backfill/preview/", publisher_backfill_views.preview_view,
+         name="operations-publisher-backfill-preview"),
+    path("publishing-monitor/backfill/runs/start/", publisher_backfill_views.start_view,
+         name="operations-publisher-backfill-start"),
+    path("publishing-monitor/backfill/runs/<uuid:run_id>/", publisher_backfill_views.run_view,
+         name="operations-publisher-backfill-run"),
+    path("publishing-monitor/backfill/runs/<uuid:run_id>/cancel/", publisher_backfill_views.cancel_view,
+         name="operations-publisher-backfill-cancel"),
+    path("publishing-monitor/backfill/runs/<uuid:run_id>/retry/", publisher_backfill_views.retry_view,
+         name="operations-publisher-backfill-retry"),
 ]

@@ -25,6 +25,10 @@ RUNTIME_MIGRATION = PROPOSED / "028_create_publisher_runtime_tables.sql"
 RUNTIME_ROLLBACK = PROPOSED / "028_create_publisher_runtime_tables.rollback.sql"
 RUNTIME_TABLES = ("bunny_publisher_part_decisions", "bunny_publisher_schedule", "bunny_publisher_alerts",
                   "bunny_publisher_reconciliation_runs")
+# Historical Backfill's 029 depends only on lecture_sessions; removed before everything else.
+BACKFILL_MIGRATION = PROPOSED / "029_create_publisher_backfill_tables.sql"
+BACKFILL_ROLLBACK = PROPOSED / "029_create_publisher_backfill_tables.rollback.sql"
+BACKFILL_TABLES = ("bunny_backfill_items", "bunny_backfill_runs")
 NEW_TABLES = ("bunny_videos", "bunny_caption_publications", "bunny_caption_current",
               "bunny_lms_match_evaluations", "bunny_lms_occurrence_links", "bunny_lms_occurrence_coverage",
               "bunny_publisher_jobs", "bunny_publisher_events", "bunny_publisher_heartbeats")
@@ -61,6 +65,24 @@ _DELETE_ORDER = ("bunny_publisher_events", "bunny_publisher_jobs", "bunny_publis
                  "bunny_caption_publications", "bunny_videos")
 
 
+def backfill_applied(connection) -> list[str]:
+    return [t for t in BACKFILL_TABLES
+            if connection.execute("SELECT to_regclass(%s)", (f"public.{t}",)).fetchone()[0] is not None]
+
+
+def remove_backfill_migration(admin) -> list[str]:
+    """Empty and roll back 029 on the isolated test database (its rollback refuses while runs exist)."""
+    assert_isolated(admin)
+    found = backfill_applied(admin)
+    if found:
+        for table in BACKFILL_TABLES:
+            if table in found:
+                admin.execute(f"DELETE FROM public.{table}")
+        admin.execute(BACKFILL_ROLLBACK.read_text(encoding="utf-8"))
+        assert backfill_applied(admin) == []
+    return found
+
+
 def runtime_applied(connection) -> list[str]:
     return [t for t in RUNTIME_TABLES
             if connection.execute("SELECT to_regclass(%s)", (f"public.{t}",)).fetchone()[0] is not None]
@@ -82,6 +104,7 @@ def reset_proposed_migrations(url: str) -> list[str]:
     import psycopg
     with psycopg.connect(url, autocommit=True) as admin:
         assert_isolated(admin)
+        backfill = remove_backfill_migration(admin)
         runtime = runtime_applied(admin)
         if runtime:
             for table in RUNTIME_TABLES:
@@ -104,4 +127,4 @@ def reset_proposed_migrations(url: str) -> list[str]:
             for path in ROLLBACKS:
                 admin.execute(path.read_text(encoding="utf-8"))
             assert applied(admin) == []
-        return runtime + recording + found
+        return backfill + runtime + recording + found

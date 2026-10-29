@@ -146,6 +146,12 @@ class PublisherConfig:
     max_import_generations: int = 3
     duration_tolerance_seconds: float = 2.0
     shutdown_grace_seconds: float = 120.0
+    # -- historical backfill (app/publisher/backfill.py; runs only when an operator confirms one) -----
+    backfill_max_days: int = 31                     # inclusive days per run
+    backfill_batch_size: int = 10                   # lectures a run starts per tick
+    backfill_max_active: int = 20                   # lectures of a run in progress at once
+    backfill_max_imports: int = 1                   # historical IMPORT_VIDEO jobs live at once
+    backfill_interval: timedelta = timedelta(seconds=60)
     # -- alerts (prepared; delivery is not enabled in this phase) -------------------
     alert_destination: str = ""
     alert_delivery_enabled: bool = False
@@ -211,6 +217,12 @@ class PublisherConfig:
             found.append("PUBLISHER_MAX_IMPORTS_IN_FLIGHT must be 1..10")
         if not 1 <= self.lookback_days <= 14:
             found.append("PUBLISHER_LOOKBACK_DAYS must be 1..14")
+        if not 1 <= self.backfill_max_days <= 366:
+            found.append("PUBLISHER_BACKFILL_MAX_DAYS must be 1..366")
+        if not 1 <= self.backfill_batch_size <= 100 or not 1 <= self.backfill_max_active <= 200:
+            found.append("PUBLISHER_BACKFILL_BATCH_SIZE must be 1..100 and PUBLISHER_BACKFILL_MAX_ACTIVE 1..200")
+        if not 1 <= self.backfill_max_imports <= self.max_imports_in_flight:
+            found.append("PUBLISHER_BACKFILL_MAX_IMPORTS must be 1..PUBLISHER_MAX_IMPORTS_IN_FLIGHT")
         if self.discovery_interval < timedelta(minutes=1):
             found.append("PUBLISHER_DISCOVERY_INTERVAL_SECONDS must be >= 60")
         if self.alert_delivery_enabled:
@@ -264,6 +276,9 @@ class PublisherConfig:
             "auto_release": self.auto_release,
             "lookback_days": self.lookback_days, "workers": self.workers,
             "max_imports_in_flight": self.max_imports_in_flight,
+            "backfill": {"max_days": self.backfill_max_days, "batch_size": self.backfill_batch_size,
+                         "max_active": self.backfill_max_active, "max_imports": self.backfill_max_imports,
+                         "interval_seconds": self.backfill_interval.total_seconds()},
             "discovery_interval_seconds": self.discovery_interval.total_seconds(),
             "light_reconcile_interval_hours": self.light_reconcile_interval.total_seconds() / 3600,
             "full_reconcile_at_cairo": self.full_reconcile_at.isoformat(timespec="minutes"),
@@ -345,6 +360,11 @@ class PublisherConfig:
             job_lease_seconds=number("PUBLISHER_JOB_LEASE_SECONDS", 900),
             encoding_stall_after=timedelta(hours=number("PUBLISHER_ENCODING_STALL_HOURS", 6)),
             max_import_generations=number("PUBLISHER_MAX_IMPORT_GENERATIONS", 3),
+            backfill_max_days=number("PUBLISHER_BACKFILL_MAX_DAYS", 31),
+            backfill_batch_size=number("PUBLISHER_BACKFILL_BATCH_SIZE", 10),
+            backfill_max_active=number("PUBLISHER_BACKFILL_MAX_ACTIVE", 20),
+            backfill_max_imports=number("PUBLISHER_BACKFILL_MAX_IMPORTS", 1),
+            backfill_interval=timedelta(seconds=number("PUBLISHER_BACKFILL_INTERVAL_SECONDS", 60)),
             alert_destination=text("PUBLISHER_ALERT_DESTINATION"),
             alert_delivery_enabled=flag("PUBLISHER_ALERT_DELIVERY_ENABLED"))
 

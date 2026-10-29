@@ -100,8 +100,11 @@ def build_daemon(config: PublisherConfig, *, graph=None, bunny=None, core=None, 
         policy, library = DeliveryPolicy.from_config(config), config.library_id
         auto_releaser = AutoReleaser(config=config, connect=connect,
                                      security=lambda: read_delivery_security(core, library, policy))
+    from app.publisher.backfill import HistoricalBackfill
+    # Idle until an operator confirms a run in the Publishing Monitor; nothing historical starts by itself.
+    backfill = HistoricalBackfill(config=config, connect=connect, planner=planner, **kwargs)
     return PublisherDaemon(config=config, connect=connect, handlers=handlers, planner=planner,
-                           reconciler=reconciler, auto_releaser=auto_releaser, **kwargs)
+                           reconciler=reconciler, auto_releaser=auto_releaser, backfill=backfill, **kwargs)
 
 
 def _cdn_open(request, timeout):

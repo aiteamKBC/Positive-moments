@@ -6,6 +6,8 @@ The continuous publisher daemon: one supervised process, 24/7.
                          AUTO_RELEASE     every 5 min, only when PUBLISHER_AUTO_RELEASE=true (auto_release.py)
                          RECONCILE_LIGHT  every 6 h
                          RECONCILE_FULL   daily at 05:00 Africa/Cairo (+ catch-up, Bunny scan, digest)
+                         HISTORICAL_BACKFILL every minute, LAST in the tick: advances an operator-confirmed
+                                          historical run one bounded step (backfill.py); idle without one
     N worker threads   claim one job (FOR UPDATE SKIP LOCKED + lease) -> its handler -> repeat
 
 Periodic tasks are due by what bunny_publisher_schedule says ran last, so a daemon
@@ -39,6 +41,7 @@ log = logging.getLogger(__name__)
 DAEMON_VERSION = "publisher_daemon_v1"
 DISCOVERY, RECONCILE_LIGHT, RECONCILE_FULL = "DISCOVERY", "RECONCILE_LIGHT", "RECONCILE_FULL"
 AUTO_RELEASE = "AUTO_RELEASE"                 # only when an AutoReleaser is configured (off by default)
+HISTORICAL_BACKFILL = "HISTORICAL_BACKFILL"   # only when a HistoricalBackfill coordinator is configured
 TASK_LOCK_NAMESPACE = 0x4B42_5054            # "KBPT"
 TRACK_KINDS = ("ACQUIRE_TRANSCRIPT", "RESOLVE_RECORDING")
 BUNNY_KINDS = ("IMPORT_VIDEO", "POLL_ENCODING", "PUBLISH_CAPTION")
@@ -55,13 +58,14 @@ def last_full_boundary(now: datetime, at) -> datetime:
 
 class PublisherDaemon:
     def __init__(self, *, config, connect, handlers: dict, planner, reconciler, queue=None, clock=None,
-                 identity: str | None = None, auto_releaser=None):
+                 identity: str | None = None, auto_releaser=None, backfill=None):
         self.config = config
         self.connect = connect
         self.handlers = dict(handlers)
         self.planner = planner
         self.reconciler = reconciler
         self.auto_releaser = auto_releaser
+        self.backfill = backfill
         self.queue = queue or PublisherQueueRepository()
         self.schedule = PublisherScheduleRepository()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -149,6 +153,9 @@ class PublisherDaemon:
         if started(RECONCILE_LIGHT) is None or now - started(RECONCILE_LIGHT) >= self.config.light_reconcile_interval:
             if RECONCILE_FULL not in due:            # FULL includes everything LIGHT checks
                 due.append(RECONCILE_LIGHT)
+        if self.backfill is not None and (started(HISTORICAL_BACKFILL) is None or now - started(HISTORICAL_BACKFILL)
+                                          >= self.config.backfill_interval):
+            due.append(HISTORICAL_BACKFILL)          # last: daily discovery, release and reconciliation first
         return due
 
     def run_task(self, task: str) -> dict:
@@ -181,6 +188,8 @@ class PublisherDaemon:
             return self.planner.tick(calendar_days=self._discovery_days(previous, now))
         if task == AUTO_RELEASE:
             return self.auto_releaser.run()
+        if task == HISTORICAL_BACKFILL:
+            return self.backfill.run()
         if task == RECONCILE_LIGHT:
             return self.reconciler.run("LIGHT")
         return self.reconciler.run("FULL")

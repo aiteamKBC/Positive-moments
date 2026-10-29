@@ -4,6 +4,7 @@ media runner; deliberately not a sub-command of app.cli.main).
 
     python -m app.cli.publisher validate-config [--env-file F] [--check-library]
     python -m app.cli.publisher db-smoke        [--env-file F]   (read-only session + advisory-lock check)
+    python -m app.cli.publisher backfill-schema [--apply]         (Historical Backfill tables, migration 029)
     python -m app.cli.publisher run             [--env-file F] [--once] [--max-iterations N]
     python -m app.cli.publisher status          [--env-file F]
     python -m app.cli.publisher lecture         --lecture-id ID
@@ -40,6 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="read the Bunny library settings (read-only core API) in a write mode")
     sub.add_parser("db-smoke", help="read-only check that PUBLISHER_DATABASE_URL is a direct session "
                                     "where session advisory locks hold (writes nothing)")
+    schema = sub.add_parser("backfill-schema", help="read-only check of the Historical Backfill tables "
+                                                    "(proposed migration 029); --apply installs them once")
+    schema.add_argument("--apply", action="store_true", help="apply 029 when neither table exists (additive)")
     run = sub.add_parser("run", help="the supervised daemon")
     run.add_argument("--once", action="store_true", help="one scheduler tick, then drain the queue, then exit")
     run.add_argument("--max-iterations", type=int, default=None)
@@ -138,6 +142,16 @@ def main(argv=None) -> int:
             from app.publisher.smoke import run_db_smoke
             report = run_db_smoke(_config(args, validate=False).database_url)
             return _print(report, ok=report["ok"])
+        if args.command == "backfill-schema":
+            from app.publisher import backfill
+            config = _config(args, validate=False)
+            if not args.apply:
+                report = _read(config, backfill.schema_status)
+                return _print(report, ok=report["installed"])
+            with _connect(config) as connection:
+                connection.autocommit = True
+                report = backfill.install_schema(connection)
+            return _print(report, ok=report["installed"])
         config = _config(args)
         if args.command == "run":
             from app.publisher.runtime import build_daemon

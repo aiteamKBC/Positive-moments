@@ -22,7 +22,7 @@ Validated by the 2026-10-23 live pilot: 7 of 7 LMS-verified lectures imported wi
 | | |
 |---|---|
 | Database | AiTeamKBC on the Neon **DIRECT** endpoint (session advisory locks). A pooled host is refused at startup. |
-| Schema | Migrations 024–028 are **already applied** in production (2026-10-23, `bunny_*` names). **Do not re-run them.** No new migration is needed. |
+| Schema | Migrations 024–028 are **already applied** in production (2026-10-23, `bunny_*` names). **Do not re-run them.** Historical Backfill (2026-10-29) adds **029** (`bunny_backfill_runs`, `bunny_backfill_items`; additive): see section 9. |
 | Mode | `STAGING_WRITE` on staging library **786045**. Production library writes stay disabled (`PUBLISHER_PRODUCTION_WRITE_ENABLED=false`). 785080 is refused in code. |
 | Scope | `PUBLISHER_START_DATE=2026-10-23` (go-live) and an empty `PUBLISHER_END_DATE`, so the day window rolls. Earlier lectures are historical-backfill scope and are never planned. |
 | Instances | Exactly **one**. The local pilot daemon was stopped on 2026-10-23 at 16:59 Cairo; never start it again while the VPS service runs. |
@@ -159,3 +159,38 @@ The read-only API for the future dashboard tab lives at `/operations/publisher/s
 - **AI in Project Control 2026** (2026-10-23): `NO_LMS_SESSION`. Its recording and transcript are stored, and it isn't imported. The LMS team is investigating. No LMS occurrence is faked or bypassed.
 - **LMS session `OCC-C3535F99…`** (Marketing Executive L4, 2026-10-23 11:00): `LMS_ONLY_PENDING`; no Teams lecture was discovered for it.
 - **Orphan staging video** `be785a53-…` (2026-10-21, the single-video pilot): reported as `ORPHAN_BUNNY_VIDEO` and deliberately untouched.
+
+## 9. Historical Backfill (Publishing Monitor → Historical Backfill tab)
+
+Publishes the lectures of a past, **inclusive** range of Cairo dates through the same pipeline: LMS matching, the two tracks, the longest-recording selection, Bunny import, encoding, captions and AUTO_RELEASE. Code: `app/publisher/backfill.py`.
+
+- **Nothing starts by itself.** The daemon's `HISTORICAL_BACKFILL` task (every minute, after the daily tasks) is idle until an operator confirms a run in the monitor.
+- **Daily publishing comes first.** Historical jobs run below every daily priority, and at most `PUBLISHER_BACKFILL_MAX_IMPORTS` (default 1) historical imports are live at once. None is added while a daily import is waiting.
+- **Unchanged:** the daily schedule, the lookback and the start date.
+- **Optional settings** in `publisher.env`, with defaults:
+
+  | Setting | Default |
+  |---|---|
+  | `PUBLISHER_BACKFILL_MAX_DAYS` | 31 |
+  | `PUBLISHER_BACKFILL_BATCH_SIZE` | 10 |
+  | `PUBLISHER_BACKFILL_MAX_ACTIVE` | 20 |
+  | `PUBLISHER_BACKFILL_MAX_IMPORTS` | 1 |
+  | `PUBLISHER_BACKFILL_INTERVAL_SECONDS` | 60 |
+
+  The web reads `PUBLISHER_BACKFILL_MAX_DAYS` (default 31).
+- **Preview** is read-only: a READ ONLY transaction from the stored publisher state, with no Graph, LMS or Bunny call. Any signed-in user can preview.
+- **Start, cancel and retry** need the Django group `kbc_publisher_backfill_operators`. Grant it with `backend/venv/bin/python backend/manage.py publisher_backfill_operator --grant <username>` (`--list`, `--revoke`).
+- **Schema 029:**
+  - check (read-only): `python -m app.cli.publisher --env-file backend/config/publisher.env backfill-schema`;
+  - install once: add `--apply`.
+
+  Additive. Its rollback refuses while runs exist.
+- **Cancel** stops pending lectures and the run's imports that have not reached Bunny (audited `OPERATOR_CANCEL`). Anything already submitted, encoding or captioning finishes normally.
+- **Audit events** in `bunny_publisher_events`:
+  - `HISTORICAL_BACKFILL_REQUESTED`
+  - `_STARTED`
+  - `_COMPLETED`
+  - `_CANCEL_REQUESTED`
+  - `_CANCELLED`
+  - `_RETRY`
+

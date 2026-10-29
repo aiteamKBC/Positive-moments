@@ -108,8 +108,9 @@ class _LectureJobHandler:
             self.enqueue(connection, outcome.lecture_id, not_before=outcome.next_refresh_at, refresh=True)
         if owned and outcome.kind == self.success_kind:
             for job_kind, part in getattr(outcome, "follow_ups", None) or ():
+                priority, payload = follow_up(job, job_kind)
                 self.queue.enqueue(connection, job_kind=job_kind, subject_key=part_subject_key(outcome.lecture_id, part),
-                                   lecture_id=outcome.lecture_id, priority=BUNNY_PRIORITY.get(job_kind, LIVE_PRIORITY),
+                                   lecture_id=outcome.lecture_id, priority=priority, payload=payload,
                                    max_attempts=MAX_ATTEMPTS)
 
 
@@ -138,6 +139,21 @@ class RecordingJobHandler(_LectureJobHandler):
 
 
 BUNNY_PRIORITY = {"IMPORT_VIDEO": 80, "POLL_ENCODING": 60, "PUBLISH_CAPTION": 90}
+# Historical Backfill work (app/publisher/backfill.py): below EVERY daily priority (live 100, Bunny 60-90,
+# refresh 20), so a worker always claims due daily work first. The run's id rides in the payload and is
+# carried to each follow-up, so the whole chain keeps the lower priority; daily jobs carry no tag and
+# their follow-ups are unchanged.
+HISTORICAL_TAG = "historical_run_id"
+HISTORICAL_PRIORITY = {"ACQUIRE_TRANSCRIPT": 10, "RESOLVE_RECORDING": 12, "IMPORT_VIDEO": 8, "POLL_ENCODING": 6,
+                       "PUBLISH_CAPTION": 9}
+
+
+def follow_up(job: dict, job_kind: str) -> tuple[int, dict | None]:
+    """(priority, payload) of the job a finished `job` enqueues next."""
+    tag = (job.get("payload") or {}).get(HISTORICAL_TAG)
+    if tag:
+        return HISTORICAL_PRIORITY.get(job_kind, min(HISTORICAL_PRIORITY.values())), {HISTORICAL_TAG: str(tag)}
+    return BUNNY_PRIORITY.get(job_kind, LIVE_PRIORITY), None
 BUNNY_EVENT_PREFIX = {"IMPORT_VIDEO": "IMPORT", "POLL_ENCODING": "ENCODING", "PUBLISH_CAPTION": "CAPTION"}
 
 
