@@ -106,7 +106,7 @@ def test_a_verified_located_lecture_without_work_is_queued_for_import():
                          "selection_rule": "longest_recording", "selected_duration_seconds": 7348.5}}
     preview = _preview([_fact(match="VERIFIED", recording="LOCATED")], recordings)
     row = preview["lectures"][0]
-    assert row["category"] == backfill.READY_TO_QUEUE and row["proposed_action"] == "QUEUE"
+    assert row["category"] == backfill.RESUME_REQUIRED and row["proposed_action"] == "RESUME"
     assert row["recording"]["selected_part"] == 2 and row["recording"]["selected_duration_seconds"] == 7348.5
     assert preview["summary"]["estimated_imports"] == {"known": 1, "possible": 0, "upper_bound": 1}
     assert preview["summary"]["known_selected_duration_seconds"] == 7348.5
@@ -155,9 +155,10 @@ def test_the_preview_summarises_every_day_of_the_range_including_empty_days():
                         _fact("C", day=date(2026, 9, 10), match="NO_LMS_SESSION")])
     per_day = preview["summary"]["per_day"]
     assert list(per_day) == [f"2026-09-{d:02d}" for d in range(1, 11)]
-    assert per_day["2026-09-01"] == {"total": 1, "eligible": 1}
-    assert per_day["2026-09-10"] == {"total": 2, "eligible": 1}
-    assert per_day["2026-09-05"] == {"total": 0, "eligible": 0}
+    assert per_day["2026-09-01"] == {"total": 1, "eligible": 1, "teams": 0, "discovery": "NOT_AVAILABLE"}
+    assert per_day["2026-09-10"] == {"total": 2, "eligible": 1, "teams": 0, "discovery": "NOT_AVAILABLE"}
+    assert per_day["2026-09-05"] == {"total": 0, "eligible": 0, "teams": 0, "discovery": "NOT_AVAILABLE"}
+    assert preview["complete"] is False                    # no source discovery: never presented as complete
     assert preview["summary"]["total"] == 3 and preview["summary"]["eligible"] == 2
     assert preview["summary"]["blocked"] == 1 and preview["data_source"] == "DATABASE"
     assert {r["data_source"] for r in preview["lectures"]} == {"DATABASE"}
@@ -242,3 +243,67 @@ def test_the_backfill_task_is_scheduled_last_and_only_with_a_coordinator():
     plain = PublisherDaemon(config=config, connect=None, handlers={}, planner=None, reconciler=None)
     plain.schedule = SimpleNamespace(all=lambda c: [])
     assert HISTORICAL_BACKFILL not in plain.due_tasks(connection, NOW)
+
+
+# --------------------------------------------------------------------------- live discovery in the preview
+def _entry(lecture_id, *, day="2026-09-03", lms=None, resolved=True, end=None):
+    start = f"{day}T09:00:00+00:00"
+    return {"lecture_id": lecture_id, "session_date": day, "subject": "Synthetic", "module": "Synthetic",
+            "scheduled_start": start, "scheduled_end": end or f"{day}T11:00:00+00:00", "meeting_resolved": resolved,
+            "lms_dry": lms, "lms_occurrence_id": "OCC-1" if lms == "VERIFIED" else None}
+
+
+def _coverage(status="COMPLETE"):
+    return {d.isoformat(): {"status": status} for d in backfill.business_days(date(2026, 9, 1), date(2026, 9, 10))}
+
+
+def test_lectures_found_only_in_teams_are_new_and_eligible_with_the_rest_checked_at_run():
+    preview = _preview([], discovered={"N1": _entry("N1", lms="VERIFIED"), "N2": _entry("N2")},
+                       coverage=_coverage())
+    rows = {r["lecture_id"]: r for r in preview["lectures"]}
+    assert {r["origin"] for r in rows.values()} == {backfill.TEAMS_NEW}
+    assert rows["N1"]["category"] == backfill.READY_TO_QUEUE and rows["N1"]["verification"] == {
+        "teams": "LIVE", "lms": "LIVE_DRY_RUN", "recording": "TO_BE_VERIFIED_AT_RUN"}
+    assert rows["N2"]["lms"]["status"] == "UNKNOWN" and rows["N2"]["verification"]["lms"] == "TO_BE_VERIFIED_AT_RUN"
+    summary = preview["summary"]
+    assert (summary["teams_discovered"], summary["new"], summary["existing"], summary["eligible"]) == (2, 2, 0, 2)
+    assert summary["estimated_imports"] == {"known": 0, "possible": 2, "upper_bound": 2}
+    assert preview["complete"] is True
+
+
+def test_new_lectures_without_lms_session_unresolved_meeting_or_not_ended_are_not_queued():
+    preview = _preview([], discovered={
+        "A": _entry("A", lms="NO_LMS_SESSION"), "B": _entry("B", resolved=False), "C": _entry("C", lms="TEST_EXCLUDED"),
+        "D": _entry("D", day="2026-09-10", end="2026-10-29T23:00:00+00:00")}, coverage=_coverage())
+    rows = {r["lecture_id"]: r["category"] for r in preview["lectures"]}
+    assert rows == {"A": backfill.MISSING_LMS_MATCH, "B": backfill.REVIEW_REQUIRED, "C": backfill.SKIPPED,
+                    "D": backfill.SKIPPED}
+
+
+def test_an_existing_lecture_seen_in_teams_is_matched_by_identity_not_duplicated():
+    preview = _preview([_fact("L1")], discovered={"L1": _entry("L1", lms="NO_LMS_SESSION")}, coverage=_coverage())
+    [row] = preview["lectures"]
+    assert row["origin"] == backfill.TEAMS_EXISTING and row["category"] == backfill.MISSING_LMS_MATCH
+    assert row["basis"] == "DRY_RUN" and preview["summary"]["teams_discovered"] == 1
+
+
+def test_a_day_whose_discovery_failed_makes_the_preview_incomplete():
+    coverage = _coverage()
+    coverage["2026-09-04"] = {"status": "FAILED", "error": "CALENDAR_QUERY_ERROR"}
+    preview = _preview([_fact("L1")], discovered={}, coverage=coverage)
+    assert preview["complete"] is False and preview["summary"]["incomplete_days"] == ["2026-09-04"]
+    assert preview["summary"]["per_day"]["2026-09-04"]["discovery"] == "FAILED"
+
+
+def test_a_resumed_lecture_keeps_its_stage_and_an_untouched_one_starts_fresh():
+    videos = [{"part": 1, "import": "IDENTIFIED", "encoding": "IN_PROGRESS", "visibility": "HIDDEN"}]
+    resumed = _preview([_fact(match="VERIFIED", recording="LOCATED", videos=videos)])["lectures"][0]
+    assert resumed["category"] == backfill.RESUME_REQUIRED and "no re-upload" in resumed["reason"]
+    assert _category(_fact(match="VERIFIED")) == backfill.READY_TO_QUEUE
+
+
+def test_run_items_keep_origin_and_a_display_identity_without_urls():
+    preview = _preview([], discovered={"N1": _entry("N1", lms="VERIFIED")}, coverage=_coverage())
+    [item] = backfill.run_items(preview)
+    assert (item["origin"], item["status"]) == (backfill.TEAMS_NEW, "PENDING")
+    assert set(item["detail"]) == {"subject", "module", "scheduled_start", "scheduled_end"}

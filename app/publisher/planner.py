@@ -418,6 +418,21 @@ class CalendarDiscovery:
                 else None)
         return self._service
 
+    def preview_day(self, connection, day: date) -> tuple[dict, list]:
+        """
+        READ-ONLY discovery of one day (Historical Backfill preview): the same calendar, Aptem / LMS module
+        matching and meeting resolution as discover_day, with persist=False - no registry row and no
+        discovery-run row. Returns (summary, canonical Lecture candidates).
+        """
+        import psycopg
+        from app.publisher.config import DB_CONNECT_KWARGS
+        connect = self._aptem_connect or (lambda: psycopg.connect(self.config.aptem_database_url,
+                                                                  prepare_threshold=None, **DB_CONNECT_KWARGS))
+        found: list = []
+        with connect() as aptem:
+            summary = self.service.discover_day(connection, aptem, day, persist=False, candidates=found)
+        return summary, found
+
     def discover_day(self, connection, day: date) -> dict:
         import psycopg
         service = self.service

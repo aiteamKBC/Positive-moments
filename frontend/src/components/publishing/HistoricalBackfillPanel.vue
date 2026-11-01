@@ -2,13 +2,13 @@
 /**
  * Historical Backfill (inside the Lecture Publishing Monitor).
  *
- *   From / To (inclusive Cairo business dates) -> Preview Backfill (read-only, from the publisher's stored
- *   state) -> Run Backfill (operators only, after an explicit confirmation) -> the publisher service works
- *   through the run in the background, behind daily publishing.
+ *   From / To (inclusive Cairo business dates) -> Preview Backfill: the publisher service discovers the range
+ *   LIVE in Microsoft Teams, read-only (nothing is registered, queued or imported), and compares it with what
+ *   the publisher already holds -> Run Backfill (operators only, after an explicit confirmation, and only for a
+ *   COMPLETE preview) -> the service registers the Teams lectures and works through them behind daily publishing.
  *
- * Nothing on this page publishes anything itself: Run only records the confirmed run; cancel and retry only
- * record the operator's decision. Progress is re-read from the server, so it survives a page refresh or a
- * service restart, and the browser does not need to stay open.
+ * Nothing on this page publishes anything itself. Every state is re-read from the server, so a preview or a
+ * run survives a page refresh or a service restart, and the browser does not need to stay open.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -18,15 +18,16 @@ import EmptyState from '../EmptyState.vue'
 import SectionPanel from '../SectionPanel.vue'
 import StatusBadge from '../StatusBadge.vue'
 import {
-  cancelBackfill, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
+  cancelBackfill, getBackfillPreview, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
 } from '../../services/publishing'
 import type { BackfillPreview, BackfillRunDetail, BackfillRuns } from '../../types/backfill'
-import { CATEGORY, COUNTERS, backfillLabel, canRun, duration, rangeProblem } from '../../utils/backfill'
+import { CATEGORY, COUNTERS, VERIFICATION, backfillLabel, canRun, duration, rangeProblem } from '../../utils/backfill'
 import { businessDate, cairoDateTime, cairoTimeRange, sinceNow } from '../../utils/datetime'
 import { errorMessage } from '../../utils/format'
 import { label } from '../../utils/publishing'
 
 const POLL_MS = 15_000
+const PREVIEW_POLL_MS = 3_000
 
 const route = useRoute()
 const router = useRouter()
@@ -44,16 +45,21 @@ const preview = ref<BackfillPreview | null>(null)
 const previewing = ref(false)
 const previewError = ref('')
 const categoryFilter = ref('')
+const previewDone = computed(() => Boolean(preview.value?.preview.is_finished))
 const previewRows = computed(() => (preview.value?.lectures ?? [])
   .filter(r => !categoryFilter.value || r.category === categoryFilter.value))
 const runnable = computed(() => canRun(preview.value, dateFrom.value, dateTo.value, Boolean(runs.value?.operator),
   Boolean(runs.value?.active)))
 const runBlockedBecause = computed(() => {
-  if (!preview.value) return 'Preview the range first.'
-  if (preview.value.date_from !== dateFrom.value || preview.value.date_to !== dateTo.value) return 'The dates changed: preview again.'
+  const p = preview.value
+  if (!p) return 'Preview the range first.'
+  if (p.preview.date_from !== dateFrom.value || p.preview.date_to !== dateTo.value) return 'The dates changed: preview again.'
+  if (!p.preview.is_finished) return 'The preview is still discovering the range in Teams.'
+  if (!p.complete) return 'The preview is INCOMPLETE: not every day could be discovered in Teams. Preview again.'
+  if (!p.confirmable) return 'The preview is older than 30 minutes: preview again.'
   if (!runs.value?.operator) return 'Starting a backfill needs the publisher backfill operator role.'
   if (runs.value?.active) return 'Another historical backfill is running.'
-  if (!preview.value.summary.eligible) return 'No lecture in this range is eligible.'
+  if (!(p.summary?.eligible)) return 'No lecture in this range needs processing.'
   return ''
 })
 
@@ -71,6 +77,7 @@ const acting = ref(false)
 const actionMessage = ref('')
 const retryReason = ref('')
 let timer: ReturnType<typeof setInterval> | undefined
+let previewTimer: ReturnType<typeof setTimeout> | undefined
 
 async function loadRuns() {
   try {
@@ -91,19 +98,37 @@ async function loadDetail() {
   }
 }
 
+/** Follow a preview until the publisher service has discovered every day of it. */
+async function followPreview(previewId: string) {
+  if (previewTimer) clearTimeout(previewTimer)
+  try {
+    preview.value = await getBackfillPreview(previewId)
+    previewError.value = ''
+  } catch (caught) {
+    previewError.value = errorMessage(caught, 'The preview could not be read.')
+  }
+  if (preview.value && !preview.value.preview.is_finished) {
+    previewTimer = setTimeout(() => followPreview(previewId), PREVIEW_POLL_MS)
+  } else {
+    previewing.value = false
+  }
+}
+
 async function runPreview() {
   if (problem.value) return
   previewing.value = true
   previewError.value = ''
   startError.value = ''
+  categoryFilter.value = ''
   try {
-    preview.value = await previewBackfill(dateFrom.value, dateTo.value)
-    categoryFilter.value = ''
+    const answer = await previewBackfill(dateFrom.value, dateTo.value)
+    preview.value = answer
+    syncQuery()
+    await followPreview(answer.preview.run_id)
   } catch (caught) {
     preview.value = null
-    previewError.value = errorMessage(caught, 'The preview could not be produced.')
-  } finally {
     previewing.value = false
+    previewError.value = errorMessage(caught, 'The preview could not be requested.')
   }
 }
 
@@ -158,7 +183,7 @@ async function retryRun() {
 
 function syncQuery() {
   router.replace({ query: { ...route.query, bf_from: dateFrom.value || undefined, bf_to: dateTo.value || undefined,
-    run: selectedRun.value ?? undefined } })
+    run: selectedRun.value ?? undefined, preview: preview.value?.preview.run_id ?? undefined } })
 }
 
 watch([dateFrom, dateTo], syncQuery)
@@ -169,6 +194,17 @@ onMounted(async () => {
   if (!dateFrom.value) dateFrom.value = today.value
   if (!dateTo.value) dateTo.value = dateFrom.value
   if (!selectedRun.value && runs.value?.active) selectedRun.value = runs.value.active.run_id
+  // A preview survives a refresh: the one named in the URL, or the one still being discovered.
+  const latest = runs.value?.latest_preview
+  const resume = query('preview') || (latest && !latest.is_finished ? latest.run_id : '')
+  if (resume) {
+    previewing.value = true
+    await followPreview(resume)
+    if (preview.value) {
+      dateFrom.value = preview.value.preview.date_from
+      dateTo.value = preview.value.preview.date_to
+    }
+  }
   await loadDetail()
   timer = setInterval(() => {
     if (document.visibilityState !== 'visible') return
@@ -176,24 +212,32 @@ onMounted(async () => {
     if (selectedRun.value && !detail.value?.run.is_finished) loadDetail()
   }, POLL_MS)
 })
-onBeforeUnmount(() => { if (timer) clearInterval(timer) })
+onBeforeUnmount(() => {
+  if (timer) clearInterval(timer)
+  if (previewTimer) clearTimeout(previewTimer)
+})
 
 const summaryTiles = computed(() => {
   const s = preview.value?.summary
   if (!s) return []
   return [
-    { label: 'Lectures discovered', value: String(s.total) },
-    { label: 'Eligible', value: String(s.eligible), tone: s.eligible ? 'text-brand-700' : '' },
+    { label: 'Teams lectures discovered', value: String(s.teams_discovered) },
+    { label: 'Existing lectures', value: String(s.existing) },
+    { label: 'Newly discovered', value: String(s.new), tone: s.new ? 'text-brand-700' : '' },
     { label: 'Already published', value: String(s.already_published) },
+    { label: 'Ready to process', value: String(s.ready), tone: s.ready ? 'text-brand-700' : '' },
+    { label: 'Incomplete · resume', value: String(s.resume), tone: s.resume ? 'text-brand-700' : '' },
     { label: 'Already processing', value: String(s.already_processing) },
-    { label: 'Blocked', value: String(s.blocked), tone: s.blocked ? 'text-orange-700' : '' },
-    { label: 'Skipped', value: String(s.skipped) },
+    { label: 'Missing LMS match', value: String(s.missing_lms), tone: s.missing_lms ? 'text-orange-700' : '' },
+    { label: 'Missing recording', value: String(s.missing_recording), tone: s.missing_recording ? 'text-orange-700' : '' },
+    { label: 'Needs review', value: String(s.review), tone: s.review ? 'text-orange-700' : '' },
     { label: 'Est. new Bunny imports', value: s.estimated_imports.possible
       ? `${s.estimated_imports.known}–${s.estimated_imports.upper_bound}` : String(s.estimated_imports.known) },
     { label: 'Known selected duration', value: duration(s.known_selected_duration_seconds) },
   ]
 })
 const shortId = (id: string) => id.slice(0, 8)
+const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
 </script>
 
 <template>
@@ -210,7 +254,7 @@ const shortId = (id: string) => id.slice(0, 8)
           <input v-model="dateTo" type="date" class="field field-sm" :min="dateFrom" :max="today" data-test="bf-to">
         </label>
         <button type="button" class="btn-secondary" :disabled="Boolean(problem) || previewing" data-test="bf-preview" @click="runPreview">
-          <AppIcon name="search" :size="16" /> {{ previewing ? 'Previewing…' : 'Preview Backfill' }}
+          <AppIcon name="search" :size="16" /> {{ previewing ? 'Discovering…' : 'Preview Backfill' }}
         </button>
         <button
           type="button" class="btn-primary" :disabled="!runnable" :title="runBlockedBecause" data-test="bf-run"
@@ -221,34 +265,49 @@ const shortId = (id: string) => id.slice(0, 8)
       </div>
       <p class="mt-2 text-xs text-muted">
         Both dates are included. Dates are Cairo business dates (the publisher's lecture date); at most {{ maxDays }} days per run.
-        Preview reads the publisher's stored state only — it never imports, queues, releases or calls Teams or Bunny.
+        Preview discovers the range live in Microsoft Teams and compares it with the publisher's records — read-only: nothing is
+        registered, queued, imported or released.
         <template v-if="runs && !runs.operator"> You can preview; starting a run needs the backfill operator role.</template>
       </p>
       <p v-if="problem && (dateFrom || dateTo)" class="notice-error mt-2" data-test="bf-problem">{{ problem }}</p>
       <p v-if="previewError" class="notice-error mt-2">{{ previewError }}</p>
-      <p v-if="!runnable && preview && runBlockedBecause" class="mt-2 text-xs text-muted">{{ runBlockedBecause }}</p>
+      <p v-if="!runnable && preview && runBlockedBecause" class="mt-2 text-xs text-muted" data-test="bf-blocked">{{ runBlockedBecause }}</p>
+    </section>
+
+    <!-- Preview progress and coverage -->
+    <section v-if="preview" class="surface px-4 py-3" aria-label="Teams discovery coverage" data-test="bf-coverage">
+      <div class="flex flex-wrap items-center gap-2">
+        <p class="tile-label">Teams discovery</p>
+        <StatusBadge v-bind="backfillLabel.run(preview.preview.status)" />
+        <span class="text-xs text-muted">{{ preview.preview.days_discovered }} / {{ preview.preview.coverage.length }} days discovered</span>
+      </div>
+      <div class="mt-2 flex flex-wrap gap-1.5">
+        <span
+          v-for="day in preview.preview.coverage" :key="day.date" class="chip tabular-nums"
+          :class="day.status === 'COMPLETE' ? '' : day.status === 'PENDING' ? 'opacity-60' : 'text-rose-700'"
+          :title="day.error ? `${day.status}: ${day.error}` : day.status"
+        >
+          {{ businessDate(day.date) }} · {{ backfillLabel.coverage(day.status).label }}<template v-if="day.status === 'COMPLETE' && preview.summary"> · {{ preview.summary.per_day[day.date]?.eligible ?? 0 }}/{{ preview.summary.per_day[day.date]?.total ?? 0 }}</template>
+        </span>
+      </div>
+      <p v-if="previewDone && !preview.complete" class="notice-error mt-2" role="alert" data-test="bf-incomplete">
+        INCOMPLETE preview: {{ preview.summary?.incomplete_days?.length ?? 0 }} day(s) could not be discovered in Teams
+        ({{ (preview.summary?.incomplete_days ?? []).map(d => businessDate(d)).join(', ') }}). The lists below are not the whole range and cannot be run.
+      </p>
     </section>
 
     <!-- Preview -->
-    <template v-if="preview">
-      <section class="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-8" aria-label="Preview summary">
+    <template v-if="preview && previewDone && preview.summary">
+      <section class="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-6" aria-label="Preview summary">
         <div v-for="tile in summaryTiles" :key="tile.label" class="tile">
           <p class="tile-label">{{ tile.label }}</p>
           <p class="tile-value" :class="tile.tone">{{ tile.value }}</p>
         </div>
       </section>
-      <section class="surface px-4 py-3" aria-label="Lectures per day">
-        <p class="tile-label">Lectures per day (eligible / total)</p>
-        <div class="mt-2 flex flex-wrap gap-1.5">
-          <span v-for="(day, key) in preview.summary.per_day" :key="key" class="chip tabular-nums" :class="day.total ? '' : 'opacity-60'">
-            {{ businessDate(String(key)) }} · {{ day.eligible }}/{{ day.total }}
-          </span>
-        </div>
-      </section>
 
       <SectionPanel
         title="Preview" :count="preview.summary.total" flush
-        :note="`Cached publisher data (database), generated ${cairoDateTime(preview.generated_at)}. Live Teams, LMS and Bunny verification happens in the run, through the publisher's own workers.`"
+        :note="`Teams checked live (read-only); LMS match checked as a dry run; recordings, imports and releases are verified only by the run. ${preview.complete ? 'Every day of the range was discovered.' : 'INCOMPLETE: some days are missing.'}`"
       >
         <div class="flex flex-wrap items-center gap-2 px-4 py-2">
           <label class="filter-field">
@@ -266,6 +325,7 @@ const shortId = (id: string) => id.slice(0, 8)
               <tr>
                 <th scope="col">Lecture</th>
                 <th scope="col">Date</th>
+                <th scope="col">Origin</th>
                 <th scope="col">LMS Match</th>
                 <th scope="col">Recording</th>
                 <th scope="col">Selected Duration</th>
@@ -281,11 +341,16 @@ const shortId = (id: string) => id.slice(0, 8)
                   <p class="text-2xs text-muted">{{ cairoTimeRange(row.scheduled_start, row.scheduled_end) }}<template v-if="row.module"> · {{ row.module }}</template></p>
                 </td>
                 <td class="whitespace-nowrap">{{ businessDate(row.session_date) }}</td>
-                <td><StatusBadge v-bind="label.lms(row.lms.status)" /></td>
+                <td><StatusBadge v-bind="backfillLabel.origin(row.origin)" /></td>
+                <td>
+                  <StatusBadge v-bind="label.lms(row.lms.status)" />
+                  <p class="text-2xs text-muted">{{ verified(row.verification?.lms) }}</p>
+                </td>
                 <td>
                   <StatusBadge v-bind="label.recording(row.recording.status)" :title="row.recording.reason" />
                   <p class="text-2xs text-muted">
-                    {{ row.recording.verified_count }} verified<template v-if="row.recording.selected_part"> · part {{ row.recording.selected_part }} selected</template>
+                    <template v-if="row.verification?.recording === 'STORED'">{{ row.recording.verified_count }} verified<template v-if="row.recording.selected_part"> · part {{ row.recording.selected_part }} selected</template></template>
+                    <template v-else>{{ verified(row.verification?.recording) }}</template>
                   </p>
                 </td>
                 <td class="whitespace-nowrap tabular-nums">{{ duration(row.recording.selected_duration_seconds) }}</td>
@@ -338,6 +403,7 @@ const shortId = (id: string) => id.slice(0, 8)
               <td>
                 <StatusBadge v-bind="backfillLabel.run(run.status)" />
                 <p v-if="run.cancel_requested && !run.is_finished" class="text-2xs text-muted">cancelling…</p>
+                <p v-else-if="!run.is_finished && run.days_discovered < run.coverage.length" class="text-2xs text-muted">discovering Teams {{ run.days_discovered }}/{{ run.coverage.length }}</p>
               </td>
               <td class="tabular-nums text-xs">
                 <template v-if="run.counts">{{ run.counts.completed }} done · {{ run.counts.processing }} in progress · {{ run.counts.pending }} pending · {{ run.counts.blocked + run.counts.failed }} need attention</template>
@@ -357,6 +423,7 @@ const shortId = (id: string) => id.slice(0, 8)
       <template v-else-if="detail">
         <div class="flex flex-wrap items-center gap-3 px-4 py-3">
           <StatusBadge v-bind="backfillLabel.run(detail.run.status)" />
+          <span class="text-xs text-muted">Teams discovery {{ detail.run.days_discovered }}/{{ detail.run.coverage.length }} days</span>
           <dl class="flex flex-wrap gap-x-5 gap-y-1 text-sm" data-test="bf-counters">
             <div v-for="counter in COUNTERS" :key="counter.key" class="flex items-baseline gap-1.5">
               <dt class="text-2xs uppercase tracking-wide text-muted">{{ counter.label }}</dt>
@@ -395,6 +462,7 @@ const shortId = (id: string) => id.slice(0, 8)
             <thead>
               <tr>
                 <th scope="col">Lecture</th>
+                <th scope="col">Origin</th>
                 <th scope="col">Status</th>
                 <th scope="col">Teams → LMS Match → Bunny Import → Encoding → Captions → Release → LMS Playback</th>
               </tr>
@@ -405,12 +473,16 @@ const shortId = (id: string) => id.slice(0, 8)
                   <p class="font-semibold text-ink">{{ lecture.subject ?? 'Lecture' }}</p>
                   <p class="text-2xs text-muted">{{ businessDate(lecture.session_date) }} · {{ cairoTimeRange(lecture.scheduled_start, lecture.scheduled_end) }}</p>
                 </td>
+                <td>
+                  <StatusBadge v-bind="backfillLabel.origin(lecture.origin)" />
+                  <p v-if="!lecture.registered" class="text-2xs text-muted">not registered yet</p>
+                </td>
                 <td class="min-w-[11rem]">
                   <StatusBadge v-bind="backfillLabel.item(lecture.status)" />
                   <p v-if="lecture.reason" class="mt-0.5 max-w-xs text-2xs leading-snug text-muted">{{ lecture.reason }}</p>
                 </td>
                 <td>
-                  <ol class="flex flex-wrap items-center gap-1" :aria-label="`Pipeline of ${lecture.subject ?? 'lecture'}`">
+                  <ol v-if="lecture.pipeline.length" class="flex flex-wrap items-center gap-1" :aria-label="`Pipeline of ${lecture.subject ?? 'lecture'}`">
                     <li
                       v-for="step in lecture.pipeline" :key="step.key"
                       class="rounded px-1.5 py-0.5 text-2xs font-semibold"
@@ -420,6 +492,7 @@ const shortId = (id: string) => id.slice(0, 8)
                       {{ step.label }}
                     </li>
                   </ol>
+                  <span v-else class="text-2xs text-muted">Registered from Teams when the run discovers its day.</span>
                 </td>
               </tr>
             </tbody>
@@ -431,7 +504,7 @@ const shortId = (id: string) => id.slice(0, 8)
 
     <!-- Confirmation -->
     <div
-      v-if="confirming && preview" class="fixed inset-0 z-50 grid place-items-center bg-brand-950/60 p-4 backdrop-blur-sm"
+      v-if="confirming && preview && preview.summary" class="fixed inset-0 z-50 grid place-items-center bg-brand-950/60 p-4 backdrop-blur-sm"
       role="presentation" @click.self="confirming = false"
     >
       <section class="surface max-h-[88vh] w-full max-w-lg overflow-y-auto" role="dialog" aria-modal="true" aria-label="Run historical backfill">
@@ -444,19 +517,23 @@ const shortId = (id: string) => id.slice(0, 8)
         </div>
         <div class="panel-body">
           <dl class="space-y-3 text-sm" data-test="bf-confirmation">
-            <div><dt class="eyebrow">Date range (both dates included)</dt><dd class="mt-0.5 font-semibold text-ink">{{ businessDate(preview.date_from) }} – {{ businessDate(preview.date_to) }} · {{ preview.days }} day{{ preview.days === 1 ? '' : 's' }}</dd></div>
-            <div><dt class="eyebrow">Eligible lectures</dt><dd class="mt-0.5 font-semibold text-ink">{{ preview.summary.eligible }}</dd></div>
+            <div><dt class="eyebrow">Date range (both dates included)</dt><dd class="mt-0.5 font-semibold text-ink">{{ businessDate(preview.preview.date_from) }} – {{ businessDate(preview.preview.date_to) }} · {{ preview.preview.coverage.length }} day{{ preview.preview.coverage.length === 1 ? '' : 's' }}</dd></div>
+            <div>
+              <dt class="eyebrow">Lectures to process</dt>
+              <dd class="mt-0.5 font-semibold text-ink">{{ preview.summary.eligible }} ({{ preview.summary.new }} new from Teams, {{ preview.summary.resume }} to resume)</dd>
+            </div>
             <div>
               <dt class="eyebrow">Estimated new Bunny imports</dt>
               <dd class="mt-0.5 font-semibold text-ink">
                 {{ preview.summary.estimated_imports.known }}<template v-if="preview.summary.estimated_imports.possible"> known, up to {{ preview.summary.estimated_imports.upper_bound }} once recordings are located</template>
               </dd>
             </div>
-            <div><dt class="eyebrow">Production Bunny library</dt><dd class="mt-0.5 font-semibold tabular-nums text-ink">{{ preview.library_id }}</dd></div>
+            <div><dt class="eyebrow">Production Bunny library</dt><dd class="mt-0.5 font-semibold tabular-nums text-ink">{{ preview.preview.library_id }}</dd></div>
           </dl>
           <p class="mt-4 text-sm leading-6 text-muted">
-            The publisher service re-checks every lecture and works through them in small batches, after daily publishing.
-            Only the longest verified Teams recording of a lecture is imported; nothing already in Bunny is uploaded again, and release follows the usual rules.
+            The publisher service first registers the range's Teams lectures exactly as daily publishing does, then re-checks every
+            LMS match and recording and works through them in small batches, after daily publishing. Only the longest verified Teams
+            recording of a lecture is imported; nothing already in Bunny is uploaded again, and release follows the usual rules.
           </p>
           <label class="mt-4 block">
             <span class="eyebrow">Reason (optional)</span>

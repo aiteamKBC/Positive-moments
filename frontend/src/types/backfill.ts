@@ -19,8 +19,11 @@ export interface BackfillPreviewRow {
   session_date: string
   scheduled_start: string | null
   scheduled_end: string | null
+  origin: string
   lms: { status: string; occurrence_id?: string | null }
   recording: BackfillRecording
+  verification: { teams: string; lms: string; recording: string }
+  basis: string
   bunny: { status: string; video: string } | null
   release: string | null
   playback: { available: boolean; reason: string | null } | null
@@ -34,29 +37,48 @@ export interface BackfillPreviewRow {
 export interface BackfillPreviewSummary {
   total: number
   eligible: number
+  ready: number
+  resume: number
   already_published: number
   already_processing: number
   blocked: number
   skipped: number
+  missing_lms: number
+  missing_recording: number
+  review: number
+  teams_discovered: number
+  existing: number
+  new: number
+  stored_only: number
   categories: Record<string, number>
   estimated_imports: { known: number; possible: number; upper_bound: number }
   known_selected_duration_seconds: number
-  per_day: Record<string, { total: number; eligible: number }>
+  per_day: Record<string, { total: number; eligible: number; teams: number; discovery: string }>
+  complete: boolean
+  incomplete_days: string[]
 }
 
+export interface DayCoverage {
+  date: string
+  status: string
+  attempts?: number
+  error?: string
+  teams_events?: number | null
+  lectures_found?: number
+  lms_dry_run?: string
+}
+
+/** A preview request: the publisher service discovers the range in Teams, read-only; the page polls it. */
 export interface BackfillPreview {
-  date_from: string
-  date_to: string
-  days: number
-  library_id: number
-  generated_at: string
-  data_source: string
-  summary: BackfillPreviewSummary
+  preview: BackfillRun
+  summary: BackfillPreviewSummary | null
+  complete: boolean
+  confirmable: boolean
+  expires_in_seconds: number | null
   lectures: BackfillPreviewRow[]
-  fingerprint: string
-  preview_token: string
-  token_ttl_seconds: number
-  read_only: boolean
+  production_writes: number
+  jobs_queued: number
+  bunny_calls: number
 }
 
 export interface BackfillCounts {
@@ -72,6 +94,10 @@ export interface BackfillCounts {
 
 export interface BackfillRun {
   run_id: string
+  mode: string
+  preview_run_id: string | null
+  coverage: DayCoverage[]
+  days_discovered: number
   date_from: string
   date_to: string
   library_id: number
@@ -95,6 +121,7 @@ export interface BackfillRun {
 export interface BackfillRuns {
   runs: BackfillRun[]
   active: BackfillRun | null
+  latest_preview: BackfillRun | null
   operator: boolean
   library_id: number
   max_days: number
@@ -114,6 +141,8 @@ export interface BackfillRunLecture {
   lecture_id: string
   session_date: string
   status: string
+  origin: string
+  registered: boolean
   initial_category: string
   reason: string | null
   stage: string | null

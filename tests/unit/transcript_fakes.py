@@ -44,9 +44,13 @@ class FakeGraph:
         self.content: dict[str, list] = defaultdict(list)   # id -> [bytes | GraphError, ...]; last repeats
         self.calls: list[tuple] = []
         self.invalidations = 0
+        self.scoped: dict[str, str] = {}        # transcript id -> the only meeting that lists it
 
     def add(self, transcript_id: str, *, start: datetime, end: datetime, call_id: str = "call-1",
-            content=None, correlation: str | None = None):
+            content=None, correlation: str | None = None, meeting_id: str | None = None):
+        """`meeting_id` scopes the transcript to that meeting's listing (default: every meeting sees it)."""
+        if meeting_id:
+            self.scoped[transcript_id] = meeting_id
         self.transcripts[transcript_id] = {
             "id": transcript_id, "createdDateTime": start.isoformat().replace("+00:00", "Z"),
             "endDateTime": end.isoformat().replace("+00:00", "Z"), "callId": call_id,
@@ -61,7 +65,9 @@ class FakeGraph:
             error = self.listing_errors.pop(0)
             if error is not None:
                 raise error
-        return list(self.transcripts.values())
+        decoded = urllib.parse.unquote(path)
+        meeting = decoded.split("/onlineMeetings/", 1)[1].split("/transcripts", 1)[0] if "/onlineMeetings/" in decoded else None
+        return [t for t in self.transcripts.values() if self.scoped.get(t["id"], meeting) == meeting]
 
     def request(self, method: str, path: str, *, accept: str = "application/json"):
         assert method == "GET"

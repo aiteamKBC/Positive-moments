@@ -162,35 +162,57 @@ The read-only API for the future dashboard tab lives at `/operations/publisher/s
 
 ## 9. Historical Backfill (Publishing Monitor → Historical Backfill tab)
 
-Publishes the lectures of a past, **inclusive** range of Cairo dates through the same pipeline: LMS matching, the two tracks, the longest-recording selection, Bunny import, encoding, captions and AUTO_RELEASE. Code: `app/publisher/backfill.py`.
+Publishes the lectures of a past, **inclusive** range of Cairo dates, including dates the publisher has **no records** for. Code: `app/publisher/backfill.py`.
 
-- **Nothing starts by itself.** The daemon's `HISTORICAL_BACKFILL` task (every minute, after the daily tasks) is idle until an operator confirms a run in the monitor.
-- **Daily publishing comes first.** Historical jobs run below every daily priority, and at most `PUBLISHER_BACKFILL_MAX_IMPORTS` (default 1) historical imports are live at once. None is added while a daily import is waiting.
-- **Unchanged:** the daily schedule, the lookback and the start date.
-- **Optional settings** in `publisher.env`, with defaults:
+**Preview.** Any signed-in user can ask for one. The publisher service discovers the range live, day by day:
+- Teams `calendarView`, every page, through the daily `LectureDiscoveryService` with `persist=False` on a READ ONLY connection;
+- a dry LMS match;
+- the stored state of the lectures that already exist.
 
-  | Setting | Default |
-  |---|---|
-  | `PUBLISHER_BACKFILL_MAX_DAYS` | 31 |
-  | `PUBLISHER_BACKFILL_BATCH_SIZE` | 10 |
-  | `PUBLISHER_BACKFILL_MAX_ACTIVE` | 20 |
-  | `PUBLISHER_BACKFILL_MAX_IMPORTS` | 1 |
-  | `PUBLISHER_BACKFILL_INTERVAL_SECONDS` | 60 |
+It writes **only its own** `bunny_backfill_runs` / `_items` rows: no lecture, job, discovery run or lock. A day that cannot be discovered (3 attempts) makes the preview **INCOMPLETE**, and an incomplete preview can't be run.
 
-  The web reads `PUBLISHER_BACKFILL_MAX_DAYS` (default 31).
-- **Preview** is read-only: a READ ONLY transaction from the stored publisher state, with no Graph, LMS or Bunny call. Any signed-in user can preview.
-- **Start, cancel and retry** need the Django group `kbc_publisher_backfill_operators`. Grant it with `backend/venv/bin/python backend/manage.py publisher_backfill_operator --grant <username>` (`--list`, `--revoke`).
-- **Schema 029:**
-  - check (read-only): `python -m app.cli.publisher --env-file backend/config/publisher.env backfill-schema`;
-  - install once: add `--apply`.
+**Run.** Operators only, for a COMPLETE preview less than 30 minutes old. Stale stored state is refused. The run then:
+1. registers every day's Teams lectures exactly as the daily publisher does (`CalendarDiscovery.discover_day`), and adds lectures found now;
+2. matches the range against the LMS;
+3. takes each VERIFIED lecture through the publisher's own jobs: tracks, `longest_recording_v1`, import, encoding, captions and AUTO_RELEASE.
 
-  Additive. Its rollback refuses while runs exist.
-- **Cancel** stops pending lectures and the run's imports that have not reached Bunny (audited `OPERATOR_CANCEL`). Anything already submitted, encoding or captioning finishes normally.
-- **Audit events** in `bunny_publisher_events`:
-  - `HISTORICAL_BACKFILL_REQUESTED`
-  - `_STARTED`
-  - `_COMPLETED`
-  - `_CANCEL_REQUESTED`
-  - `_CANCELLED`
-  - `_RETRY`
+Each lecture resumes from its persisted stage, and nothing already in Bunny is uploaded again.
 
+**Nothing starts by itself.** The daemon's `HISTORICAL_BACKFILL` task runs every minute, after the daily tasks, and is idle until a preview is requested or a run is confirmed.
+
+**Daily publishing comes first.**
+- Historical jobs run below every daily priority.
+- At most `PUBLISHER_BACKFILL_MAX_IMPORTS` (default 1) historical imports are live at once, and none is added while a daily import is waiting.
+- `PUBLISHER_BACKFILL_DISCOVERY_DAYS` (default 2) Teams days are discovered per tick.
+- The daily schedule, lookback and start date are unchanged.
+
+**Optional settings** in `publisher.env`, with defaults:
+
+| Setting | Default |
+|---|---|
+| `PUBLISHER_BACKFILL_MAX_DAYS` | 31 |
+| `PUBLISHER_BACKFILL_BATCH_SIZE` | 10 |
+| `PUBLISHER_BACKFILL_MAX_ACTIVE` | 20 |
+| `PUBLISHER_BACKFILL_MAX_IMPORTS` | 1 |
+| `PUBLISHER_BACKFILL_DISCOVERY_DAYS` | 2 |
+| `PUBLISHER_BACKFILL_INTERVAL_SECONDS` | 60 |
+
+The web reads `PUBLISHER_BACKFILL_MAX_DAYS` (default 31).
+
+**Operator role.** Start, cancel and retry need the Django group `kbc_publisher_backfill_operators`. Grant it with `backend/venv/bin/python backend/manage.py publisher_backfill_operator --grant <username>` (`--list`, `--revoke`).
+
+**Schema 029:**
+- check (read-only): `python -m app.cli.publisher --env-file backend/config/publisher.env backfill-schema`;
+- install once: add `--apply`.
+
+Additive. Its rollback refuses while runs exist.
+
+**Cancel** stops pending lectures and the run's imports that have not reached Bunny (audited `OPERATOR_CANCEL`). Anything already submitted, encoding or captioning finishes normally.
+
+**Audit events** in `bunny_publisher_events`:
+- `HISTORICAL_BACKFILL_REQUESTED`
+- `_STARTED`
+- `_COMPLETED`
+- `_CANCEL_REQUESTED`
+- `_CANCELLED`
+- `_RETRY`

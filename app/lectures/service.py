@@ -46,7 +46,8 @@ class LectureDiscoveryService:
         self.lms_repository = lms_repository
         self.log = logging.getLogger(__name__)
 
-    def discover_day(self, kbc_connection, aptem_connection, target_date: date, *, persist: bool = True) -> dict:
+    def discover_day(self, kbc_connection, aptem_connection, target_date: date, *, persist: bool = True,
+                     candidates: list | None = None) -> dict:
         """
         Pipeline order:
             calendar discovery
@@ -58,6 +59,9 @@ class LectureDiscoveryService:
         Meeting resolution is the expensive, permission-sensitive step, so it
         runs only for occurrences that already matched an active Aptem group.
         A non-matching calendar event is never looked up and never persisted.
+
+        `candidates` (optional, a list) receives every canonical Lecture built - the Historical Backfill
+        preview's read-only view of a day (persist=False). Nothing else changes.
         """
         started = time.monotonic()
         run_id = self.run_repository.start(kbc_connection, target_date) if persist else uuid.uuid4()
@@ -160,6 +164,8 @@ class LectureDiscoveryService:
                 metadata=metadata,
             )
             lectures.append(lecture)
+            if candidates is not None:
+                candidates.append(lecture)
             if persist:
                 outcome = self.lecture_repository.upsert(kbc_connection, lecture)
                 created += outcome == "created"

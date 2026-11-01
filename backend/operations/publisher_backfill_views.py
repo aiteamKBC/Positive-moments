@@ -1,40 +1,43 @@
 """
 Historical Backfill (Lecture Publishing Monitor): the operations API.
 
-    GET  publishing-monitor/backfill/runs/                 runs, newest first (+ whether you may operate)
-    POST publishing-monitor/backfill/preview/              READ ONLY preview of an inclusive date range
-    POST publishing-monitor/backfill/runs/start/           start a run (operator; confirmed preview only)
+    GET  publishing-monitor/backfill/runs/                 runs, newest first, the active preview, your role
+    POST publishing-monitor/backfill/preview/              request a live preview of an inclusive date range
+    GET  publishing-monitor/backfill/preview/<id>/         the preview: per-day coverage, summary, every lecture
+    POST publishing-monitor/backfill/runs/start/           start a run of a COMPLETE preview (operator)
     GET  publishing-monitor/backfill/runs/<id>/            one run: counts, every lecture's live pipeline
     POST publishing-monitor/backfill/runs/<id>/cancel/     stop pending work (operator)
     POST publishing-monitor/backfill/runs/<id>/retry/      re-open blocked / failed lectures (operator)
 
-PREVIEW never writes: it runs on platform.reading() (a PostgreSQL READ ONLY transaction) and calls no
-Graph, LMS or Bunny API; it answers from the publisher's stored state and says so (`data_source`). It is
-a POST only because it returns a confirmation token: the preview's fingerprint, signed with the Django
-secret and valid for PREVIEW_TTL seconds.
+PREVIEW discovers the range LIVE in Microsoft Teams, which only the publisher service can do (it holds the
+Graph, Aptem and LMS credentials). So the request writes one PREVIEW row and returns; the service works
+through it day by day, read-only towards every production record (app/publisher/backfill.py), and the
+page polls the GET. Nothing but the preview's own rows is written, and nothing is called from this request.
+A preview whose discovery did not cover every day is INCOMPLETE and can never be confirmed.
 
-START does no publishing work. It re-computes the preview from the current database, refuses a stale or
-forged confirmation, and writes ONE run row plus its items (at most one run is active: a concurrent start
+START does no publishing work. It accepts only a COMPLETE preview younger than PREVIEW_TTL, re-checks every
+lecture whose category came from stored state against the current database, and writes ONE run row plus its
+items - including lectures that so far exist only in Teams (at most one run is active: a concurrent start
 gets 409). The publisher service's HISTORICAL_BACKFILL task does the rest, through the publisher's own
-jobs and workers - nothing is imported inside an HTTP request.
+discovery, jobs and workers - nothing is discovered or imported inside an HTTP request.
 
-Every write needs the operator group (settings.PUBLISHER_BACKFILL_OPERATOR_GROUP); every response carries
-codes, counts and identities only - never a URL, key or transcript text.
+Start, cancel and retry need the operator group (settings.PUBLISHER_BACKFILL_OPERATOR_GROUP); every response
+carries codes, counts and identities only - never a URL, key or transcript text.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import psycopg
 from django.conf import settings
-from django.core import signing
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 
 from app.common.errors import PlatformError
-from app.db.repositories.publisher_backfill import BackfillRepository
+from app.db.repositories.publisher_backfill import EXECUTE, PREVIEW, BackfillRepository
 from app.db.repositories.publisher_queue import PublisherQueueRepository
 from app.publisher import backfill, monitor
 from app.publisher.operations import OperatorActionRefused
@@ -43,7 +46,6 @@ from . import publishing_monitor_views as pm
 from .platform import reading, writing
 
 PREVIEW_TTL = 30 * 60
-TOKEN_SALT = "kbc.publisher.historical-backfill.preview"
 
 
 def is_operator(user) -> bool:
@@ -85,6 +87,14 @@ def _handle(view):
     return wrapper
 
 
+@contextmanager
+def _writing():
+    """platform.writing(), never preparing a statement server-side (the web's database URL is pooled)."""
+    with writing() as connection:
+        connection.prepare_threshold = None
+        yield connection
+
+
 def _range(data) -> tuple:
     date_from = backfill.parse_date(data.get("date_from"), "From Date")
     date_to = backfill.parse_date(data.get("date_to"), "To Date")
@@ -92,8 +102,8 @@ def _range(data) -> tuple:
     return date_from, date_to
 
 
-def compute_preview(date_from, date_to) -> dict:
-    """The preview from the current database: every query READ ONLY, lectures with a video resolved in parallel."""
+def stored_categories(date_from, date_to) -> dict:
+    """lecture_id -> category from the publisher's STORED state now (READ ONLY; no Graph, LMS or Bunny call)."""
     library, language = pm._library(), pm._language()
     with reading() as connection:
         now = connection.execute("SELECT now()").fetchone()[0]
@@ -101,26 +111,13 @@ def compute_preview(date_from, date_to) -> dict:
         recordings = backfill.load_recordings(connection, [f["lecture_id"] for f in facts])
 
     def resolve(fact):
-        try:
-            with reading() as connection:
-                return fact["lecture_id"], monitor.resolve(connection, fact, library_id=library, language=language), None
-        except (PlatformError, psycopg.Error) as exc:
-            return fact["lecture_id"], None, f"RESOLUTION_FAILED:{type(exc).__name__}"
+        with reading() as connection:
+            return fact["lecture_id"], monitor.resolve(connection, fact, library_id=library, language=language)
 
-    views, errors = {}, {}
-    for lecture_id, view, error in pm._workers.map(resolve, [f for f in facts if monitor.needs_resolution(f)]):
-        if error:
-            errors[lecture_id] = error
-        else:
-            views[lecture_id] = view
-    return backfill.build_preview(facts, views, recordings, date_from=date_from, date_to=date_to, library_id=library,
-                                  now=now, playback_enabled=bool(settings.PUBLISHER_LMS_PLAYBACK_ENABLED),
-                                  errors=errors)
-
-
-def _token(preview: dict) -> str:
-    return signing.dumps({"f": preview["date_from"], "t": preview["date_to"], "l": preview["library_id"],
-                          "fp": preview["fingerprint"], "n": preview["summary"]["eligible"]}, salt=TOKEN_SALT)
+    views = dict(pm._workers.map(resolve, [f for f in facts if monitor.needs_resolution(f)]))
+    preview = backfill.build_preview(facts, views, recordings, date_from=date_from, date_to=date_to,
+                                     library_id=library, now=now)
+    return {r["lecture_id"]: r["category"] for r in preview["lectures"]}
 
 
 def _iso(value):
@@ -130,37 +127,80 @@ def _iso(value):
 def _shape(run: dict | None, counts: dict | None = None) -> dict | None:
     if run is None:
         return None
-    out = {k: (str(v) if k == "run_id" else _iso(v)) for k, v in run.items() if k != "preview_fingerprint"}
+    out = {k: (str(v) if k in ("run_id", "preview_run_id") and v is not None else _iso(v))
+           for k, v in run.items() if k not in ("preview_fingerprint", "discovery")}
+    coverage = run.get("discovery") or {}
+    days = backfill.business_days(run["date_from"], run["date_to"])
+    out["coverage"] = [{"date": d.isoformat(), **{k: v for k, v in (coverage.get(d.isoformat()) or {"status": "PENDING"})
+                                                  .items() if k != "lectures"}} for d in days]
+    out["days_discovered"] = sum(1 for c in out["coverage"] if c["status"] in (backfill.COMPLETE, backfill.NOT_AVAILABLE))
     if counts is not None:
         out["counts"] = {"total": sum(counts.values()), **{k.lower(): v for k, v in counts.items()}}
-    out["is_finished"] = run["status"] in ("COMPLETED", "CANCELLED", "FAILED")
+    out["is_finished"] = run["status"] in ("COMPLETED", "INCOMPLETE", "CANCELLED", "FAILED")
     out["cancel_requested"] = run["cancel_requested_at"] is not None
     return monitor.redact(out)
+
+
+def _preview_answer(run: dict, items: list[dict]) -> dict:
+    shaped = _shape(run)
+    finished = shaped["is_finished"]
+    age = (datetime.now(timezone.utc) - run["finished_at"]).total_seconds() if run["finished_at"] else None
+    return {"preview": shaped, "summary": run["preview_summary"] if finished else None,
+            "complete": run["status"] == "COMPLETED",
+            "confirmable": run["status"] == "COMPLETED" and age is not None and age <= PREVIEW_TTL,
+            "expires_in_seconds": max(0, int(PREVIEW_TTL - age)) if age is not None else None,
+            "lectures": [i["detail"] for i in items] if finished else [],
+            "production_writes": 0, "jobs_queued": 0, "bunny_calls": 0}
 
 
 # --------------------------------------------------------------------------- reads
 @api_view(["GET"])
 @_handle
 def runs_view(request):
-    """Recent runs (newest first), the active one, the limits, and whether the signed-in user may operate."""
+    """Recent runs (newest first), the active one and preview, the limits, and whether you may operate."""
     repository = BackfillRepository()
     with reading() as connection:
         runs = repository.recent(connection, limit=25)
         shaped = [_shape(r, repository.counts(connection, r["run_id"])) for r in runs]
+        previews = repository.recent(connection, limit=1, mode=PREVIEW)
     active = next((r for r in shaped if r["status"] in ("QUEUED", "RUNNING")), None)
-    return Response({"runs": shaped, "active": active, "operator": is_operator(request.user),
-                     "library_id": pm._library(), "max_days": settings.PUBLISHER_BACKFILL_MAX_DAYS,
-                     "today": pm.cairo_today().isoformat(), "timezone": "Africa/Cairo"})
+    return Response({"runs": shaped, "active": active, "latest_preview": _shape(previews[0]) if previews else None,
+                     "operator": is_operator(request.user), "library_id": pm._library(),
+                     "max_days": settings.PUBLISHER_BACKFILL_MAX_DAYS, "today": pm.cairo_today().isoformat(),
+                     "timezone": "Africa/Cairo"})
 
 
 @api_view(["POST"])
 @_handle
 def preview_view(request):
-    """READ ONLY: what a run over the inclusive range would do, per lecture, with a confirmation token."""
+    """Request a live, read-only preview of the inclusive range (the publisher service performs it)."""
     date_from, date_to = _range(request.data or {})
-    preview = compute_preview(date_from, date_to)
-    return Response({**preview, "preview_token": _token(preview), "token_ttl_seconds": PREVIEW_TTL,
-                     "read_only": True, "database_writes": 0, "jobs_queued": 0, "bunny_calls": 0})
+    repository = BackfillRepository()
+    with _writing() as connection:
+        with connection.transaction():
+            run = repository.create(connection, date_from=date_from, date_to=date_to, library_id=pm._library(),
+                                    requested_by=_actor(request), mode=PREVIEW)
+            if run is None:
+                active = repository.active(connection, PREVIEW)
+                if active and (active["date_from"], active["date_to"]) == (date_from, date_to):
+                    return Response(_preview_answer(active, []), status=status.HTTP_200_OK)
+                return Response({"code": "PREVIEW_IN_PROGRESS", "detail": "another preview is being prepared; "
+                                 "wait a moment and try again", "preview": _shape(active)},
+                                status=status.HTTP_409_CONFLICT)
+    return Response(_preview_answer(run, []), status=status.HTTP_202_ACCEPTED)
+
+
+@api_view(["GET"])
+@_handle
+def preview_detail_view(request, run_id):
+    """The preview: per-day discovery coverage while it runs; its summary and every lecture once finished."""
+    repository = BackfillRepository()
+    with reading() as connection:
+        run = repository.get(connection, run_id)
+        if run is None or run["mode"] != PREVIEW:
+            return Response({"code": "PREVIEW_NOT_FOUND", "detail": "no such preview"}, status=status.HTTP_404_NOT_FOUND)
+        items = repository.items(connection, run_id) if run["status"] in ("COMPLETED", "INCOMPLETE") else []
+    return Response(monitor.redact(_preview_answer(run, items)))
 
 
 @api_view(["GET"])
@@ -170,7 +210,7 @@ def run_view(request, run_id):
     repository = BackfillRepository()
     with reading() as connection:
         run = repository.get(connection, run_id)
-        if run is None:
+        if run is None or run["mode"] != EXECUTE:
             return Response({"code": "RUN_NOT_FOUND", "detail": "no such historical backfill run"},
                             status=status.HTTP_404_NOT_FOUND)
         items = repository.items(connection, run_id)
@@ -180,14 +220,17 @@ def run_view(request, run_id):
     lectures = []
     for item in items:
         lid = str(item["lecture_id"])
-        row = by_id.get(lid)
+        row, known = by_id.get(lid), item["detail"] or {}
         lectures.append(monitor.redact({
             "lecture_id": lid, "session_date": _iso(item["session_date"]), "status": item["status"],
-            "initial_category": item["initial_category"], "reason": item["reason"], "stage": item["stage"],
-            "retries": item["retries"], "started_at": _iso(item["started_at"]), "finished_at": _iso(item["finished_at"]),
-            "updated_at": _iso(item["updated_at"]),
-            "subject": row["subject"] if row else None, "module": row["module"] if row else None,
-            "scheduled_start": row["scheduled_start"] if row else None, "scheduled_end": row["scheduled_end"] if row else None,
+            "origin": item["origin"], "initial_category": item["initial_category"], "reason": item["reason"],
+            "stage": item["stage"], "retries": item["retries"], "started_at": _iso(item["started_at"]),
+            "finished_at": _iso(item["finished_at"]), "updated_at": _iso(item["updated_at"]),
+            "registered": row is not None,
+            "subject": row["subject"] if row else known.get("subject"),
+            "module": row["module"] if row else known.get("module"),
+            "scheduled_start": row["scheduled_start"] if row else known.get("scheduled_start"),
+            "scheduled_end": row["scheduled_end"] if row else known.get("scheduled_end"),
             "monitor_state": row["state"] if row else None, "monitor_reason": row["reason"] if row else None,
             "pipeline": backfill.pipeline(row) if row else [],
         }))
@@ -201,50 +244,61 @@ def run_view(request, run_id):
 @_handle
 def start_view(request):
     """
-    Start a run for a confirmed preview. Body: {date_from, date_to, preview_token, confirm: {library_id,
-    eligible}, reason?}. Re-checks the preview against the current database before writing anything.
+    Start a run of a COMPLETE preview. Body: {preview_run_id, confirm: {library_id, eligible}, reason?}.
+    Re-checks the preview against the current database before writing anything.
     """
     data = request.data or {}
-    date_from, date_to = _range(data)
-    try:
-        token = signing.loads(str(data.get("preview_token") or ""), salt=TOKEN_SALT, max_age=PREVIEW_TTL)
-    except signing.SignatureExpired:
+    repository = BackfillRepository()
+    with reading() as connection:
+        try:
+            preview = repository.get(connection, str(data.get("preview_run_id") or ""))
+        except psycopg.errors.InvalidTextRepresentation:
+            preview = None
+        if preview is None or preview["mode"] != PREVIEW:
+            return Response({"code": "PREVIEW_REQUIRED", "detail": "run a preview of this range first"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        items = repository.items(connection, preview["run_id"])
+    if preview["status"] in ("QUEUED", "RUNNING"):
+        return _conflict("PREVIEW_NOT_READY", "the preview is still discovering the range")
+    if preview["status"] != "COMPLETED":
+        return _conflict("PREVIEW_INCOMPLETE", "the preview did not cover every day of the range; preview again",
+                         incomplete_days=(preview["preview_summary"] or {}).get("incomplete_days"))
+    if (datetime.now(timezone.utc) - preview["finished_at"]).total_seconds() > PREVIEW_TTL:
         return _conflict("PREVIEW_EXPIRED", "the preview is older than 30 minutes; preview the range again")
-    except signing.BadSignature:
-        return Response({"code": "PREVIEW_REQUIRED", "detail": "run a preview of this range first"},
-                        status=status.HTTP_400_BAD_REQUEST)
-    library = pm._library()
-    if (token.get("f"), token.get("t"), token.get("l")) != (date_from.isoformat(), date_to.isoformat(), library):
-        return Response({"code": "PREVIEW_MISMATCH", "detail": "the confirmation belongs to a different range"},
-                        status=status.HTTP_400_BAD_REQUEST)
-    preview = compute_preview(date_from, date_to)
-    summary = preview["summary"]
-    if preview["fingerprint"] != token.get("fp"):
-        return _conflict("PREVIEW_STALE", "the lectures of this range changed since the preview; review the new "
-                         "preview and confirm again", summary=summary)
+    library, summary = pm._library(), preview["preview_summary"] or {}
+    if int(preview["library_id"]) != library:
+        return _conflict("PREVIEW_MISMATCH", "the preview belongs to another library")
     confirm = data.get("confirm") or {}
-    if str(confirm.get("library_id")) != str(library) or str(confirm.get("eligible")) != str(summary["eligible"]):
+    if str(confirm.get("library_id")) != str(library) or str(confirm.get("eligible")) != str(summary.get("eligible")):
         return _conflict("CONFIRMATION_MISMATCH", "the confirmation does not match the preview's library and "
                          "eligible lecture count", summary=summary)
-    if not summary["eligible"]:
+    if not summary.get("eligible"):
         return _conflict("NOTHING_TO_QUEUE", "no lecture in this range is eligible for a backfill", summary=summary)
+    rows = [i["detail"] for i in items]
+    now = stored_categories(preview["date_from"], preview["date_to"])
+    changed = [r["lecture_id"] for r in rows if r.get("basis") == "STORED" and now.get(r["lecture_id"]) != r["category"]]
+    if changed:
+        return _conflict("PREVIEW_STALE", "the stored state of some lectures changed since the preview; preview "
+                         "again", changed=len(changed))
     reason = monitor.scrub_text(" ".join(str(data.get("reason") or "").split()))[:300]
-    repository = BackfillRepository()
     with _writing() as connection:
         with connection.transaction():
-            run = repository.create(connection, date_from=date_from, date_to=date_to, library_id=library,
-                                    requested_by=_actor(request), reason=reason, fingerprint=preview["fingerprint"],
+            run = repository.create(connection, date_from=preview["date_from"], date_to=preview["date_to"],
+                                    library_id=library, requested_by=_actor(request), reason=reason,
+                                    fingerprint=preview["preview_fingerprint"],
                                     summary={k: v for k, v in summary.items() if k != "per_day"},
-                                    items=backfill.run_items(preview))
+                                    items=backfill.run_items({"lectures": rows}), mode=EXECUTE,
+                                    preview_run_id=preview["run_id"])
             if run is None:
                 active = repository.active(connection)
                 return _conflict("BACKFILL_ALREADY_ACTIVE", "another historical backfill is running; wait for it "
                                  "to finish or cancel it", active=_shape(active))
             PublisherQueueRepository().event(
                 connection, "HISTORICAL_BACKFILL_REQUESTED", actor=_actor(request),
-                detail={"run_id": str(run["run_id"]), "date_from": date_from.isoformat(),
-                        "date_to": date_to.isoformat(), "library_id": library, "eligible": summary["eligible"],
-                        "estimated_imports": summary["estimated_imports"]["upper_bound"]})
+                detail={"run_id": str(run["run_id"]), "preview_run_id": str(preview["run_id"]),
+                        "date_from": _iso(preview["date_from"]), "date_to": _iso(preview["date_to"]),
+                        "library_id": library, "eligible": summary["eligible"], "new": summary.get("new"),
+                        "estimated_imports": (summary.get("estimated_imports") or {}).get("upper_bound")})
         counts = repository.counts(connection, run["run_id"])
     return Response({"run": _shape(run, counts), "detail": "queued; the publisher service starts it within a minute"},
                     status=status.HTTP_202_ACCEPTED)
@@ -292,14 +346,5 @@ def retry_view(request, run_id):
     return Response(result, status=status.HTTP_202_ACCEPTED)
 
 
-@contextmanager
-def _writing():
-    """platform.writing(), never preparing a statement server-side (the web's database URL is pooled)."""
-    with writing() as connection:
-        connection.prepare_threshold = None
-        yield connection
-
-
 def _conflict(code: str, detail: str, **extra) -> Response:
     return Response({"code": code, "detail": detail, **extra}, status=status.HTTP_409_CONFLICT)
-

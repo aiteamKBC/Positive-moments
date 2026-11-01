@@ -57,7 +57,7 @@ def _runs_removed_first(backfill_db, _isolated):
 # =========================================================================== helpers
 def historical(url, **config):
     """A world whose lecture is before PUBLISHER_START_DATE: daily planning never touches it."""
-    return World(url, start_date=(END + timedelta(days=1)).date(), **config)
+    return World(url, **{"start_date": (END + timedelta(days=1)).date(), **config})
 
 
 def full_part(world):
@@ -431,3 +431,35 @@ def test_the_schema_command_installs_029_once_and_refuses_a_partial_schema(url):
         assert backfill.install_schema(c)["status"] == "REFUSED_PARTIAL_SCHEMA"
         remove_backfill_migration(c)
         c.execute(BACKFILL_MIGRATION.read_text(encoding="utf-8"))
+
+
+def test_an_uncertain_historical_submission_is_reconciled_never_resubmitted_until_an_operator_retries(url):
+    world = historical(url)
+    full_part(world)
+    world.bunny.fetch_plan.append("uncertain_absent")
+    coordinator(world)
+    run = start(world, preview(world))
+    world.run(rounds=8)
+    assert world.videos()[0][1] == "SUBMISSION_UNCERTAIN" and len(world.bunny.fetch_calls) == 1
+    world.clock.advance(timedelta(hours=3))                      # the reconcile window passes: review, not resubmit
+    world.run(rounds=6)
+    assert world.videos()[0][1] == "REVIEW_REQUIRED" and len(world.bunny.fetch_calls) == 1
+    assert items(world, run["run_id"])[world.lecture_id]["status"] == "FAILED"
+    with psycopg.connect(url, autocommit=True) as c:
+        out = backfill.retry_items(c, run["run_id"], [world.lecture_id], actor="ops-test",
+                                   reason="confirmed nothing reached Bunny")
+    assert out["jobs_reopened"] >= 1 and out["lectures_reopened"] == 1
+    world.run(rounds=12)
+    assert world.ready() and len(world.bunny.fetch_calls) == 2 and "OPERATOR_REIMPORT_APPROVED" in world.events()
+    assert items(world, run["run_id"])[world.lecture_id]["status"] == "COMPLETED"
+
+
+def test_an_uncertain_submission_that_did_create_the_video_is_adopted_without_a_second_upload(url):
+    world = historical(url)
+    full_part(world)
+    world.bunny.fetch_plan.append("uncertain_created")
+    coordinator(world)
+    run = start(world, preview(world))
+    world.run(rounds=16)
+    assert world.ready() and len(world.bunny.fetch_calls) == 1
+    assert items(world, run["run_id"])[world.lecture_id]["status"] == "COMPLETED"

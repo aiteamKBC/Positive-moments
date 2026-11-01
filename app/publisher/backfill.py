@@ -2,13 +2,23 @@
 Historical Backfill: publish the lectures of an operator-chosen, INCLUSIVE range of past dates through
 the publisher's own pipeline (2026-10-29).
 
-    preview   read-only. The lectures of the range and what a run would do with each, from the publisher's
-              stored state (the monitor's facts and classification, the delivery rule, the recording
-              selection on record). No Graph, LMS or Bunny call; callers run it on a READ ONLY connection.
-              Every answer says `data_source: DATABASE`: live verification is the run's job, through the
-              same workers as the daily publisher.
-    run       one operator-confirmed row in bunny_backfill_runs (written by the operations API after it has
-              re-checked the preview), advanced by the daemon's HISTORICAL_BACKFILL task in small steps:
+    preview   a PREVIEW run, worked through by the publisher service (it holds the Graph / Aptem / LMS
+              credentials), day by day, READ ONLY towards every production record:
+                * live Teams source discovery of each day - the daily publisher's own LectureDiscoveryService
+                  (calendarView, all pages; Aptem / LMS module match; meeting resolution) with persist=False,
+                  on a READ ONLY connection: no lecture, discovery-run, job or lock row is written;
+                * a dry LMS match of the day's lectures (lms_service.evaluate, nothing persisted);
+                * the stored publisher state of every lecture of the range that already exists.
+              Each lecture is EXISTING (Teams + stored), NEW (only in Teams) or STORED_ONLY, with what is
+              verified now and what the run verifies. Per-day coverage is recorded; a day whose discovery
+              failed makes the preview INCOMPLETE, and an incomplete preview can never be confirmed. The only
+              rows written are the preview's own (bunny_backfill_runs / _items).
+    run       one operator-confirmed EXECUTE row (written by the operations API after it has re-checked a
+              COMPLETE preview), advanced by the daemon's HISTORICAL_BACKFILL task in small steps:
+                0. source discovery of every day of the range, persisted exactly as the daily publisher does
+                   it (CalendarDiscovery.discover_day: same identity, same conflict-tolerant upsert), so a
+                   range with ZERO existing records gets its canonical lectures; lectures found now that the
+                   preview did not show are added to the run;
                 1. LMS occurrence matching for the range (Planner.match_range - the tick only matches its
                    lookback window);
                 2. for a bounded batch of the run's lectures whose LMS match is VERIFIED: the two track jobs
@@ -30,7 +40,9 @@ NO DUPLICATES, BY CONSTRUCTION
     A run owns no video, caption or release - it enqueues the publisher's ordinary jobs, whose one-live-job
     index, per-part video rows, Bunny token search, uncertain-submission reconciliation and release rules
     are exactly the daily publisher's. Overlapping runs, a rerun and the daily publisher therefore all
-    converge on the same rows. One run is active at a time (bunny_backfill_runs_one_active).
+    converge on the same rows. One run is active at a time (bunny_backfill_runs_one_active). Resuming is the
+    pipeline's own rule: every next step is derived from persisted state (a located recording is not looked
+    up again, an imported video is not re-imported, a verified caption is not republished).
 
 RESTART / CANCEL
     All progress is in the database: a restarted daemon simply continues the active run. Cancelling stops
@@ -48,7 +60,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.common.time import CAIRO
-from app.db.repositories.publisher_backfill import BackfillRepository
+from app.db.repositories.publisher_backfill import EXECUTE, PREVIEW, BackfillRepository
 from app.db.repositories.publisher_queue import PublisherQueueRepository
 from app.publisher import monitor
 from app.publisher.handlers import HISTORICAL_PRIORITY, HISTORICAL_TAG, MAX_ATTEMPTS, subject_key
@@ -64,21 +76,29 @@ STALL_TICKS = 3
 ALREADY_PUBLISHED = "ALREADY_PUBLISHED"
 ALREADY_PROCESSING = "ALREADY_PROCESSING"
 READY_TO_QUEUE = "READY_TO_QUEUE"
+RESUME_REQUIRED = "RESUME_REQUIRED"            # existing lecture, part-way through the pipeline, nothing running
 MISSING_LMS_MATCH = "MISSING_LMS_MATCH"
 MISSING_RECORDING = "MISSING_RECORDING"
 REVIEW_REQUIRED = "REVIEW_REQUIRED"
 SKIPPED = "SKIPPED"
 ERROR = "ERROR"
-CATEGORIES = (ALREADY_PUBLISHED, ALREADY_PROCESSING, READY_TO_QUEUE, MISSING_LMS_MATCH, MISSING_RECORDING,
-              REVIEW_REQUIRED, SKIPPED, ERROR)
+CATEGORIES = (ALREADY_PUBLISHED, ALREADY_PROCESSING, READY_TO_QUEUE, RESUME_REQUIRED, MISSING_LMS_MATCH,
+              MISSING_RECORDING, REVIEW_REQUIRED, SKIPPED, ERROR)
+ELIGIBLE = (READY_TO_QUEUE, RESUME_REQUIRED)
 BLOCKED_CATEGORIES = (MISSING_LMS_MATCH, MISSING_RECORDING, REVIEW_REQUIRED, ERROR)
-ACTIONS = {ALREADY_PUBLISHED: "NONE", ALREADY_PROCESSING: "TRACK", READY_TO_QUEUE: "QUEUE",
+ACTIONS = {ALREADY_PUBLISHED: "NONE", ALREADY_PROCESSING: "TRACK", READY_TO_QUEUE: "QUEUE", RESUME_REQUIRED: "RESUME",
            MISSING_LMS_MATCH: "NONE", MISSING_RECORDING: "NONE", REVIEW_REQUIRED: "NONE", SKIPPED: "NONE",
            ERROR: "NONE"}
 # What a confirmed run records for each category at start.
-ITEM_STATUS = {READY_TO_QUEUE: "PENDING", ALREADY_PROCESSING: "PROCESSING", ALREADY_PUBLISHED: "SKIPPED",
-               SKIPPED: "SKIPPED", MISSING_LMS_MATCH: "BLOCKED", MISSING_RECORDING: "BLOCKED",
-               REVIEW_REQUIRED: "BLOCKED", ERROR: "FAILED"}
+ITEM_STATUS = {READY_TO_QUEUE: "PENDING", RESUME_REQUIRED: "PENDING", ALREADY_PROCESSING: "PROCESSING",
+               ALREADY_PUBLISHED: "SKIPPED", SKIPPED: "SKIPPED", MISSING_LMS_MATCH: "BLOCKED",
+               MISSING_RECORDING: "BLOCKED", REVIEW_REQUIRED: "BLOCKED", ERROR: "FAILED"}
+# Where a lecture of the range comes from.
+TEAMS_NEW, TEAMS_EXISTING, STORED_ONLY, DISCOVERED_AT_RUN = "TEAMS_NEW", "TEAMS_EXISTING", "STORED_ONLY", "DISCOVERED_AT_RUN"
+# Verification labels: what the preview has checked and what only the run checks.
+LIVE_TEAMS, LIVE_DRY_RUN, STORED, AT_RUN = "LIVE", "LIVE_DRY_RUN", "STORED", "TO_BE_VERIFIED_AT_RUN"
+COMPLETE, FAILED_DAY, NOT_AVAILABLE = "COMPLETE", "FAILED", "NOT_AVAILABLE"
+DAY_ATTEMPTS = 3
 PUBLISHED_STATES = (monitor.PLAYABLE, monitor.PLAYABLE_NO_CAPTIONS, monitor.RELEASED_PLAYBACK_OFF)
 _MISSING_HINTS = ("NOT_FOUND", "NO_RECORDING", "DEADLINE_PASSED", "RECORDING_FILE_NOT_FOUND")
 
@@ -158,8 +178,12 @@ def _recording_summary(entry: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- categories
-def categorize(fact: dict, row: dict, *, auto_release: bool | None = None) -> tuple[str, str]:
-    """(category, reason) for one lecture, from the monitor's classification of its stored state."""
+def categorize(fact: dict, row: dict, *, auto_release: bool | None = None,
+               lms_dry: str | None = None) -> tuple[str, str]:
+    """
+    (category, reason) for one lecture, from the monitor's classification of its stored state. `lms_dry` is
+    the preview's dry LMS match, used only where nothing is stored yet (the run evaluates it for real).
+    """
     state, lms, recording = row["state"], row["lms"]["status"], row["recording"]
     live = any(j["status"] in LIVE for j in fact.get("jobs") or [])
     if state in PUBLISHED_STATES:
@@ -189,15 +213,48 @@ def categorize(fact: dict, row: dict, *, auto_release: bool | None = None) -> tu
     if lms in monitor.LMS_REVIEW:
         return MISSING_LMS_MATCH, f"LMS match is {lms}: an operator resolves the LMS session first."
     if lms == "PENDING":
+        if lms_dry in monitor.LMS_REVIEW:
+            return MISSING_LMS_MATCH, f"Dry LMS match is {lms_dry}: the run re-checks it, then blocks it."
+        if lms_dry in monitor.LMS_OUT_OF_SCOPE:
+            return SKIPPED, f"Dry LMS match is {lms_dry}: not published."
         return READY_TO_QUEUE, "Not picked up yet: the run matches it to the LMS, then locates its Teams recording."
+    started = fact.get("recording_status") or fact.get("videos") or any(
+        j["kind"] in ("RESOLVE_RECORDING", "IMPORT_VIDEO", "POLL_ENCODING") for j in fact.get("jobs") or [])
     if recording["status"] == "LOCATED":
-        return READY_TO_QUEUE, "LMS match verified and recording located: the run imports the selected recording."
+        if fact.get("videos"):
+            return RESUME_REQUIRED, "Video already in Bunny: the run resumes at " + _resume_stage(row) + " (no re-upload)."
+        return RESUME_REQUIRED, "Recording already located: the run imports the selected recording."
+    if started:
+        return RESUME_REQUIRED, "Started before but stopped: the run resumes the recording discovery."
     return READY_TO_QUEUE, "LMS match verified: the run locates the Teams recording, then imports it."
 
 
-def _import_estimate(category: str, row: dict, recording: dict | None) -> tuple[int, int]:
+def _resume_stage(row: dict) -> str:
+    if row["bunny"]["status"] != "UPLOADED":
+        return "the import reconciliation"
+    if row["video"]["status"] != "VERIFIED":
+        return "encoding verification"
+    return "captions and release"
+
+
+def new_lecture_category(entry: dict, *, now: datetime) -> tuple[str, str]:
+    """(category, reason) for a lecture found only in Teams (not persisted yet)."""
+    end = entry.get("scheduled_end")
+    if end and datetime.fromisoformat(end) > now:
+        return SKIPPED, "The lecture has not finished yet."
+    if not entry.get("meeting_resolved"):
+        return REVIEW_REQUIRED, "Teams meeting not resolved: the lecture is registered but cannot be published."
+    dry = entry.get("lms_dry")
+    if dry in monitor.LMS_REVIEW:
+        return MISSING_LMS_MATCH, f"Dry LMS match is {dry}: the run re-checks it, then blocks it."
+    if dry in monitor.LMS_OUT_OF_SCOPE:
+        return SKIPPED, f"Dry LMS match is {dry}: not published."
+    return READY_TO_QUEUE, "Only in Teams: the run registers it, verifies its LMS match and recording, then imports."
+
+
+def _import_estimate(category: str, row: dict | None, recording: dict | None) -> tuple[int, int]:
     """(known imports, possible imports) the run would add for one lecture."""
-    if category != READY_TO_QUEUE or row["bunny"]["status"] not in ("NOT_IMPORTED",):
+    if category not in ELIGIBLE or (row is not None and row["bunny"]["status"] not in ("NOT_IMPORTED",)):
         return 0, 0
     if recording and recording["verified_count"]:
         return 1, 0
@@ -206,39 +263,64 @@ def _import_estimate(category: str, row: dict, recording: dict | None) -> tuple[
 
 def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from: date, date_to: date,
                   library_id: int, now: datetime, auto_release: bool | None = None,
-                  playback_enabled: bool = False, errors: dict | None = None) -> dict:
+                  playback_enabled: bool = False, errors: dict | None = None, discovered: dict | None = None,
+                  coverage: dict | None = None) -> dict:
     """
-    The preview of a range from data already read (facts: monitor.load_facts; views: monitor.resolve per
-    lecture with a video; recordings: load_recordings). Pure: no I/O.
+    The preview of a range from data already read. Pure: no I/O.
+
+        facts / views / recordings   the STORED state of every persisted lecture of the range (monitor.load_facts,
+                                     monitor.resolve, load_recordings)
+        discovered                   lecture_id -> the live Teams discovery entry (discovered_entry), or None when
+                                     no source discovery was attempted (then `complete` is False)
+        coverage                     day -> {"status": COMPLETE | FAILED | NOT_AVAILABLE, ...}
     """
-    errors = errors or {}
+    errors, found = errors or {}, discovered if discovered is not None else {}
     rows, counts = [], {c: 0 for c in CATEGORIES}
-    per_day = {d.isoformat(): {"total": 0, "eligible": 0} for d in business_days(date_from, date_to)}
+    days = business_days(date_from, date_to)
+    coverage = coverage or {}
+    per_day = {d.isoformat(): {"total": 0, "eligible": 0, "teams": 0,
+                               "discovery": (coverage.get(d.isoformat()) or {}).get("status", NOT_AVAILABLE)}
+               for d in days}
     known_imports = possible_imports = 0
     known_seconds = 0.0
+    origins = {TEAMS_NEW: 0, TEAMS_EXISTING: 0, STORED_ONLY: 0}
+
+    def add(row_out, category, day_key, known, possible, seconds):
+        nonlocal known_imports, possible_imports, known_seconds
+        counts[category] += 1
+        day = per_day.setdefault(day_key, {"total": 0, "eligible": 0, "teams": 0, "discovery": NOT_AVAILABLE})
+        day["total"] += 1
+        day["teams"] += row_out["origin"] != STORED_ONLY
+        known_imports, possible_imports = known_imports + known, possible_imports + possible
+        if category in ELIGIBLE:
+            day["eligible"] += 1
+            known_seconds += seconds or 0
+        origins[row_out["origin"]] += 1
+        rows.append(monitor.redact(row_out))
+
+    seen = set()
     for fact in facts:
         lid = fact["lecture_id"]
+        seen.add(lid)
         recording = recordings.get(lid)
+        entry = found.get(lid)
+        origin = TEAMS_EXISTING if entry else STORED_ONLY
         if lid in errors:
             category, reason, row = ERROR, errors[lid], None
         else:
             row = monitor.classify(fact, views.get(lid), playback_enabled=playback_enabled, library_id=library_id,
                                    now=now)
-            category, reason = categorize(fact, row, auto_release=auto_release)
-        counts[category] += 1
-        day = per_day.setdefault(str(fact["session_date"]), {"total": 0, "eligible": 0})
-        day["total"] += 1
+            category, reason = categorize(fact, row, auto_release=auto_release,
+                                          lms_dry=(entry or {}).get("lms_dry"))
+        stored_lms = (row["lms"]["status"] if row else fact["match_status"]) or "PENDING"
+        dry_used = stored_lms == "PENDING" and entry and entry.get("lms_dry")
         known, possible = _import_estimate(category, row, recording) if row else (0, 0)
-        known_imports, possible_imports = known_imports + known, possible_imports + possible
-        if category == READY_TO_QUEUE:
-            day["eligible"] += 1
-            if recording and recording["selected_duration_seconds"]:
-                known_seconds += recording["selected_duration_seconds"]
-        rows.append(monitor.redact({
-            "lecture_id": lid, "subject": fact["subject"], "module": fact["module"],
+        add({
+            "lecture_id": lid, "subject": fact["subject"], "module": fact["module"], "origin": origin,
             "session_date": str(fact["session_date"]), "scheduled_start": _iso(fact["scheduled_start"]),
             "scheduled_end": _iso(fact["scheduled_end"]),
-            "lms": row["lms"] if row else {"status": fact["match_status"] or "PENDING"},
+            "lms": {**(row["lms"] if row else {"status": stored_lms}),
+                    **({"status": entry["lms_dry"], "occurrence_id": entry.get("lms_occurrence_id")} if dry_used else {})},
             "recording": {**(row["recording"] if row else {"status": fact["recording_status"] or "PENDING"}),
                           **(recording or {"verified_count": 0, "candidates": 0, "selected_part": None,
                                            "selection_rule": None, "selected_duration_seconds": None})},
@@ -246,18 +328,64 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
             "release": row["release"]["status"] if row else None,
             "playback": row["playback"] if row else None,
             "monitor_state": row["state"] if row else None,
+            "verification": {"teams": LIVE_TEAMS if entry else STORED,
+                             "lms": LIVE_DRY_RUN if dry_used else (STORED if stored_lms != "PENDING" else AT_RUN),
+                             "recording": STORED if (row and row["recording"]["status"] != "PENDING") else AT_RUN},
+            "basis": "DRY_RUN" if dry_used else "STORED",
             "category": category, "proposed_action": ACTIONS[category], "reason": reason,
-            "data_source": "DATABASE"}))
+            "data_source": "LIVE_DISCOVERY+DATABASE" if entry else "DATABASE"},
+            category, str(fact["session_date"]), known, possible,
+            (recording or {}).get("selected_duration_seconds"))
+
+    for lid, entry in sorted(found.items(), key=lambda kv: (kv[1]["session_date"], kv[1].get("scheduled_start") or "")):
+        if lid in seen:
+            continue
+        category, reason = new_lecture_category(entry, now=now)
+        add({
+            "lecture_id": lid, "subject": entry.get("subject"), "module": entry.get("module"), "origin": TEAMS_NEW,
+            "session_date": entry["session_date"], "scheduled_start": entry.get("scheduled_start"),
+            "scheduled_end": entry.get("scheduled_end"),
+            "lms": {"status": entry.get("lms_dry") or "UNKNOWN", "occurrence_id": entry.get("lms_occurrence_id")},
+            "recording": {"status": "UNKNOWN", "verified_count": 0, "candidates": 0, "selected_part": None,
+                          "selection_rule": None, "selected_duration_seconds": None},
+            "bunny": None, "release": None, "playback": None, "monitor_state": None,
+            "verification": {"teams": LIVE_TEAMS, "lms": LIVE_DRY_RUN if entry.get("lms_dry") else AT_RUN,
+                             "recording": AT_RUN},
+            "basis": "DRY_RUN", "category": category, "proposed_action": ACTIONS[category], "reason": reason,
+            "data_source": "LIVE_DISCOVERY"},
+            category, entry["session_date"], *((0, 1) if category in ELIGIBLE else (0, 0)), None)
+
+    incomplete_days = sorted(d for d, info in per_day.items() if info["discovery"] != COMPLETE)
+    complete = discovered is not None and not incomplete_days
     summary = {
-        "total": len(rows), "eligible": counts[READY_TO_QUEUE], "already_published": counts[ALREADY_PUBLISHED],
+        "total": len(rows), "eligible": sum(counts[c] for c in ELIGIBLE), "ready": counts[READY_TO_QUEUE],
+        "resume": counts[RESUME_REQUIRED], "already_published": counts[ALREADY_PUBLISHED],
         "already_processing": counts[ALREADY_PROCESSING],
         "blocked": sum(counts[c] for c in BLOCKED_CATEGORIES), "skipped": counts[SKIPPED],
+        "missing_lms": counts[MISSING_LMS_MATCH], "missing_recording": counts[MISSING_RECORDING],
+        "review": counts[REVIEW_REQUIRED],
+        "teams_discovered": origins[TEAMS_NEW] + origins[TEAMS_EXISTING], "existing": len(seen),
+        "new": origins[TEAMS_NEW], "stored_only": origins[STORED_ONLY],
         "categories": counts, "estimated_imports": {"known": known_imports, "possible": possible_imports,
                                                     "upper_bound": known_imports + possible_imports},
-        "known_selected_duration_seconds": round(known_seconds, 1), "per_day": per_day}
-    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "days": len(per_day),
-            "library_id": int(library_id), "generated_at": now.isoformat(), "data_source": "DATABASE",
-            "summary": summary, "lectures": rows, "fingerprint": fingerprint(date_from, date_to, library_id, rows)}
+        "known_selected_duration_seconds": round(known_seconds, 1), "per_day": per_day,
+        "complete": complete, "incomplete_days": incomplete_days}
+    return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "days": len(days),
+            "library_id": int(library_id), "generated_at": now.isoformat(),
+            "data_source": "LIVE_DISCOVERY+DATABASE" if discovered is not None else "DATABASE",
+            "complete": complete, "summary": summary, "lectures": rows,
+            "fingerprint": fingerprint(date_from, date_to, library_id, rows)}
+
+
+def discovered_entry(lecture, *, lms_status: str | None = None, lms_occurrence_id: str | None = None) -> dict:
+    """What a preview keeps of one canonical Lecture from live discovery: identity, times, subject, codes.
+    Never the join URL, a meeting id or an organizer address."""
+    return monitor.redact({
+        "lecture_id": str(lecture.lecture_id), "session_date": lecture.session_date.isoformat(),
+        "subject": lecture.subject, "module": lecture.module,
+        "scheduled_start": _iso(lecture.scheduled_start), "scheduled_end": _iso(lecture.scheduled_end),
+        "meeting_resolved": bool(lecture.downstream_ready), "lms_dry": lms_status,
+        "lms_occurrence_id": lms_occurrence_id})
 
 
 def fingerprint(date_from: date, date_to: date, library_id: int, rows: list[dict]) -> str:
@@ -270,9 +398,20 @@ def fingerprint(date_from: date, date_to: date, library_id: int, rows: list[dict
 def run_items(preview: dict) -> list[dict]:
     """The items a confirmed run records: every lecture of the range, with its starting status."""
     return [{"lecture_id": r["lecture_id"], "session_date": r["session_date"], "category": r["category"],
-             "status": ITEM_STATUS[r["category"]],
-             "reason": None if ITEM_STATUS[r["category"]] in ("PENDING", "PROCESSING") else r["category"]}
-            for r in preview["lectures"]]
+             "status": ITEM_STATUS[r["category"]], "origin": r.get("origin") or STORED_ONLY,
+             "reason": None if ITEM_STATUS[r["category"]] in ("PENDING", "PROCESSING") else r["category"],
+             "detail": _identity(r)} for r in preview["lectures"]]
+
+
+def _identity(row: dict) -> dict:
+    """The display identity an item keeps until its lecture is persisted (no URL, no meeting id)."""
+    return {k: row.get(k) for k in ("subject", "module", "scheduled_start", "scheduled_end")}
+
+
+def preview_items(preview: dict) -> list[dict]:
+    """A preview's snapshot rows (status PREVIEWED)."""
+    return [{"lecture_id": r["lecture_id"], "session_date": r["session_date"], "category": r["category"],
+             "status": "PREVIEWED", "origin": r["origin"], "reason": None, "detail": r} for r in preview["lectures"]]
 
 
 def _iso(value):
@@ -281,6 +420,14 @@ def _iso(value):
 
 # --------------------------------------------------------------------------- the coordinator
 LIVE_LECTURE_JOBS = "SELECT count(*) FROM public.bunny_publisher_jobs WHERE lecture_id = %s AND status = ANY(%s)"
+# Live work that can still clear a failure / review state (an operator retry re-queues one of these). A track's
+# routine follow-up (recording verify, transcript refresh) cannot, so it never holds a failed item open.
+LIVE_RECOVERY = """
+SELECT job_kind FROM public.bunny_publisher_jobs
+ WHERE lecture_id = %s AND status IN ('QUEUED', 'RUNNING', 'RETRY_WAIT')
+   AND (job_kind IN ('IMPORT_VIDEO', 'POLL_ENCODING')
+        OR (job_kind = 'RESOLVE_RECORDING' AND coalesce((payload ->> 'verify')::boolean, false) = false))
+"""
 IMPORT_LOAD = """
 SELECT count(*) FILTER (WHERE payload ? %(tag)s),
        count(*) FILTER (WHERE NOT payload ? %(tag)s AND status IN ('QUEUED', 'RETRY_WAIT'))
@@ -299,8 +446,18 @@ SELECT j.job_id, j.lecture_id
 """
 
 
+REGISTERED = """
+SELECT lecture_id::text, session_date, subject, module, scheduled_start, scheduled_end
+  FROM public.lecture_sessions WHERE session_date BETWEEN %s AND %s
+"""
+
+
 class HistoricalBackfill:
-    """The daemon's HISTORICAL_BACKFILL task: advance the one active run by one bounded step."""
+    """
+    The daemon's HISTORICAL_BACKFILL task: advance the active preview and the active run by one bounded step
+    each (at most `backfill_discovery_days` days of Teams discovery per tick, so the scheduler thread - which
+    also runs daily discovery and release - is never held for long).
+    """
 
     def __init__(self, *, config, connect, planner, queue=None, repository=None, clock=None):
         self.config, self.connect, self.planner = config, connect, planner
@@ -315,41 +472,194 @@ class HistoricalBackfill:
         connection.autocommit = True
         try:
             try:
-                run = self.runs.active(connection)
+                preview, run = self.runs.active(connection, PREVIEW), self.runs.active(connection, EXECUTE)
             except psycopg.errors.UndefinedTable:
                 return {"status": "NOT_INSTALLED"}            # migration 029 not applied: nothing to do
+            out = {"preview": self._preview(connection, preview)} if preview is not None else {}
             if run is None:
-                return {"status": "IDLE"}
-            run_id = str(run["run_id"])
-            if run["cancel_requested_at"] is not None:
-                return self._cancel(connection, run)
-            if self.config.library_id is None or int(run["library_id"]) != int(self.config.library_id):
-                self._finish(connection, run_id, "FAILED", "HISTORICAL_BACKFILL_FAILED",
-                             {"code": "LIBRARY_MISMATCH", "run_library_id": int(run["library_id"])})
-                return {"status": "FAILED", "code": "LIBRARY_MISMATCH"}
-            if run["status"] == "QUEUED":
-                with connection.transaction():
-                    self.runs.start(connection, run_id)
-                    self.queue.event(connection, "HISTORICAL_BACKFILL_STARTED", actor="publisher:backfill",
-                                     detail={"run_id": run_id, "date_from": str(run["date_from"]),
-                                             "date_to": str(run["date_to"])})
-            if run["lms_matched_at"] is None:
-                lms = self.planner.match_range(run["date_from"], run["date_to"])
-                done = lms.get("status") == "COMPLETED"
-                self.runs.lms_matched(connection, run_id, str(lms.get("status") or "UNKNOWN"), done=done)
-                if not done:
-                    detail = {"status": "WAITING_FOR_LMS", "lms": str(lms.get("status")), "code": lms.get("error")}
-                    self.runs.ticked(connection, run_id, detail)
-                    return detail
-            detail = self._advance(connection, run)
-            self.runs.ticked(connection, run_id, detail)
-            counts = self.runs.counts(connection, run_id)
-            if counts["PENDING"] + counts["PROCESSING"] == 0:
-                self._finish(connection, run_id, "COMPLETED", "HISTORICAL_BACKFILL_COMPLETED", {"counts": counts})
-                detail["status"] = "COMPLETED"
-            return {**detail, "counts": counts}
+                return {"status": "IDLE", **out}
+            return {**self._execute(connection, run), **out}
         finally:
             connection.close()
+
+    # -- execute -------------------------------------------------------------------------------
+    def _execute(self, connection, run) -> dict:
+        run_id = str(run["run_id"])
+        if run["cancel_requested_at"] is not None:
+            return self._cancel(connection, run)
+        if self.config.library_id is None or int(run["library_id"]) != int(self.config.library_id):
+            self._finish(connection, run_id, "FAILED", "HISTORICAL_BACKFILL_FAILED",
+                         {"code": "LIBRARY_MISMATCH", "run_library_id": int(run["library_id"])})
+            return {"status": "FAILED", "code": "LIBRARY_MISMATCH"}
+        if run["status"] == "QUEUED":
+            with connection.transaction():
+                self.runs.start(connection, run_id)
+                self.queue.event(connection, "HISTORICAL_BACKFILL_STARTED", actor="publisher:backfill",
+                                 detail={"run_id": run_id, "date_from": str(run["date_from"]),
+                                         "date_to": str(run["date_to"])})
+        if run["lms_matched_at"] is None:
+            discovering = self._discover(connection, run)
+            if discovering is not None:
+                self.runs.ticked(connection, run_id, discovering)
+                return discovering
+            self._reconcile_items(connection, run)
+            lms = self.planner.match_range(run["date_from"], run["date_to"])
+            done = lms.get("status") == "COMPLETED"
+            self.runs.lms_matched(connection, run_id, str(lms.get("status") or "UNKNOWN"), done=done)
+            if not done:
+                detail = {"status": "WAITING_FOR_LMS", "lms": str(lms.get("status")), "code": lms.get("error")}
+                self.runs.ticked(connection, run_id, detail)
+                return detail
+        detail = self._advance(connection, run)
+        self.runs.ticked(connection, run_id, detail)
+        counts = self.runs.counts(connection, run_id)
+        if counts["PENDING"] + counts["PROCESSING"] == 0:
+            self._finish(connection, run_id, "COMPLETED", "HISTORICAL_BACKFILL_COMPLETED", {"counts": counts})
+            detail["status"] = "COMPLETED"
+        return {**detail, "counts": counts}
+
+    # -- source discovery ----------------------------------------------------------------------
+    def _calendar(self):
+        return self.planner.calendar if self.config.discover_calendar else None
+
+    def _todo(self, run, coverage) -> list[str]:
+        """The days of the range whose discovery still has to be attempted (failed days are retried a few times)."""
+        days = [d.isoformat() for d in business_days(run["date_from"], run["date_to"])]
+        return [d for d in days if (coverage.get(d) or {}).get("status") not in (COMPLETE, NOT_AVAILABLE)
+                and int((coverage.get(d) or {}).get("attempts", 0)) < DAY_ATTEMPTS]
+
+    def _discover(self, connection, run) -> dict | None:
+        """
+        Step 0 of a run: persist each day's Teams lectures exactly as the daily publisher does
+        (CalendarDiscovery.discover_day: same identity, same conflict-tolerant upsert, one short transaction per
+        lecture). None once every day has been attempted; otherwise this tick's progress.
+        """
+        run_id, coverage = str(run["run_id"]), dict(run["discovery"] or {})
+        todo, calendar = self._todo(run, coverage), self._calendar()
+        if calendar is None:
+            for day in todo:
+                self.runs.record_day(connection, run_id, day, {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF"})
+            return None
+        for day in todo[:self.config.backfill_discovery_days]:
+            attempts = int((coverage.get(day) or {}).get("attempts", 0)) + 1
+            try:
+                outcome = calendar.discover_day(connection, date.fromisoformat(day))
+                coverage[day] = {"status": COMPLETE, "attempts": attempts,
+                                 "teams_events": outcome.get("teams_events_found"),
+                                 "lectures": outcome.get("canonical_lecture_candidates"),
+                                 "created": outcome.get("registry_rows_created", 0),
+                                 "updated": outcome.get("registry_rows_updated", 0),
+                                 "locked": outcome.get("registry_rows_locked", 0)}
+            except Exception as exc:  # noqa: BLE001 - one day failing is recorded and retried, never skipped silently
+                log.warning("historical discovery failed for %s: %s", day, type(exc).__name__)
+                coverage[day] = {"status": FAILED_DAY, "attempts": attempts,
+                                 "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+            self.runs.record_day(connection, run_id, day, coverage[day])
+        left = self._todo(run, coverage)
+        if not left:
+            return None
+        return {"status": "DISCOVERING", "days_left": len(left)}
+
+    def _reconcile_items(self, connection, run) -> None:
+        """After discovery: every registered lecture of the range is an item (new ones are added, PENDING); an
+        item whose lecture was not registered is blocked with the reason (its day failed, or Teams no longer
+        lists it) - never processed from a stale preview."""
+        run_id, coverage = str(run["run_id"]), dict(run["discovery"] or {})
+        coverage.update(self.runs.get(connection, run_id)["discovery"] or {})
+        registered = {r[0]: r for r in connection.execute(REGISTERED, (run["date_from"], run["date_to"])).fetchall()}
+        items = {str(i["lecture_id"]): i for i in self.runs.items(connection, run_id)}
+        self.runs.add_items(connection, run_id, [
+            {"lecture_id": lid, "session_date": row[1], "category": READY_TO_QUEUE, "status": "PENDING",
+             "origin": DISCOVERED_AT_RUN, "detail": {"subject": row[2], "module": row[3],
+                                                      "scheduled_start": _iso(row[4]), "scheduled_end": _iso(row[5])}}
+            for lid, row in registered.items() if lid not in items])
+        for lid, item in items.items():
+            if lid in registered or item["status"] not in ("PENDING", "PROCESSING"):
+                continue
+            day = (coverage.get(str(item["session_date"])) or {}).get("status")
+            reason = "TEAMS_DISCOVERY_FAILED" if day == FAILED_DAY else "NOT_REGISTERED_AT_RUN"
+            self.runs.update_item(connection, run_id, lid, status="BLOCKED", reason=reason, stage="TEAMS")
+
+    # -- preview -------------------------------------------------------------------------------
+    def _preview(self, connection, run) -> dict:
+        """One bounded step of a PREVIEW: read-only Teams discovery of a few days, then the snapshot."""
+        run_id, coverage = str(run["run_id"]), dict(run["discovery"] or {})
+        if run["status"] == "QUEUED":
+            self.runs.start(connection, run_id)
+        todo, calendar = self._todo(run, coverage), self._calendar()
+        if calendar is None:
+            for day in todo:
+                coverage[day] = {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF"}
+                self.runs.record_day(connection, run_id, day, coverage[day])
+        else:
+            for day in todo[:self.config.backfill_discovery_days]:
+                attempts = int((coverage.get(day) or {}).get("attempts", 0)) + 1
+                coverage[day] = self._preview_day(date.fromisoformat(day), attempts)
+                self.runs.record_day(connection, run_id, day, coverage[day])
+        left = self._todo(run, coverage)
+        if left:
+            return {"status": "PREVIEWING", "days_left": len(left)}
+        return self._finish_preview(connection, run, coverage)
+
+    def _read_only(self):
+        connection = self.connect()
+        connection.read_only = True                  # every transaction BEGIN READ ONLY: PostgreSQL refuses writes
+        return connection
+
+    def _preview_day(self, day: date, attempts: int) -> dict:
+        """One day's live, read-only discovery (persist=False on a READ ONLY connection) and dry LMS match."""
+        try:
+            with self._read_only() as ro:
+                summary, found = self.planner.calendar.preview_day(ro, day)
+                lectures = {str(l.lecture_id): l for l in found if l.session_date == day}   # its own Cairo date only
+                lms, lms_status = self._dry_lms(ro, day, list(lectures.values()))
+        except Exception as exc:  # noqa: BLE001 - recorded: the preview is INCOMPLETE until the day succeeds
+            log.warning("historical preview discovery failed for %s: %s", day, type(exc).__name__)
+            return {"status": FAILED_DAY, "attempts": attempts,
+                    "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+        return {"status": COMPLETE, "attempts": attempts, "calendar_events": summary.get("calendar_events_found"),
+                "teams_events": summary.get("teams_events_found"), "lectures_found": len(lectures),
+                "lms_dry_run": lms_status,
+                "lectures": [discovered_entry(l, lms_status=(lms.get(lid) or (None, None))[0],
+                                              lms_occurrence_id=(lms.get(lid) or (None, None))[1])
+                             for lid, l in sorted(lectures.items())]}
+
+    def _dry_lms(self, ro, day: date, lectures: list) -> tuple[dict, str]:
+        """The LMS matcher's answer for the day's lectures (stored + newly found), evaluated, never persisted."""
+        if self.planner.lms_source is None:
+            return {}, "NOT_CONFIGURED"
+        from app.lms import service as lms_service
+        from app.lms.matching import MatchConfig
+        from app.lms.sources import lecture_from_row, load_lectures, window_for
+        try:
+            stored = load_lectures(ro, day, day)
+            known = {f.lecture_id for f in stored}
+            facts = stored + [lecture_from_row((str(l.lecture_id), l.session_date, l.scheduled_start, l.scheduled_end,
+                                                l.join_url, l.meeting_id, False))
+                              for l in lectures if str(l.lecture_id) not in known]
+            snapshot = self.planner.lms_source.load(*window_for(day, day))
+            results = lms_service.evaluate(facts, snapshot, MatchConfig.from_text(self.config.test_programmes))
+        except Exception as exc:  # noqa: BLE001 - the LMS being unavailable leaves the match to the run
+            log.warning("historical preview LMS dry run failed for %s: %s", day, type(exc).__name__)
+            return {}, "UNAVAILABLE"
+        return {r.lecture_id: (r.status, r.primary.occurrence_id if r.primary else None) for r in results}, "EVALUATED"
+
+    def _finish_preview(self, connection, run, coverage) -> dict:
+        run_id, library = str(run["run_id"]), int(run["library_id"])
+        with self._read_only() as ro:
+            facts = monitor.load_facts(ro, run["date_from"], run["date_to"], library)
+            recordings = load_recordings(ro, [f["lecture_id"] for f in facts])
+            views = {f["lecture_id"]: monitor.resolve(ro, f, library_id=library, language=self.config.caption_language)
+                     for f in facts if monitor.needs_resolution(f)}
+        discovered = {e["lecture_id"]: e for day in coverage.values() for e in (day or {}).get("lectures") or ()}
+        preview = build_preview(facts, views, recordings, date_from=run["date_from"], date_to=run["date_to"],
+                                library_id=library, now=self.clock(), auto_release=self.config.auto_release,
+                                discovered=discovered, coverage=coverage)
+        status = "COMPLETED" if preview["complete"] else "INCOMPLETE"
+        with connection.transaction():
+            self.runs.replace_preview_items(connection, run_id, preview_items(preview))
+            self.runs.finish(connection, run_id, status, fingerprint=preview["fingerprint"], summary=preview["summary"])
+        return {"status": status, "lectures": preview["summary"]["total"], "eligible": preview["summary"]["eligible"]}
 
     def _finish(self, connection, run_id, status, event, detail) -> None:
         with connection.transaction():
@@ -399,7 +709,8 @@ class HistoricalBackfill:
         if fact is None:
             self.runs.update_item(connection, run_id, lid, status="FAILED", reason="LECTURE_NOT_FOUND")
             return budget
-        status, reason = self._settled(fact, row)
+        recovering = {r[0] for r in connection.execute(LIVE_RECOVERY, (lid,)).fetchall()}
+        status, reason = self._settled(fact, row, recovering=recovering)
         stage = stage_of(row)
         detail = progress_of(row)
         if status is not None:
@@ -428,7 +739,7 @@ class HistoricalBackfill:
             deferred = planned["imports_deferred"]
         out["jobs_created"] += created
         out["imports_deferred"] += deferred
-        live = connection.execute(LIVE_LECTURE_JOBS, (lid, list(LIVE))).fetchone()[0]
+        live = connection.execute(LIVE_LECTURE_JOBS, (lid, list(LIVE))).fetchone()[0]   # after this tick's planning
         stalled = 0 if (live or created or deferred or stage == "RELEASE") else int(
             (item.get("detail") or {}).get("stalled_ticks", 0)) + 1
         if stalled >= STALL_TICKS:
@@ -440,8 +751,11 @@ class HistoricalBackfill:
                               detail={**detail, "stalled_ticks": stalled})
         return budget
 
-    def _settled(self, fact, row) -> tuple[str | None, str | None]:
-        """(final item status, reason), or (None, None) while the pipeline is still moving."""
+    def _settled(self, fact, row, *, recovering=frozenset()) -> tuple[str | None, str | None]:
+        """
+        (final item status, reason), or (None, None) while the pipeline is still moving. A failure or review state
+        does not settle the item while the lecture still has live publisher work (an operator retry re-queued it).
+        """
         state, lms = row["state"], row["lms"]["status"]
         if state in PUBLISHED_STATES:
             return "COMPLETED", "RELEASED"
@@ -452,9 +766,10 @@ class HistoricalBackfill:
         if lms != "VERIFIED":
             return "BLOCKED", f"LMS_{lms}"           # the run matched the range first: an operator resolves it
         if state == monitor.VIDEO_FAILED:
-            return "FAILED", row["reason"][:200]
+            video_retry = recovering & {"IMPORT_VIDEO", "POLL_ENCODING"}
+            return (None, None) if video_retry else ("FAILED", row["reason"][:200])
         if state in (monitor.BLOCKED_IDENTITY, monitor.REVIEW_REQUIRED, monitor.RELEASED_NOT_PLAYABLE):
-            return "BLOCKED", row["reason"][:200]
+            return (None, None) if recovering else ("BLOCKED", row["reason"][:200])
         if state == monitor.READY_TO_RELEASE and not self.config.auto_release:
             return "COMPLETED", "VERIFIED_READY_AWAITING_MANUAL_RELEASE"
         if state == monitor.SCHEDULED:

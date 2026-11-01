@@ -152,6 +152,7 @@ class PublisherConfig:
     backfill_max_active: int = 20                   # lectures of a run in progress at once
     backfill_max_imports: int = 1                   # historical IMPORT_VIDEO jobs live at once
     backfill_interval: timedelta = timedelta(seconds=60)
+    backfill_discovery_days: int = 2                # Teams days a preview / run discovers per tick
     # -- alerts (prepared; delivery is not enabled in this phase) -------------------
     alert_destination: str = ""
     alert_delivery_enabled: bool = False
@@ -223,6 +224,8 @@ class PublisherConfig:
             found.append("PUBLISHER_BACKFILL_BATCH_SIZE must be 1..100 and PUBLISHER_BACKFILL_MAX_ACTIVE 1..200")
         if not 1 <= self.backfill_max_imports <= self.max_imports_in_flight:
             found.append("PUBLISHER_BACKFILL_MAX_IMPORTS must be 1..PUBLISHER_MAX_IMPORTS_IN_FLIGHT")
+        if not 1 <= self.backfill_discovery_days <= 10:
+            found.append("PUBLISHER_BACKFILL_DISCOVERY_DAYS must be 1..10")
         if self.discovery_interval < timedelta(minutes=1):
             found.append("PUBLISHER_DISCOVERY_INTERVAL_SECONDS must be >= 60")
         if self.alert_delivery_enabled:
@@ -278,7 +281,8 @@ class PublisherConfig:
             "max_imports_in_flight": self.max_imports_in_flight,
             "backfill": {"max_days": self.backfill_max_days, "batch_size": self.backfill_batch_size,
                          "max_active": self.backfill_max_active, "max_imports": self.backfill_max_imports,
-                         "interval_seconds": self.backfill_interval.total_seconds()},
+                         "interval_seconds": self.backfill_interval.total_seconds(),
+                         "discovery_days_per_tick": self.backfill_discovery_days},
             "discovery_interval_seconds": self.discovery_interval.total_seconds(),
             "light_reconcile_interval_hours": self.light_reconcile_interval.total_seconds() / 3600,
             "full_reconcile_at_cairo": self.full_reconcile_at.isoformat(timespec="minutes"),
@@ -365,6 +369,7 @@ class PublisherConfig:
             backfill_max_active=number("PUBLISHER_BACKFILL_MAX_ACTIVE", 20),
             backfill_max_imports=number("PUBLISHER_BACKFILL_MAX_IMPORTS", 1),
             backfill_interval=timedelta(seconds=number("PUBLISHER_BACKFILL_INTERVAL_SECONDS", 60)),
+            backfill_discovery_days=number("PUBLISHER_BACKFILL_DISCOVERY_DAYS", 2),
             alert_destination=text("PUBLISHER_ALERT_DESTINATION"),
             alert_delivery_enabled=flag("PUBLISHER_ALERT_DELIVERY_ENABLED"))
 

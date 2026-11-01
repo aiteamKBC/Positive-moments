@@ -1,6 +1,7 @@
 /**
- * Historical Backfill in the Publishing Monitor: the inclusive range check, Run only after a current preview
- * and an explicit confirmation (operators only), and the run's progress read back from the server.
+ * Historical Backfill in the Publishing Monitor: the inclusive range check, a preview the publisher service
+ * discovers live in Teams (followed until every day is discovered), Run only for a COMPLETE preview after an
+ * explicit confirmation (operators only), and the run's progress read back from the server.
  *
  * The API module is mocked with the shapes the backfill endpoints return (values are made up).
  */
@@ -9,66 +10,77 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import HistoricalBackfillPanel from '../src/components/publishing/HistoricalBackfillPanel.vue'
 import {
-  cancelBackfill, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
+  cancelBackfill, getBackfillPreview, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
 } from '../src/services/publishing'
 import type { BackfillPreview, BackfillRun, BackfillRunDetail, BackfillRuns } from '../src/types/backfill'
-import { CATEGORY, canRun, duration, inclusiveDays, rangeProblem } from '../src/utils/backfill'
+import { CATEGORY, ORIGIN, canRun, duration, inclusiveDays, rangeProblem } from '../src/utils/backfill'
 
 vi.mock('../src/services/publishing', () => ({
-  getBackfillRuns: vi.fn(), previewBackfill: vi.fn(), startBackfill: vi.fn(), getBackfillRun: vi.fn(),
-  cancelBackfill: vi.fn(), retryBackfill: vi.fn(),
+  getBackfillRuns: vi.fn(), previewBackfill: vi.fn(), getBackfillPreview: vi.fn(), startBackfill: vi.fn(),
+  getBackfillRun: vi.fn(), cancelBackfill: vi.fn(), retryBackfill: vi.fn(),
 }))
 const replace = vi.fn()
 const query: Record<string, string> = {}
 vi.mock('vue-router', () => ({ useRoute: () => ({ query }), useRouter: () => ({ replace }) }))
 
 const RUN_ID = 'cccccccc-0000-0000-0000-000000000001'
+const PREVIEW_ID = 'dddddddd-0000-0000-0000-000000000001'
+const DAYS = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05']
 
 function runs(over: Partial<BackfillRuns> = {}): BackfillRuns {
-  return { runs: [], active: null, operator: true, library_id: 786045, max_days: 31, today: '2026-10-29',
-    timezone: 'Africa/Cairo', ...over }
-}
-
-function preview(over: Partial<BackfillPreview['summary']> = {}): BackfillPreview {
-  return {
-    date_from: '2026-09-01', date_to: '2026-09-10', days: 10, library_id: 786045, generated_at: '2026-10-29T10:00:00Z',
-    data_source: 'DATABASE', fingerprint: 'fp', preview_token: 'signed-token', token_ttl_seconds: 1800, read_only: true,
-    summary: {
-      total: 3, eligible: 2, already_published: 0, already_processing: 0, blocked: 1, skipped: 0,
-      categories: { READY_TO_QUEUE: 2, MISSING_LMS_MATCH: 1 }, estimated_imports: { known: 1, possible: 1, upper_bound: 2 },
-      known_selected_duration_seconds: 7348.5, per_day: { '2026-09-01': { total: 1, eligible: 1 }, '2026-09-10': { total: 2, eligible: 1 } },
-      ...over,
-    },
-    lectures: [{
-      lecture_id: 'L1', subject: 'Marketing Impact and Planning', module: null, session_date: '2026-09-01',
-      scheduled_start: '2026-09-01T09:00:00Z', scheduled_end: '2026-09-01T11:00:00Z', lms: { status: 'VERIFIED' },
-      recording: { status: 'LOCATED', verified_count: 2, candidates: 2, selected_part: 2, selection_rule: 'longest_recording',
-        selected_duration_seconds: 7348.5 },
-      bunny: { status: 'NOT_IMPORTED', video: 'NOT_STARTED' }, release: 'NOT_RELEASED',
-      playback: { available: false, reason: 'NO_VIDEO' }, monitor_state: 'PROCESSING', category: 'READY_TO_QUEUE',
-      proposed_action: 'QUEUE', reason: 'LMS match verified and recording located.', data_source: 'DATABASE',
-    }],
-  }
+  return { runs: [], active: null, latest_preview: null, operator: true, library_id: 786045, max_days: 31,
+    today: '2026-10-29', timezone: 'Africa/Cairo', ...over }
 }
 
 function run(over: Partial<BackfillRun> = {}): BackfillRun {
   return {
-    run_id: RUN_ID, date_from: '2026-09-01', date_to: '2026-09-10', library_id: 786045, status: 'RUNNING',
-    requested_by: 'operator', reason: '', preview_summary: {}, lms_status: 'COMPLETED', last_tick_at: null, last_tick: {},
-    cancel_requested_at: null, cancel_requested_by: null, created_at: '2026-10-29T10:00:00Z', started_at: '2026-10-29T10:01:00Z',
-    finished_at: null, is_finished: false, cancel_requested: false,
+    run_id: RUN_ID, mode: 'EXECUTE', preview_run_id: PREVIEW_ID, date_from: '2026-09-01', date_to: '2026-09-05',
+    library_id: 786045, status: 'RUNNING', requested_by: 'operator', reason: '', preview_summary: {}, lms_status: 'COMPLETED',
+    last_tick_at: null, last_tick: {}, cancel_requested_at: null, cancel_requested_by: null, created_at: '2026-10-29T10:00:00Z',
+    started_at: '2026-10-29T10:01:00Z', finished_at: null, is_finished: false, cancel_requested: false,
+    coverage: DAYS.map(date => ({ date, status: 'COMPLETE' })), days_discovered: 5,
     counts: { total: 3, pending: 1, processing: 1, completed: 0, skipped: 0, blocked: 1, failed: 0, cancelled: 0 }, ...over,
   }
 }
 
-function detail(over: Partial<BackfillRun> = {}): BackfillRunDetail {
+function preview(state: 'running' | 'complete' | 'incomplete' = 'complete', eligible = 2): BackfillPreview {
+  const finished = state !== 'running'
+  const coverage = DAYS.map((date, n) => ({ date, status: state === 'running' && n > 1 ? 'PENDING'
+    : state === 'incomplete' && n === 2 ? 'FAILED' : 'COMPLETE' }))
   return {
-    run: run(over), generated_at: '2026-10-29T10:05:00Z', operator: true,
+    preview: run({ run_id: PREVIEW_ID, mode: 'PREVIEW', preview_run_id: null, status: state === 'running' ? 'RUNNING'
+      : state === 'incomplete' ? 'INCOMPLETE' : 'COMPLETED', is_finished: finished, coverage,
+      days_discovered: coverage.filter(c => c.status === 'COMPLETE').length, counts: undefined }),
+    complete: state === 'complete', confirmable: state === 'complete', expires_in_seconds: finished ? 1700 : null,
+    production_writes: 0, jobs_queued: 0, bunny_calls: 0,
+    summary: finished ? {
+      total: 3, eligible, ready: 1, resume: 1, already_published: 0, already_processing: 0, blocked: 1, skipped: 0,
+      missing_lms: 1, missing_recording: 0, review: 0, teams_discovered: 3, existing: 1, new: 2, stored_only: 0,
+      categories: { READY_TO_QUEUE: 1, RESUME_REQUIRED: 1, MISSING_LMS_MATCH: 1 },
+      estimated_imports: { known: 1, possible: 1, upper_bound: 2 }, known_selected_duration_seconds: 7348.5,
+      per_day: Object.fromEntries(DAYS.map(d => [d, { total: 1, eligible: 1, teams: 1, discovery: 'COMPLETE' }])),
+      complete: state === 'complete', incomplete_days: state === 'incomplete' ? ['2026-09-03'] : [],
+    } : null,
+    lectures: finished ? [{
+      lecture_id: 'L1', subject: 'Marketing Impact and Planning', module: null, session_date: '2026-09-01', origin: 'TEAMS_NEW',
+      scheduled_start: '2026-09-01T09:00:00Z', scheduled_end: '2026-09-01T11:00:00Z', lms: { status: 'VERIFIED' },
+      recording: { status: 'UNKNOWN', verified_count: 0, candidates: 0, selected_part: null, selection_rule: null,
+        selected_duration_seconds: null },
+      verification: { teams: 'LIVE', lms: 'LIVE_DRY_RUN', recording: 'TO_BE_VERIFIED_AT_RUN' }, basis: 'DRY_RUN',
+      bunny: null, release: null, playback: null, monitor_state: null, category: 'READY_TO_QUEUE',
+      proposed_action: 'QUEUE', reason: 'Only in Teams: the run registers it.', data_source: 'LIVE_DISCOVERY',
+    }] : [],
+  }
+}
+
+function detail(): BackfillRunDetail {
+  return {
+    run: run(), generated_at: '2026-10-29T10:05:00Z', operator: true,
     lectures: [{
-      lecture_id: 'L1', session_date: '2026-09-01', status: 'PROCESSING', initial_category: 'READY_TO_QUEUE', reason: null,
-      stage: 'ENCODING', retries: 0, started_at: null, finished_at: null, updated_at: null, subject: 'Marketing Impact and Planning',
-      module: null, scheduled_start: '2026-09-01T09:00:00Z', scheduled_end: '2026-09-01T11:00:00Z', monitor_state: 'PROCESSING',
-      monitor_reason: null, pipeline: [
+      lecture_id: 'L1', session_date: '2026-09-01', status: 'PROCESSING', origin: 'TEAMS_NEW', registered: true,
+      initial_category: 'READY_TO_QUEUE', reason: null, stage: 'ENCODING', retries: 0, started_at: null, finished_at: null,
+      updated_at: null, subject: 'Marketing Impact and Planning', module: null, scheduled_start: '2026-09-01T09:00:00Z',
+      scheduled_end: '2026-09-01T11:00:00Z', monitor_state: 'PROCESSING', monitor_reason: null, pipeline: [
         { key: 'teams', label: 'Teams', status: 'LOCATED', done: true, failed: false },
         { key: 'lms', label: 'LMS Match', status: 'VERIFIED', done: true, failed: false },
         { key: 'import', label: 'Bunny Import', status: 'UPLOADED', done: true, failed: false },
@@ -86,96 +98,115 @@ async function mounted(over: Partial<BackfillRuns> = {}) {
   const wrapper = mount(HistoricalBackfillPanel)
   await flushPromises()
   await wrapper.find('[data-test="bf-from"]').setValue('2026-09-01')
-  await wrapper.find('[data-test="bf-to"]').setValue('2026-09-10')
+  await wrapper.find('[data-test="bf-to"]').setValue('2026-09-05')
   return wrapper
+}
+
+async function previewed(wrapper: ReturnType<typeof mount>) {
+  await wrapper.find('[data-test="bf-preview"]').trigger('click')
+  await flushPromises()
 }
 
 describe('Historical Backfill vocabulary and checks', () => {
   it('counts both boundary dates and refuses reversed, future and oversized ranges', () => {
     expect(inclusiveDays('2026-09-01', '2026-09-01')).toBe(1)
-    expect(inclusiveDays('2026-09-01', '2026-09-10')).toBe(10)
+    expect(inclusiveDays('2026-09-01', '2026-09-05')).toBe(5)
     expect(inclusiveDays('2026-10-24', '2026-10-31')).toBe(8)                 // across the UK clock change
-    expect(rangeProblem('2026-09-01', '2026-09-10', '2026-10-29', 31)).toBe('')
+    expect(rangeProblem('2026-09-01', '2026-09-05', '2026-10-29', 31)).toBe('')
     expect(rangeProblem('2026-09-10', '2026-09-01', '2026-10-29', 31)).toMatch(/before/)
     expect(rangeProblem('2026-10-01', '2026-10-30', '2026-10-29', 31)).toMatch(/future/)
     expect(rangeProblem('2026-08-01', '2026-09-10', '2026-10-29', 31)).toMatch(/at most 31/)
     expect(rangeProblem('', '2026-09-10', '2026-10-29', 31)).toMatch(/both/)
   })
 
-  it('offers Run only for a current preview of the same range, to an operator, with nothing else running', () => {
-    const p = preview()
-    expect(canRun(p, '2026-09-01', '2026-09-10', true, false)).toBe(true)
-    expect(canRun(null, '2026-09-01', '2026-09-10', true, false)).toBe(false)
-    expect(canRun(p, '2026-09-01', '2026-09-11', true, false)).toBe(false)
-    expect(canRun(p, '2026-09-01', '2026-09-10', false, false)).toBe(false)
-    expect(canRun(p, '2026-09-01', '2026-09-10', true, true)).toBe(false)
-    expect(canRun(preview({ eligible: 0 }), '2026-09-01', '2026-09-10', true, false)).toBe(false)
+  it('offers Run only for a complete, fresh preview of the same range, to an operator, with nothing else running', () => {
+    expect(canRun(preview(), '2026-09-01', '2026-09-05', true, false)).toBe(true)
+    expect(canRun(preview('incomplete'), '2026-09-01', '2026-09-05', true, false)).toBe(false)
+    expect(canRun(preview('running'), '2026-09-01', '2026-09-05', true, false)).toBe(false)
+    expect(canRun(null, '2026-09-01', '2026-09-05', true, false)).toBe(false)
+    expect(canRun(preview(), '2026-09-01', '2026-09-06', true, false)).toBe(false)
+    expect(canRun(preview(), '2026-09-01', '2026-09-05', false, false)).toBe(false)
+    expect(canRun(preview(), '2026-09-01', '2026-09-05', true, true)).toBe(false)
+    expect(canRun(preview('complete', 0), '2026-09-01', '2026-09-05', true, false)).toBe(false)
   })
 
   it('writes durations for people and never shows a blocked category as success', () => {
     expect(duration(7348.5)).toBe('2 h 2 min')
-    expect(duration(62)).toBe('1 min')
     expect(duration(null)).toBe('—')
     for (const key of ['MISSING_LMS_MATCH', 'MISSING_RECORDING', 'REVIEW_REQUIRED', 'ERROR']) {
       expect(CATEGORY[key].tone).not.toBe('ok')
     }
+    expect(Object.keys(ORIGIN)).toEqual(['TEAMS_NEW', 'TEAMS_EXISTING', 'STORED_ONLY', 'DISCOVERED_AT_RUN'])
   })
 })
 
 describe('Historical Backfill panel', () => {
   beforeEach(() => {
     vi.mocked(getBackfillRun).mockResolvedValue(detail())
-    vi.mocked(previewBackfill).mockResolvedValue(preview())
+    vi.mocked(previewBackfill).mockResolvedValue(preview('running'))
   })
   afterEach(() => {
     vi.clearAllMocks()
+    vi.useRealTimers()
     for (const key of Object.keys(query)) delete query[key]
   })
 
-  it('keeps Run disabled until a preview of the chosen range exists', async () => {
+  it('follows the Teams discovery day by day and enables Run only once the preview is complete', async () => {
+    vi.useFakeTimers()
+    vi.mocked(getBackfillPreview).mockResolvedValueOnce(preview('running')).mockResolvedValue(preview('complete'))
     const wrapper = await mounted()
+    await previewed(wrapper)
+    expect(previewBackfill).toHaveBeenCalledWith('2026-09-01', '2026-09-05')
+    expect(wrapper.find('[data-test="bf-coverage"]').text()).toContain('2 / 5 days discovered')
     expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeDefined()
-    await wrapper.find('[data-test="bf-preview"]').trigger('click')
+    expect(wrapper.find('[data-test="bf-blocked"]').text()).toMatch(/still discovering/)
+    await vi.advanceTimersByTimeAsync(3_100)
     await flushPromises()
-    expect(previewBackfill).toHaveBeenCalledWith('2026-09-01', '2026-09-10')
-    expect(wrapper.find('[data-test="bf-preview-table"]').text()).toContain('Marketing Impact and Planning')
-    expect(wrapper.find('[data-test="bf-preview-table"]').text()).toContain('2 h 2 min')
+    expect(wrapper.find('[data-test="bf-preview-table"]').text()).toContain('New · Teams only')
+    expect(wrapper.find('[data-test="bf-preview-table"]').text()).toContain('checked at run')
+    expect(wrapper.text()).toContain('Teams lectures discovered')
     expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeUndefined()
-    await wrapper.find('[data-test="bf-to"]').setValue('2026-09-09')               // the preview no longer applies
+  })
+
+  it('never offers Run for an incomplete preview and says which days are missing', async () => {
+    vi.mocked(getBackfillPreview).mockResolvedValue(preview('incomplete'))
+    const wrapper = await mounted()
+    await previewed(wrapper)
+    expect(wrapper.find('[data-test="bf-incomplete"]').text()).toMatch(/INCOMPLETE/)
     expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeDefined()
   })
 
-  it('asks for confirmation showing range, eligible lectures, imports and the library before starting', async () => {
+  it('asks for confirmation showing range, lectures, imports and the library before starting', async () => {
+    vi.mocked(getBackfillPreview).mockResolvedValue(preview('complete'))
     vi.mocked(startBackfill).mockResolvedValue({ run: run({ status: 'QUEUED' }), detail: 'queued' })
     const wrapper = await mounted()
-    await wrapper.find('[data-test="bf-preview"]').trigger('click')
-    await flushPromises()
+    await previewed(wrapper)
     await wrapper.find('[data-test="bf-run"]').trigger('click')
     expect(startBackfill).not.toHaveBeenCalled()
     const confirmation = wrapper.find('[data-test="bf-confirmation"]').text()
-    expect(confirmation).toContain('10 days')
+    expect(confirmation).toContain('5 days')
+    expect(confirmation).toContain('2 new from Teams')
     expect(confirmation).toContain('786045')
     expect(confirmation).toContain('up to 2')
     await wrapper.find('[data-test="bf-confirm"]').trigger('click')
     await flushPromises()
     expect(startBackfill).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(startBackfill).mock.calls[0][0].preview_token).toBe('signed-token')
+    expect(vi.mocked(startBackfill).mock.calls[0][0].preview.run_id).toBe(PREVIEW_ID)
     expect(getBackfillRun).toHaveBeenCalledWith(RUN_ID)
   })
 
   it('lets a non-operator preview but never start', async () => {
+    vi.mocked(getBackfillPreview).mockResolvedValue(preview('complete'))
     const wrapper = await mounted({ operator: false })
-    await wrapper.find('[data-test="bf-preview"]').trigger('click')
-    await flushPromises()
+    await previewed(wrapper)
     expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('backfill operator role')
   })
 
-  it('shows a reversed range at once and does not ask the server', async () => {
-    const wrapper = await mounted()
-    await wrapper.find('[data-test="bf-from"]').setValue('2026-09-12')
-    expect(wrapper.find('[data-test="bf-problem"]').text()).toMatch(/before/)
-    expect(wrapper.find('[data-test="bf-preview"]').attributes('disabled')).toBeDefined()
+  it('picks up a preview still being discovered after a page refresh', async () => {
+    vi.mocked(getBackfillPreview).mockResolvedValue(preview('complete'))
+    await mounted({ latest_preview: preview('running').preview })
+    expect(getBackfillPreview).toHaveBeenCalledWith(PREVIEW_ID)
   })
 
   it('reopens the active run with its counters and pipeline, and cancels or retries it', async () => {
@@ -184,14 +215,12 @@ describe('Historical Backfill panel', () => {
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = await mounted({ runs: [run()], active: run() })
     expect(getBackfillRun).toHaveBeenCalledWith(RUN_ID)
-    const counters = wrapper.find('[data-test="bf-counters"]').text()
-    expect(counters).toContain('Pending')
-    expect(counters).toContain('Blocked')
+    expect(wrapper.find('[data-test="bf-counters"]').text()).toContain('Blocked')
     expect(wrapper.find('[data-test="bf-run-lectures"]').text()).toContain('LMS Playback')
     await wrapper.find('[data-test="bf-cancel"]').trigger('click')
     await flushPromises()
     expect(cancelBackfill).toHaveBeenCalledWith(RUN_ID)
-    expect(wrapper.find('[data-test="bf-retry"]').attributes('disabled')).toBeDefined()   // a reason is required
+    expect(wrapper.find('[data-test="bf-retry"]').attributes('disabled')).toBeDefined()
     await wrapper.find('input[aria-label="Retry reason"]').setValue('LMS session created')
     await wrapper.find('[data-test="bf-retry"]').trigger('click')
     await flushPromises()

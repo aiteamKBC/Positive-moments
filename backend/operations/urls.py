@@ -119,12 +119,14 @@ urlpatterns = [
     path("publishing-monitor/lectures/<uuid:lecture_id>/", publishing_monitor_views.lecture_view,
          name="operations-publishing-monitor-lecture"),
 
-    # Historical Backfill: preview is READ ONLY; start / cancel / retry need the operator group and only
-    # write the run record - the publisher service does the publishing (publisher_backfill_views.py).
+    # Historical Backfill: a preview is a live read-only discovery the publisher service performs; start /
+    # cancel / retry need the operator group and only write the run record (publisher_backfill_views.py).
     path("publishing-monitor/backfill/runs/", publisher_backfill_views.runs_view,
          name="operations-publisher-backfill-runs"),
     path("publishing-monitor/backfill/preview/", publisher_backfill_views.preview_view,
          name="operations-publisher-backfill-preview"),
+    path("publishing-monitor/backfill/preview/<uuid:run_id>/", publisher_backfill_views.preview_detail_view,
+         name="operations-publisher-backfill-preview-detail"),
     path("publishing-monitor/backfill/runs/start/", publisher_backfill_views.start_view,
          name="operations-publisher-backfill-start"),
     path("publishing-monitor/backfill/runs/<uuid:run_id>/", publisher_backfill_views.run_view,

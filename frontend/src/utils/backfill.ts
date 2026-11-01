@@ -17,7 +17,8 @@ function lookup(table: Record<string, Badge>, value?: string | null): Badge {
 
 /** Preview categories (what a run would do with a lecture). */
 export const CATEGORY: Record<string, Badge> = {
-  READY_TO_QUEUE: badge('Ready to queue', 'info'),
+  READY_TO_QUEUE: badge('Ready to process', 'info'),
+  RESUME_REQUIRED: badge('Incomplete · resume', 'info'),
   ALREADY_PUBLISHED: badge('Already published', 'ok'),
   ALREADY_PROCESSING: badge('Already processing', 'waiting'),
   MISSING_LMS_MATCH: badge('Missing LMS match', 'review'),
@@ -29,6 +30,7 @@ export const CATEGORY: Record<string, Badge> = {
 
 export const ACTION: Record<string, Badge> = {
   QUEUE: badge('Queue', 'brand'),
+  RESUME: badge('Resume', 'brand'),
   TRACK: badge('Track only', 'neutral'),
   NONE: badge('None', 'quiet'),
 }
@@ -46,6 +48,7 @@ export const ITEM_STATUS: Record<string, Badge> = {
 
 /** A run. */
 export const RUN_STATUS: Record<string, Badge> = {
+  INCOMPLETE: badge('Incomplete', 'error'),
   QUEUED: badge('Queued', 'waiting'),
   RUNNING: badge('Running', 'info'),
   COMPLETED: badge('Completed', 'ok'),
@@ -53,11 +56,37 @@ export const RUN_STATUS: Record<string, Badge> = {
   FAILED: badge('Failed', 'error'),
 }
 
+/** Where a lecture of the range was found. */
+export const ORIGIN: Record<string, Badge> = {
+  TEAMS_NEW: badge('New · Teams only', 'brand'),
+  TEAMS_EXISTING: badge('Teams + existing', 'neutral'),
+  STORED_ONLY: badge('Existing · not in Teams now', 'review'),
+  DISCOVERED_AT_RUN: badge('Found at run', 'brand'),
+}
+
+/** What the preview has verified, and what only the run verifies. */
+export const VERIFICATION: Record<string, string> = {
+  LIVE: 'checked live in Teams',
+  LIVE_DRY_RUN: 'dry run, re-checked at run',
+  STORED: 'from stored state',
+  TO_BE_VERIFIED_AT_RUN: 'checked at run',
+}
+
+/** One day's source discovery. */
+export const COVERAGE: Record<string, Badge> = {
+  COMPLETE: badge('Discovered', 'ok'),
+  PENDING: badge('Waiting', 'quiet'),
+  FAILED: badge('Failed', 'error'),
+  NOT_AVAILABLE: badge('Not available', 'error'),
+}
+
 export const backfillLabel = {
   category: (v?: string | null) => lookup(CATEGORY, v),
   action: (v?: string | null) => lookup(ACTION, v),
   item: (v?: string | null) => lookup(ITEM_STATUS, v),
   run: (v?: string | null) => lookup(RUN_STATUS, v),
+  origin: (v?: string | null) => lookup(ORIGIN, v),
+  coverage: (v?: string | null) => lookup(COVERAGE, v),
 }
 
 /** The progress counters, in the order the run view shows them. */
@@ -103,9 +132,17 @@ export function rangeProblem(from: string, to: string, today: string, maxDays: n
   return ''
 }
 
-/** Run Backfill is offered only for a current preview of exactly the chosen range with something to queue. */
-export function canRun(preview: { date_from: string; date_to: string; summary: { eligible: number } } | null,
-  from: string, to: string, operator: boolean, activeRun: boolean): boolean {
-  return Boolean(operator && !activeRun && preview && preview.date_from === from && preview.date_to === to
-    && preview.summary.eligible > 0)
+type PreviewLike = {
+  preview: { date_from: string; date_to: string }
+  summary: { eligible: number } | null
+  confirmable: boolean
+}
+
+/**
+ * Run Backfill is offered only for a COMPLETE, fresh preview (`confirmable`, decided by the server) of exactly
+ * the chosen range with something to process. An incomplete preview can never be run.
+ */
+export function canRun(preview: PreviewLike | null, from: string, to: string, operator: boolean, activeRun: boolean): boolean {
+  return Boolean(operator && !activeRun && preview && preview.confirmable && preview.preview.date_from === from
+    && preview.preview.date_to === to && (preview.summary?.eligible ?? 0) > 0)
 }

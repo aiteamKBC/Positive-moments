@@ -64,15 +64,19 @@ export async function getBackfillRuns() {
   return (await api.get<BackfillRuns>(`${BACKFILL}/runs/`)).data
 }
 
+/** Ask the publisher service for a live, read-only preview of the range (it answers at once; poll the result). */
 export async function previewBackfill(dateFrom: string, dateTo: string) {
-  return (await api.post<BackfillPreview>(`${BACKFILL}/preview/`, { date_from: dateFrom, date_to: dateTo },
-    { timeout: RANGE_TIMEOUT_MS })).data
+  return (await api.post<BackfillPreview>(`${BACKFILL}/preview/`, { date_from: dateFrom, date_to: dateTo })).data
+}
+
+export async function getBackfillPreview(previewId: string) {
+  return (await api.get<BackfillPreview>(`${BACKFILL}/preview/${previewId}/`)).data
 }
 
 export async function startBackfill(preview: BackfillPreview, reason: string) {
   return (await api.post<{ run: BackfillRun; detail: string }>(`${BACKFILL}/runs/start/`, {
-    date_from: preview.date_from, date_to: preview.date_to, preview_token: preview.preview_token, reason,
-    confirm: { library_id: preview.library_id, eligible: preview.summary.eligible },
+    preview_run_id: preview.preview.run_id, reason,
+    confirm: { library_id: preview.preview.library_id, eligible: preview.summary?.eligible ?? 0 },
   }, { timeout: RANGE_TIMEOUT_MS })).data
 }
 
