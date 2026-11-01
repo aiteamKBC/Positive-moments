@@ -216,6 +216,20 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+RELEASE_REASON = "OUTSIDE_RESOLVED_OCCURRENCE"
+RELEASE_EVIDENCE = ("graph_recording_id", "part_index", "call_id", "content_correlation_id", "recording_created_at",
+                    "recording_end_at", "source_drive_id", "source_item_id", "source_size_bytes",
+                    "source_duration_seconds", "classification", "located_at", "last_verified_at",
+                    "recording_source_id")
+
+
+def _released_evidence(stored, released) -> list:
+    """What a released part was (identities, times, file, duration - never a URL or file name), for the audit."""
+    return [{**{k: (v if isinstance(v, (int, float, bool)) or v is None else str(v))
+                for k, v in ((k, stored[rid].get(k)) for k in RELEASE_EVIDENCE)}, "reason": RELEASE_REASON}
+            for rid in released]
+
+
 def _moved_parts(mappings, stored) -> list:
     """[[stored, now], ...] part indexes of verified recordings whose place in the recording order changed."""
     now = {m.recording.recording_id: m.part_index for m in mappings}
@@ -416,14 +430,28 @@ class RecordingWorker:
             outcome.transcript_pairing = pairing
             return outcome, {"call_ids": call_ids, "pairing": pairing}
         moved = _moved_parts(mappings, stored)
-        renumber = bool(moved) and self._nothing_keyed_by_part(connection, lid)
-        mappings, merge_conflict = rm.merge_with_stored(mappings, stored, renumber=renumber)
+        releasable = rm.releasable_parts(stored, occurrence, expected_duration=lecture.expected_duration,
+                                         policy=self.resolution_policy)
+        unkeyed = bool(moved or releasable) and self._nothing_keyed_by_part(connection, lid)
+        released = releasable if releasable and unkeyed else []
+        mappings, merge_conflict = rm.merge_with_stored(mappings, stored, renumber=bool(moved) and unkeyed,
+                                                        released=released)
         if merge_conflict:
             return self._review(lid, merge_conflict, expected, detail), {"call_ids": call_ids}
         if moved:
             detail["recording_parts_renumbered"] = moved
-        return self._aggregate(lid, mappings, pairing, detail, since_end, lecture, now, stored), {
-            "call_ids": call_ids, "pairing": pairing, "mappings": mappings, "renumber": bool(moved)}
+        if released:
+            detail["recording_parts_released"] = _released_evidence(stored, released)
+        outcome = self._aggregate(lid, mappings, pairing, detail, since_end, lecture, now, stored)
+        if released and outcome.kind != LOCATED:
+            # A false start leaves only together with a proven recording. Until then (file pending, review)
+            # the verified rows stay as they are and no selection is recorded.
+            outcome.detail.pop("recording_parts_released", None)
+            outcome.detail.pop("recording_selection", None)
+            outcome.detail["release_pending"] = list(released)
+            return outcome, {"call_ids": call_ids, "pairing": pairing}
+        return outcome, {"call_ids": call_ids, "pairing": pairing, "mappings": mappings, "renumber": bool(moved),
+                         "release": released}
 
     def _nothing_keyed_by_part(self, connection, lecture_id) -> bool:
         with connection.transaction():
@@ -438,8 +466,11 @@ class RecordingWorker:
         Bunny video, Bunny job or operator decision). Anything else returns None: review, as before.
         """
         verified = [rid for rid, row in stored.items() if row["locate_status"] == rm.LOCATED]
-        if occurrence.status != rm.SELECTED or not verified or any(rid not in now_ids for rid in verified):
+        if occurrence.status != rm.SELECTED or not verified:
             return None
+        if rm.releasable_parts(stored, occurrence, expected_duration=lecture.expected_duration,
+                               policy=self.resolution_policy) is None:
+            return None                         # a verified recording left in a way that is not provably safe
         if not self._nothing_keyed_by_part(connection, lecture.lecture_id):
             return None
         outcome, write = self._discover(connection, lecture, stored, now, 1, counters)
@@ -585,7 +616,8 @@ class RecordingWorker:
                           if isinstance(v, (int, float, str, bool, list, dict))})
             if mappings is not None:
                 self.repository.replace_parts(connection, lid, mappings, method=rm.VERIFICATION_METHOD, now=now,
-                                              kept_reason=KEPT, renumber=bool(write.get("renumber")))
+                                              kept_reason=KEPT, renumber=bool(write.get("renumber")),
+                                              release=write.get("release") or ())
             if write.get("verified"):
                 self.repository.mark_verified(connection, lid, write["verified"], now=now)
             if write.get("transcripts"):

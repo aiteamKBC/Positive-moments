@@ -405,3 +405,21 @@ def test_a_historical_lecture_with_a_false_start_imports_only_the_lecture_record
     assert len(world.bunny.fetch_calls) == 1
     world.run(rounds=4)
     assert len(world.bunny.fetch_calls) == 1
+
+
+def test_a_historical_msp_shaped_lecture_imports_only_the_8533_s_recording(url):
+    world, teams = world_with_teams(url)
+    # a 59 s false start, then the lecture 21 min 36 s later on another call (the 2026-10-30 MSP shape)
+    subject = teams.lecture("M1", at(D1, 11), recordings=((-3 - 26 / 60, -122 - 27 / 60), (19 + 9 / 60, 41 + 22 / 60)))
+    task = task_for(world)
+    preview_run, rows = finish_preview(world, task, request_preview(world, D1, D1))
+    run = confirm(world, preview_run, rows)
+    world.run(rounds=16)
+    [(lid, _)] = registered(world, subject)
+    assert items(world, run["run_id"])[lid]["status"] == "COMPLETED"
+    [(index, duration)] = world.q("SELECT recording_part_index, round(source_duration_seconds) FROM "
+                                  "public.bunny_recording_sources WHERE lecture_id = %s", lid)
+    assert (index, duration) == (1, 8533)
+    assert world.q("SELECT recording_part_index, import_status, encoding_status FROM public.bunny_videos "
+                   "WHERE lecture_id = %s", lid) == [(1, "IDENTIFIED", "VERIFIED")]
+    assert len(world.bunny.fetch_calls) == 1

@@ -6,8 +6,10 @@ Every write is one short transaction run by the caller. The part rows of one
 evaluation are written together with the lecture row, so a crash leaves the
 previous evaluation intact or the new one complete - never half of each.
 
-A part row that is LOCATED is never deleted or re-pointed here. Non-located
-rows are diagnostics and are replaced wholesale by the next evaluation.
+A part row that is LOCATED is never re-pointed here, and deleted only when the worker RELEASES it: a
+never-imported false start that Graph still lists but the occurrence rule now places outside the lecture
+(its full evidence goes to the audit event). Non-located rows are diagnostics and are replaced wholesale by
+the next evaluation.
 """
 from __future__ import annotations
 
@@ -31,13 +33,13 @@ SELECT status, reason_code, expected_part_count, located_part_count, located_at,
 LOAD_SOURCES = """
 SELECT graph_recording_id, recording_part_index, locate_status, source_drive_id, source_item_id,
        source_filename, source_size_bytes, source_duration_seconds, call_id, content_correlation_id,
-       recording_created_at, recording_end_at, located_at, last_verified_at, recording_source_id
+       recording_created_at, recording_end_at, located_at, last_verified_at, recording_source_id, classification
   FROM public.bunny_recording_sources WHERE lecture_id = %s ORDER BY recording_part_index
 """
 SOURCE_FIELDS = ("graph_recording_id", "part_index", "locate_status", "source_drive_id", "source_item_id",
                  "source_filename", "source_size_bytes", "source_duration_seconds", "call_id",
                  "content_correlation_id", "recording_created_at", "recording_end_at", "located_at",
-                 "last_verified_at", "recording_source_id")
+                 "last_verified_at", "recording_source_id", "classification")
 
 UPSERT_DISCOVERY = """
 INSERT INTO public.bunny_recording_discoveries (
@@ -81,6 +83,11 @@ RETURNING attempt_count
 
 DELETE_UNLOCATED = """
 DELETE FROM public.bunny_recording_sources WHERE lecture_id = %s AND locate_status <> 'LOCATED'
+"""
+# A verified part the occurrence rule now places outside the lecture (its evidence is kept in the audit event).
+DELETE_RELEASED = """
+DELETE FROM public.bunny_recording_sources
+ WHERE lecture_id = %s AND graph_recording_id = ANY(%s::text[]) AND locate_status = 'LOCATED'
 """
 UPSERT_SOURCE = """
 INSERT INTO public.bunny_recording_sources (
@@ -236,13 +243,16 @@ class RecordingSourceRepository:
         return bool(connection.execute(query, {"lecture_id": str(lecture_id)}).fetchone()[0])
 
     def replace_parts(self, connection, lecture_id, mappings, *, method: str, now, kept_reason: str,
-                      renumber: bool = False) -> None:
+                      renumber: bool = False, release=()) -> None:
         """
         Replace the lecture's non-located part rows with this evaluation's; LOCATED rows are upserted.
         `renumber`: a kept LOCATED row moves to its new part index (every one of them is in `mappings`).
+        `release`: graph recording ids of LOCATED rows the worker released (deleted first, same transaction).
         """
         try:
             connection.execute(DELETE_UNLOCATED, (str(lecture_id),))
+            if release:
+                connection.execute(DELETE_RELEASED, (str(lecture_id), list(release)))
             if renumber:
                 connection.execute(PARK_LOCATED, (str(lecture_id),))
             for m in mappings:

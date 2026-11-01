@@ -97,6 +97,9 @@ def plan_lecture(connect, worker, lecture_id, *, library_id, bunny=None) -> dict
         return plan
     selected = selection["part_index"]
     plan["selection"] = selection
+    if outcome.detail.get("recording_parts_released"):
+        # a verified false start the occurrence rule now places outside the lecture: it leaves the lecture
+        plan["released_parts"] = outcome.detail["recording_parts_released"]
     included = sorted(p["part_index"] for p in facts.parts if facts.policy(p) == INCLUDE)
     decided = {i: d for i, d in facts.decisions.items() if i != selected and d == INCLUDE}
     if facts.decisions.get(selected) == "EXCLUDE" or decided:
@@ -178,6 +181,7 @@ def apply(connect, worker, lecture_id, *, actor: str, reason: str, library_id, p
                         "selected_part": selection.get("part_index"), "candidates": selection.get("candidates"),
                         "previously_included": [p["part_index"] for p in before["current"] if p["policy"] == INCLUDE],
                         "stop_delivering": [p["part_index"] for p in before["stop_delivering"]],
+                        "released_parts": outcome.detail.get("recording_parts_released"),
                         "planned_action": before["action"]})
     queued = planner.plan_lecture(before["lecture_id"]) if planner is not None else None
     return {"lecture_id": before["lecture_id"], "applied": True, "outcome": outcome.summary(),

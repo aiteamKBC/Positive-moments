@@ -423,3 +423,83 @@ def test_a_released_false_start_is_never_replaced_automatically_the_audited_rese
     assert len(world.bunny.fetch_calls) == fetches + 1         # exactly one upload: the lecture
     assert sorted(v[0] for v in world.videos(live=True)) == [1, 2]
     assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+
+
+# =========================================================================== 2026-10-30 MSP, as it happened
+# A 59 s false start (call A), then the 8,533 s lecture on call B 21 min 36 s later: the unchanged 20 min grouping
+# rule keeps only the lecture, so the verified false start is RELEASED from the lecture.
+MSP_FALSE_START = (START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27))
+MSP_LECTURE = (START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22))
+
+
+def _sources(world):
+    return world.q("SELECT recording_part_index, graph_recording_id, locate_status FROM public.bunny_recording_sources "
+                   "WHERE lecture_id = %s ORDER BY recording_part_index", world.lecture_id)
+
+
+def test_msp_daily_the_false_start_is_released_and_the_lecture_imported_once(url):
+    world = World(url)
+    short = world.part(*MSP_FALSE_START, transcript=False, call_id="call-a")
+    world.run(rounds=3)
+    assert _sources(world) == [(1, short["id"], "LOCATED")] and world.videos() == []
+    long = world.part(*MSP_LECTURE, call_id="call-b")
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _recording_state(world) == ("LOCATED", 1)
+    assert _sources(world) == [(1, long["id"], "LOCATED")]
+    [video] = world.videos()
+    assert video[0] == 1 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    located = world.q("SELECT detail FROM public.bunny_publisher_events WHERE lecture_id = %s AND event = "
+                      "'RECORDING_LOCATED' AND detail ? 'recording_parts_released'", world.lecture_id)
+    assert located[0][0]["recording_parts_released"][0]["graph_recording_id"] == short["id"]   # durable audit
+    world.reconciler.run("FULL")
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1 and len(world.captions()) == 1
+
+
+def test_msp_review_state_is_recovered_by_the_audited_reselection_once(url):
+    world = World(url)
+    short = world.part(*MSP_FALSE_START, transcript=False, call_id="call-a")
+    world.run(rounds=3)
+    with psycopg.connect(world.url, autocommit=True) as c:                   # the production state on 2026-11-01
+        c.execute("UPDATE public.bunny_recording_discoveries SET status = 'REVIEW_REQUIRED', reason_code = "
+                  "'RECORDING_SET_CHANGED', review_reason = 'RECORDING_SET_CHANGED', next_check_after = NULL "
+                  "WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'RECORDING_SET_CHANGED' WHERE lecture_id = %s AND job_kind = 'RESOLVE_RECORDING' "
+                  "AND status IN ('QUEUED', 'RETRY_WAIT')", (world.lecture_id,))
+    long = world.part(*MSP_LECTURE, call_id="call-b")
+    _past_lookback(world)
+    world.run(rounds=3)
+    assert world.videos() == [] and _sources(world) == [(1, short["id"], "LOCATED")]   # nothing on its own
+    plan = _plan(world)                                                          # recording-preview, read-only
+    assert (plan["action"], plan["blocking"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, [], 1)
+    assert round(plan["selection"]["candidates"][0]["duration_seconds"]) == 8533
+    assert plan["released_parts"][0]["graph_recording_id"] == short["id"]
+    assert _sources(world) == [(1, short["id"], "LOCATED")]                       # the preview wrote nothing
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["applied"] and result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    [event] = world.q("SELECT detail FROM public.bunny_publisher_events WHERE lecture_id = %s AND event = "
+                      "'OPERATOR_RECORDING_RESELECTED'", world.lecture_id)
+    assert event[0]["released_parts"][0]["graph_recording_id"] == short["id"]
+    world.run(rounds=14)
+    assert _sources(world) == [(1, long["id"], "LOCATED")] and len(world.bunny.fetch_calls) == 1
+    assert [v[0] for v in world.videos(live=True)] == [1] and _view(world)["verified_ready"]
+    again = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                              library_id=LIBRARY_ID, planner=world.planner)
+    assert again["applied"] is False and len(world.bunny.fetch_calls) == 1          # NO_CHANGE, nothing re-uploaded
+
+
+def test_msp_an_imported_false_start_is_never_released_automatically(url):
+    world = World(url)
+    world.part(START - timedelta(minutes=6), START - timedelta(minutes=3), call_id="call-a")   # transcribed: imported
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=12)
+    assert [v[0] for v in world.videos(live=True)] == [1]
+    fetches = len(world.bunny.fetch_calls)
+    world.part(*MSP_LECTURE, call_id="call-b")
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world) and len(world.bunny.fetch_calls) == fetches
+    assert [v[0] for v in world.videos(live=True)] == [1]

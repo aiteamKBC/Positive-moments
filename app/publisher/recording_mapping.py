@@ -49,7 +49,7 @@ from app.media.alignment import (
 )
 from app.recordings.candidates import normalize_subject
 from app.recordings.models import MAX_FILE_LEAD_SECONDS
-from app.recordings.resolution import DEFAULT_POLICY, Exact, ResolutionPolicy, collapse_copies
+from app.recordings.resolution import DEFAULT_POLICY, FRAGMENT, FULL, Exact, ResolutionPolicy, collapse_copies
 from app.transcripts.selection import MAX_PART_GAP, WINDOW_AFTER, WINDOW_BEFORE, cairo_date_of
 
 MAPPING_VERSION = "recording_parts_v1"
@@ -424,7 +424,35 @@ def pair_transcripts(mappings, all_recordings, transcript_parts) -> tuple[list, 
 
 # -- previously stored parts --------------------------------------------------------------------------
 
-def merge_with_stored(mappings, stored: dict, *, renumber: bool = False) -> tuple[list, str | None]:
+def releasable_parts(stored: dict, occurrence: OccurrenceRecordings, *, expected_duration,
+                     policy: ResolutionPolicy = DEFAULT_POLICY) -> list | None:
+    """
+    Stored LOCATED parts that are no longer in the occurrence, when they may leave it: [] when none left,
+    None when one left and it may not (the merge then raises RECORDING_SET_CHANGED, as before).
+
+    The production shape (2026-10-30 MSP): a 59 s false start was the only recording when the lecture was
+    first evaluated, so it was verified; 21 min later the 2 h 22 min lecture started on another call. With
+    both listed, the unchanged occurrence rule (20 min grouping, window, overlap) keeps only the lecture.
+    A part may leave only when ALL of these hold:
+      * the fresh occurrence is unambiguously SELECTED;
+      * Graph still lists every departed recording (re-grouped by the rule, not vanished);
+      * every departed part was verified as a FRAGMENT of this lecture (a false start, never a delivery);
+      * the remaining occurrence has at most one full-length recording (no competing deliveries).
+    The caller adds the last condition: nothing keyed by part index exists (no Bunny video, job or decision).
+    """
+    now_ids = {p.recording_id for p in occurrence.parts}
+    departed = [rid for rid, row in stored.items() if row["locate_status"] == LOCATED and rid not in now_ids]
+    if not departed:
+        return []
+    listed = {r.recording_id for r in occurrence.all_recordings}
+    full = [p for p in occurrence.parts if policy.classify(p.duration_seconds, expected_duration) == FULL]
+    if (occurrence.status != SELECTED or any(rid not in listed for rid in departed)
+            or any(stored[rid].get("classification") != FRAGMENT for rid in departed) or len(full) > 1):
+        return None
+    return departed
+
+
+def merge_with_stored(mappings, stored: dict, *, renumber: bool = False, released=()) -> tuple[list, str | None]:
     """
     Keep what was verified before. `stored` maps graph_recording_id to the
     stored row ({part_index, locate_status, source_drive_id, source_item_id}).
@@ -438,11 +466,13 @@ def merge_with_stored(mappings, stored: dict, *, renumber: bool = False) -> tupl
       (an EARLIER recording of the occurrence became visible later) is a
       conflict too, unless `renumber`: the caller has proven that nothing is
       keyed by part index yet (no Bunny video, job or operator decision), so
-      the same recording and file simply take their new place.
+      the same recording and file simply take their new place;
+    * `released`: stored LOCATED parts the caller has proven may leave (releasable_parts) - they are
+      no longer part of this lecture and are simply not merged back.
     """
     current = {m.recording.recording_id: m for m in mappings}
     for recording_id, row in stored.items():
-        if row["locate_status"] != LOCATED:
+        if row["locate_status"] != LOCATED or recording_id in released:
             continue
         mapping = current.get(recording_id)
         if mapping is None or (mapping.part_index != row["part_index"] and not renumber):

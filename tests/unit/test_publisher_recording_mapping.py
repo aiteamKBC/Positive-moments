@@ -394,3 +394,60 @@ def test_equal_lengths_tie_break_on_the_earlier_recording_then_the_recording_id(
 def test_selection_detail_carries_no_url_or_file_name():
     detail = rm.select_recording([_part(1, 0, 180), _part(2, 5, 7200)]).as_detail()
     assert detail["version"] == rm.SELECTION_VERSION and "http" not in repr(detail) and ".mp4" not in repr(detail)
+
+
+# -- a verified false start the occurrence rule later places outside the lecture (2026-10-30 MSP) --------------
+
+TWO_HOURS = (END - START).total_seconds()
+
+
+def _msp(graph, *, lecture_call="call-b"):
+    """59 s false start, then the 8,533 s lecture on another call 21 min 36 s later."""
+    short = graph.recording(START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27),
+                            call_id="call-a")
+    long = graph.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                           call_id=lecture_call)
+    return short, long
+
+
+def _verified(recording_id, classification="FRAGMENT", index=1):
+    return {recording_id: {"part_index": index, "locate_status": rm.LOCATED, "classification": classification,
+                           "source_drive_id": "D", "source_item_id": "I"}}
+
+
+def test_the_msp_occurrence_keeps_only_the_lecture_and_the_false_start_may_leave():
+    g = FakeRecordingGraph()
+    short, long = _msp(g)
+    occurrence = _select(g)
+    assert occurrence.status == rm.SELECTED and [p.recording_id for p in occurrence.parts] == [long["id"]]
+    assert round(occurrence.parts[0].duration_seconds) == 8533
+    assert rm.releasable_parts(_verified(short["id"]), occurrence, expected_duration=TWO_HOURS) == [short["id"]]
+    assert rm.releasable_parts(_verified(long["id"]), occurrence, expected_duration=TWO_HOURS) == []
+
+
+def test_a_departed_part_may_not_leave_when_it_vanished_was_not_a_fragment_or_the_occurrence_is_unclear():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    occurrence = _select(g)
+    assert rm.releasable_parts(_verified("rec-vanished"), occurrence, expected_duration=TWO_HOURS) is None
+    assert rm.releasable_parts(_verified(short["id"], "FULL"), occurrence, expected_duration=TWO_HOURS) is None
+    assert rm.releasable_parts(_verified(short["id"], None), occurrence, expected_duration=TWO_HOURS) is None
+    ambiguous = rm.replace(occurrence, status=rm.AMBIGUOUS_OCCURRENCE_RECORDINGS)
+    assert rm.releasable_parts(_verified(short["id"]), ambiguous, expected_duration=TWO_HOURS) is None
+
+
+def test_a_departed_false_start_may_not_leave_next_to_two_competing_full_recordings():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    g.recording(END + timedelta(minutes=45), END + timedelta(hours=2, minutes=50), call_id="call-b")  # attaches
+    occurrence = _select(g)
+    assert len(occurrence.parts) == 2
+    assert rm.releasable_parts(_verified(short["id"]), occurrence, expected_duration=TWO_HOURS) is None
+
+
+def test_a_released_part_is_not_merged_back():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    stored = _verified(short["id"])
+    assert rm.merge_with_stored([], stored)[1] == "RECORDING_SET_CHANGED"
+    assert rm.merge_with_stored([], stored, released=[short["id"]]) == ([], None)

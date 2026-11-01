@@ -163,7 +163,21 @@ The read-only API for the future dashboard tab lives at `/operations/publisher/s
   1. `recording-preview --lecture-id <id>` (read-only) should show `RESELECT_AND_IMPORT` (or `IMPORT_PENDING`) with the longest part selected.
   2. Then run `reselect-recording --lecture-id <id> --actor <name> --reason "<why>"`. It re-runs discovery, audits `OPERATOR_RECORDING_RESELECTED` and queues the selected part's import, even outside the lookback window.
 
-  A recording that left the occurrence, a file that can't be proven, or several candidate files all still need review.
+  **A false start re-grouped out of the lecture** (2026-10-30 MSP: a 59 s recording, then the 2 h 22 min lecture on another Teams call 21 min 36 s later). The unchanged 20-minute grouping rule keeps only the lecture, so the verified false start no longer belongs to it. The worker *releases* it, and the preview lists it under `released_parts`. All of these must hold:
+  - Graph still lists it;
+  - it was verified as a FRAGMENT;
+  - the new session is unambiguous with at most one full-length recording;
+  - the lecture recording is fully located;
+  - nothing in Bunny refers to the lecture's parts.
+
+  The released part's evidence (Graph ids, times, file ids, duration) is kept in the `RECORDING_LOCATED` / `OPERATOR_RECORDING_RESELECTED` event and the discovery metadata.
+
+  Still review:
+  - a recording that vanished from Graph;
+  - a non-fragment that left;
+  - competing full recordings;
+  - a file that can't be proven, or several candidate files;
+  - existing Bunny state.
 
 ## 9. Historical Backfill (Publishing Monitor → Historical Backfill tab)
 
