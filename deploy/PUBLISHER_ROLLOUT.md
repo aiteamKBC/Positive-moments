@@ -172,6 +172,15 @@ The read-only API for the future dashboard tab lives at `/operations/publisher/s
 
   The released part's evidence (Graph ids, times, file ids, duration) is kept in the `RECORDING_LOCATED` / `OPERATOR_RECORDING_RESELECTED` event and the discovery metadata.
 
+  **A lecture MP4 named at the call start** (the same lecture: the file is named 11:57:26, 1,304 s before the recording's Graph start 12:19:09). The 0–120 s file-name rule can't see it. Teams writes a `source` facet on every recording driveItem: `externalId` = the Graph recording's `callId`, `threadId` = the meeting thread. A recording the file-name rule leaves with no file is proven by that facet only when all of these hold:
+  - the call ID and the lecture's thread match exactly;
+  - the call has exactly one Graph recording;
+  - exactly one file names that call, and no file names it with another thread;
+  - the file's subject and date match;
+  - the measured duration passes the unchanged duration check.
+
+  Otherwise nothing is matched. The discovery metadata records `files_proven_by_teams_source` or `teams_source_refused`.
+
   Still review:
   - a recording that vanished from Graph;
   - a non-fragment that left;

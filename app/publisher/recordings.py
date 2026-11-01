@@ -390,7 +390,9 @@ class RecordingWorker:
             return failure, {"call_ids": call_ids}
 
         assigned, file_diagnostics = rm.assign_files(occurrence.parts, discovered.candidates, subject=lecture.subject,
-                                                     session_date=lecture.session_date.isoformat())
+                                                     session_date=lecture.session_date.isoformat(),
+                                                     thread_id=lecture.thread_id,
+                                                     all_recordings=occurrence.all_recordings)
         detail.update(file_diagnostics)
         mappings, evidence_failure = [], None
         for index, (part, kept, shared) in enumerate(assigned, start=1):

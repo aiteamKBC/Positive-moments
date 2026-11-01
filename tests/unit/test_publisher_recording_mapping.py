@@ -451,3 +451,115 @@ def test_a_released_part_is_not_merged_back():
     stored = _verified(short["id"])
     assert rm.merge_with_stored([], stored)[1] == "RECORDING_SET_CHANGED"
     assert rm.merge_with_stored([], stored, released=[short["id"]]) == ([], None)
+
+
+# -- a file proven by its Teams source facet (2026-10-30 MSP: named 1,304 s before the recording) ----------------
+
+THREAD = "19:meeting_MSPsynthetic01@thread.v2"
+NAMED_EARLY = 1303.9                    # Teams named the lecture's MP4 at the CALL start
+
+
+def _proven_map(g, *metas, thread=THREAD):
+    occurrence = _select(g)
+    assigned, diagnostics = rm.assign_files(occurrence.parts, _candidates(*metas), subject=SUBJECT,
+                                            session_date=DATE.isoformat(), thread_id=thread,
+                                            all_recordings=occurrence.all_recordings)
+    mappings = [rm.map_part(i, p, kept, shared, expected_duration=EXPECTED)
+                for i, (p, kept, shared) in enumerate(assigned, start=1)]
+    return rm.claimed_twice(mappings), diagnostics
+
+
+def _msp_lecture(g, **file_kwargs):
+    long = g.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                       call_id="call-b")
+    return long, g.recorded_file(long, lead=NAMED_EARLY, **{"thread": THREAD, **file_kwargs})
+
+
+def test_msp_the_lecture_file_named_1304_s_early_is_proven_by_call_and_thread():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    [m], diagnostics = _proven_map(g, mp4)
+    assert (m.locate_status, m.reason, m.candidate.item_id) == (rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", mp4["id"])
+    assert round(m.lead_seconds) == 1304 and m.media_origin == rm.METHOD_GRAPH_CREATED
+    assert diagnostics["files_proven_by_teams_source"] == 1
+    [unproven], _ = _map(_select(g), _candidates(mp4))                         # without the facet path: not found
+    assert unproven.locate_status == rm.NOT_FOUND
+
+
+def test_the_file_name_rule_is_unchanged_and_wins():
+    g = FakeRecordingGraph()
+    r = g.recording(START + timedelta(minutes=1), END - timedelta(minutes=2), call_id="call-a")
+    mp4 = g.recorded_file(r, lead=35, thread=THREAD)
+    [m], diagnostics = _proven_map(g, mp4)
+    assert m.located and m.lead_seconds == 35 and "files_proven_by_teams_source" not in diagnostics
+
+
+def test_a_wrong_call_or_thread_proves_nothing():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, teams_source={"application": "Teams", "externalId": "call-other", "threadId": THREAD})
+    assert _proven_map(g, mp4)[0][0].locate_status == rm.NOT_FOUND
+    g2 = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g2, thread="19:meeting_OTHER@thread.v2")
+    [m], diagnostics = _proven_map(g2, mp4)
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["teams_source_refused"] == ["TEAMS_SOURCE_THREAD_CONFLICT"]
+
+
+def test_two_files_for_one_call_prove_nothing():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    copy = g.recorded_file(long, lead=NAMED_EARLY + 5, thread=THREAD, size=800_000_000)
+    [m], diagnostics = _proven_map(g, mp4, copy)
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["teams_source_refused"] == ["SEVERAL_FILES_FOR_CALL"]
+
+
+def test_a_call_with_several_recordings_proves_nothing():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    g.recording(END + timedelta(hours=1), END + timedelta(hours=1, minutes=10), call_id="call-b")  # same call, later
+    [m, *_], diagnostics = _proven_map(g, mp4)
+    assert m.locate_status == rm.NOT_FOUND and "CALL_HAS_SEVERAL_RECORDINGS" in diagnostics["teams_source_refused"]
+
+
+def test_a_proven_file_with_the_wrong_duration_is_a_mismatch_not_a_match():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, duration=4000)
+    [m], _ = _proven_map(g, mp4)
+    assert m.locate_status == rm.DURATION_MISMATCH
+
+
+def test_missing_malformed_or_foreign_source_facets_prove_nothing():
+    for facet in (None, {"application": "Teams"}, {"application": "Teams", "externalId": "", "threadId": THREAD},
+                  {"application": "Teams", "externalId": 7, "threadId": THREAD},
+                  {"application": "SharePoint", "externalId": "call-b", "threadId": THREAD}, "Teams"):
+        g = FakeRecordingGraph()
+        long = g.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                           call_id="call-b")
+        mp4 = g.recorded_file(long, lead=NAMED_EARLY)
+        if facet is not None:
+            mp4["source"] = facet
+        assert _proven_map(g, mp4)[0][0].locate_status == rm.NOT_FOUND, facet
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g)
+    assert _proven_map(g, mp4, thread=None)[0][0].locate_status == rm.NOT_FOUND      # the lecture's thread unknown
+
+
+def test_another_subject_or_date_proves_nothing():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, subject="Another Lecture")
+    [m], diagnostics = _proven_map(g, mp4)
+    assert m.locate_status == rm.NOT_FOUND
+    assert diagnostics["teams_source_refused"] == ["TEAMS_SOURCE_FILE_SUBJECT_OR_DATE_MISMATCH"]
+
+
+def test_msp_false_start_by_file_name_and_lecture_by_teams_source_longest_selected():
+    g = FakeRecordingGraph()
+    short = g.recording(START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27),
+                        call_id="call-a")
+    short_mp4 = g.recorded_file(short, lead=71.7, thread=THREAD)
+    long, mp4 = _msp_lecture(g)
+    occurrence = _select(g)
+    assert [p.recording_id for p in occurrence.parts] == [long["id"]]          # the 20 min rule keeps the lecture
+    [m], _ = _proven_map(g, short_mp4, mp4)
+    selection = rm.select_recording([m])
+    assert m.located and m.candidate.item_id == mp4["id"] and selection.part_index == 1
+    assert round(selection.candidates[0]["duration_seconds"]) == 8533

@@ -225,6 +225,10 @@ class DriveItemCandidate:
     mime_type: str | None = None
     # Every discovery source that returned this physical file (drive, item).
     sources: tuple = ()
+    # The driveItem's Teams `source` facet (application "Teams"): the Graph callRecording's callId and
+    # the meeting thread the recording was made in. Absent / not Teams -> None.
+    teams_call_id: str | None = None
+    teams_thread_id: str | None = None
 
     @property
     def physical_id(self) -> tuple[str, str]:

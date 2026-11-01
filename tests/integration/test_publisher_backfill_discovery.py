@@ -91,11 +91,16 @@ class Teams:
         world.planner.calendar = CalendarDiscovery(world.config, service=service,
                                                    aptem_connect=lambda: contextlib.nullcontext(object()))
 
-    def lecture(self, key, start, minutes=120, *, lms=True, recordings=((1, -2),), transcript=True):
-        """One Teams lecture. `recordings`: (start offset, end offset) minutes - the longest is the lecture."""
+    def lecture(self, key, start, minutes=120, *, lms=True, recordings=((1, -2),), transcript=True, leads=None):
+        """
+        One Teams lecture. `recordings`: (start offset, end offset) minutes - the longest is the lecture.
+        `leads`: seconds each MP4 is named before its recording (default 35). Every MP4 carries the Teams
+        source facet of its call and the meeting thread.
+        """
         subject = f"Backfill Teams {key}"
         end = start + timedelta(minutes=minutes)
-        url = private_url(thread=f"19:meeting_BF{key}{uuid.uuid4().hex[:6]}@thread.v2")
+        thread = f"19:meeting_BF{key}{uuid.uuid4().hex[:6]}@thread.v2"
+        url = private_url(thread=thread)
         self.calendar.events.append(CalendarEvent(f"evt-bf-{key}-{uuid.uuid4().hex[:6]}", f"ical-bf-{key}", subject,
                                                   start, end, "UTC", url, calendar_organizer_address="Cohort@example.invalid"))
         if lms:
@@ -105,7 +110,7 @@ class Teams:
             correlation = f"corr-{key}-{n}"
             recording = self.world.rgraph.recording(r_start, r_end, call_id=f"call-{key}-{n}", correlation=correlation,
                                                     meeting_id=meeting_id(url))
-            self.world.rgraph.recorded_file(recording, lead=35, subject=subject)
+            self.world.rgraph.recorded_file(recording, lead=(leads or {}).get(n, 35), subject=subject, thread=thread)
             if transcript:
                 tid = graph_id(uuid.uuid4().int % 90000 + 10000)
                 self.world.tgraph.add(tid, start=r_start, end=r_end, call_id=f"call-{key}-{n}", correlation=correlation,
@@ -422,4 +427,23 @@ def test_a_historical_msp_shaped_lecture_imports_only_the_8533_s_recording(url):
     assert (index, duration) == (1, 8533)
     assert world.q("SELECT recording_part_index, import_status, encoding_status FROM public.bunny_videos "
                    "WHERE lecture_id = %s", lid) == [(1, "IDENTIFIED", "VERIFIED")]
+    assert len(world.bunny.fetch_calls) == 1
+
+
+def test_a_historical_lecture_whose_mp4_is_named_at_the_call_start_is_proven_and_imported(url):
+    world, teams = world_with_teams(url)
+    # the 2026-10-30 MSP files: the false start named 71.7 s early, the lecture named 1,303.9 s early
+    subject = teams.lecture("P1", at(D1, 11), recordings=((-3 - 26 / 60, -122 - 27 / 60), (19 + 9 / 60, 41 + 22 / 60)),
+                            leads={0: 71.7, 1: 1303.9})
+    task = task_for(world)
+    preview_run, rows = finish_preview(world, task, request_preview(world, D1, D1))
+    run = confirm(world, preview_run, rows)
+    world.run(rounds=16)
+    [(lid, _)] = registered(world, subject)
+    assert items(world, run["run_id"])[lid]["status"] == "COMPLETED"
+    assert world.q("SELECT recording_part_index, round(source_duration_seconds), media_origin FROM "
+                   "public.bunny_recording_sources WHERE lecture_id = %s", lid) == [(1, 8533, "graph_created_origin")]
+    assert world.q("SELECT import_status, encoding_status FROM public.bunny_videos WHERE lecture_id = %s", lid) == [
+        ("IDENTIFIED", "VERIFIED")]
+    world.run(rounds=4)
     assert len(world.bunny.fetch_calls) == 1

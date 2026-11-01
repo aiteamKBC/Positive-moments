@@ -329,7 +329,7 @@ def test_no_size_and_no_duration_is_never_resolved():
 def evidence_path(n):
     return (f"/drives/drive-{n}/items/item-{n}?$select="
             "id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,"
-            "file,size,video")
+            "file,size,video,source")
 
 
 def test_media_evidence_is_read_for_the_exact_candidates_only():

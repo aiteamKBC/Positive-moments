@@ -37,12 +37,12 @@ from app.recordings.models import DiscoveryResult, RecordingTarget
 # can tell a short false start from the delivered lecture. Never
 # @microsoft.graph.downloadUrl: it is a pre-authenticated link.
 ITEM_FIELDS = ("id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,"
-               "file,folder,size,video")
+               "file,folder,size,video,source")
 SEARCH_FIELDS = ["id", "name", "webUrl", "createdDateTime", "lastModifiedDateTime",
                  "parentReference", "file", "size"]
 # One driveItem's metadata, for a final exact candidate only.
 EVIDENCE_FIELDS = ("id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,"
-                   "file,size,video")
+                   "file,size,video,source")
 SEARCH_PAGE_SIZE = 500
 
 

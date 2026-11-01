@@ -1096,3 +1096,36 @@ def test_a_false_start_with_bunny_work_is_never_released_automatically(url):
     outcome = _worker(url, graph, clock=END + timedelta(hours=1)).run(lecture_id)
     assert (outcome.kind, outcome.reason) == (REVIEW, "RECORDING_SET_CHANGED")
     assert _part_rows(url, lecture_id) == [(1, short["id"], "LOCATED")]
+
+
+# -- 2026-10-30 MSP: the lecture's MP4 is named at the CALL start, 1,304 s before the recording ----------------
+
+def test_msp_the_lecture_file_is_proven_by_its_teams_source_and_selected(url):
+    from tests.unit.lms_fakes import private_url
+    thread = "19:meeting_MSPpersist01@thread.v2"
+    lecture_id, graph = _lecture(url, join_url=private_url(thread=thread)), FakeRecordingGraph()
+    short = graph.recording(*MSP_SHORT, call_id="call-a")
+    graph.recorded_file(short, lead=71.7, thread=thread)
+    assert _worker(url, graph).run(lecture_id).reason == "LONGER_RECORDING_MAY_FOLLOW"
+    long = graph.recording(*MSP_LONG, call_id="call-b")
+    mp4 = graph.recorded_file(long, lead=1303.9, thread=thread)                # named 21 min 44 s early
+    outcome = _worker(url, graph, clock=END + timedelta(hours=1)).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "ALL_PARTS_LOCATED")
+    assert outcome.detail["files_proven_by_teams_source"] == 1
+    assert outcome.detail["recording_parts_released"][0]["graph_recording_id"] == short["id"]
+    assert _part_rows(url, lecture_id) == [(1, long["id"], "LOCATED")]
+    assert _sources(url, lecture_id)[0][3:6] == (mp4["parentReference"]["driveId"], mp4["id"], "graph_created_origin")
+    assert round(_selection(url, lecture_id)["candidates"][0]["duration_seconds"]) == 8533
+    again = _worker(url, graph, clock=END + timedelta(hours=26)).run(lecture_id, verify=True)
+    assert again.reason == "SOURCES_VERIFIED" and _part_rows(url, lecture_id) == [(1, long["id"], "LOCATED")]
+
+
+def test_msp_a_conflicting_teams_source_leaves_the_lecture_waiting(url):
+    from tests.unit.lms_fakes import private_url
+    lecture_id, graph = _lecture(url, join_url=private_url(thread="19:meeting_MSPpersist02@thread.v2")), \
+        FakeRecordingGraph()
+    long = graph.recording(*MSP_LONG, call_id="call-b")
+    graph.recorded_file(long, lead=1303.9, thread="19:meeting_SOMEONEELSE@thread.v2")
+    outcome = _worker(url, graph, clock=END + timedelta(hours=1)).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (WAITING, "RECORDING_FILE_NOT_FOUND")
+    assert outcome.detail["teams_source_refused"] == ["TEAMS_SOURCE_THREAD_CONFLICT"]

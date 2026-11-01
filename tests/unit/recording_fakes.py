@@ -75,7 +75,7 @@ class FakeRecordingGraph:
 
     def mp4(self, *, started: datetime, duration_seconds: float | None, subject=SUBJECT, drive=DRIVE,
             item=None, size=900_000_000, where="onedrive", user=LOOKUP_USER, channel=None,
-            index_duration=True) -> dict:
+            index_duration=True, teams_source=None) -> dict:
         self._next += 1
         item = item or f"ITEM-{uuid.uuid4().hex[:12]}"
         meta = {"id": item, "name": file_name(subject, started),
@@ -85,6 +85,8 @@ class FakeRecordingGraph:
                 "file": {"mimeType": "video/mp4"}, "size": size}
         if duration_seconds is not None:
             meta["video"] = {"duration": int(round(duration_seconds * 1000))}
+        if teams_source is not None:            # the facet Teams writes: {"application", "externalId", "threadId"}
+            meta["source"] = dict(teams_source)
         self.items[(drive, item)] = meta
         listed = dict(meta) if index_duration else {k: v for k, v in meta.items() if k != "video"}
         if where == "onedrive":
@@ -95,8 +97,13 @@ class FakeRecordingGraph:
             self.search_hits.append({k: v for k, v in listed.items() if k != "video"})
         return meta
 
-    def recorded_file(self, recording: dict, *, lead=35.0, duration=None, **kwargs) -> dict:
-        """The MP4 Teams writes for a Graph recording: named `lead` s before it, zero at createdDateTime."""
+    def recorded_file(self, recording: dict, *, lead=35.0, duration=None, thread=None, **kwargs) -> dict:
+        """
+        The MP4 Teams writes for a Graph recording: named `lead` s before it, zero at createdDateTime.
+        `thread`: also carry the Teams source facet (externalId = the recording's callId, that threadId).
+        """
+        if thread is not None and "teams_source" not in kwargs:
+            kwargs["teams_source"] = {"application": "Teams", "externalId": recording["callId"], "threadId": thread}
         created = datetime.fromisoformat(recording["createdDateTime"].replace("Z", "+00:00"))
         end = datetime.fromisoformat(recording["endDateTime"].replace("Z", "+00:00"))
         return self.mp4(started=created - timedelta(seconds=lead),

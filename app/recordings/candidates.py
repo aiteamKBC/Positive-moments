@@ -62,6 +62,21 @@ def _duration_seconds(item: dict) -> float | None:
     return milliseconds / 1000.0 if milliseconds else None
 
 
+def teams_source(item: dict) -> tuple[str | None, str | None]:
+    """
+    (call id, thread id) from a driveItem's `source` facet, written by Teams on a meeting recording:
+    {"application": "Teams", "externalId": <callRecording callId>, "threadId": <meeting thread>}.
+    Anything else - absent, another application, a missing or non-text value - is (None, None).
+    """
+    facet = item.get("source")
+    if not isinstance(facet, dict) or str(facet.get("application") or "").casefold() != "teams":
+        return None, None
+    call, thread = facet.get("externalId"), facet.get("threadId")
+    if not isinstance(call, str) or not call.strip() or not isinstance(thread, str) or not thread.strip():
+        return None, None
+    return call.strip().lower(), thread.strip()
+
+
 def candidate_from_drive_item(item: dict, source: str) -> DriveItemCandidate | None:
     """
     A Graph driveItem (listing or search hit) as a candidate, or None.
@@ -81,6 +96,7 @@ def candidate_from_drive_item(item: dict, source: str) -> DriveItemCandidate | N
     if "folder" in item and "file" not in item:
         return None
     parsed = parse_recording_name(name)
+    teams_call_id, teams_thread_id = teams_source(item)
     return DriveItemCandidate(
         item_id=str(item_id), drive_id=str(drive_id), name=str(name),
         web_url=item.get("webUrl"), source=source,
@@ -94,11 +110,11 @@ def candidate_from_drive_item(item: dict, source: str) -> DriveItemCandidate | N
         parent_item_id=parent.get("id"),
         mime_type=(item.get("file") or {}).get("mimeType") if isinstance(
             item.get("file"), dict) else None,
-        sources=(source,))
+        sources=(source,), teams_call_id=teams_call_id, teams_thread_id=teams_thread_id)
 
 
 _EVIDENCE_FIELDS = ("web_url", "size_bytes", "duration_seconds", "created_at",
-                    "modified_at", "parent_item_id", "mime_type")
+                    "modified_at", "parent_item_id", "mime_type", "teams_call_id", "teams_thread_id")
 
 
 def merge_evidence(primary: DriveItemCandidate, other: DriveItemCandidate

@@ -503,3 +503,64 @@ def test_msp_an_imported_false_start_is_never_released_automatically(url):
     world.run(rounds=8)
     assert _recording_reviews(world) and len(world.bunny.fetch_calls) == fetches
     assert [v[0] for v in world.videos(live=True)] == [1]
+
+
+# =========================================================================== MSP files exactly as in production
+# The lecture's MP4 is named at the CALL start, 1,303.9 s before the Graph recording; only its Teams source facet
+# (externalId = callId, threadId = the meeting) proves it. The false start's MP4 is named a normal 71.7 s early.
+def _msp_production_files(world, *, false_start=True):
+    if false_start:
+        short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+        world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    correlation = f"corr-msp-{world.lecture_id[:8]}"
+    long = world.rgraph.recording(*MSP_LECTURE, call_id="call-b", correlation=correlation)
+    world.rgraph.recorded_file(long, lead=1303.9, thread=world.thread)
+    world.transcript(*MSP_LECTURE, correlation, call_id="call-b")
+    return long
+
+
+def test_msp_production_files_daily_the_lecture_is_proven_imported_once_and_never_again(url):
+    world = World(url)
+    short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+    world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    world.run(rounds=3)
+    assert _sources(world) == [(1, short["id"], "LOCATED")]
+    long = _msp_production_files(world, false_start=False)
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _sources(world) == [(1, long["id"], "LOCATED")]
+    [video] = world.videos()
+    assert video[0] == 1 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    for _ in range(2):                                                         # retries, reconciliation, re-runs
+        world.reconciler.run("FULL")
+        world.run(rounds=4)
+        assert reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                                 library_id=LIBRARY_ID, planner=world.planner)["applied"] is False
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1 and len(world.captions()) == 1
+
+
+def test_msp_production_files_review_state_recovered_by_the_audited_reselection(url):
+    world = World(url)
+    short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+    world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    world.run(rounds=3)
+    with psycopg.connect(world.url, autocommit=True) as c:                   # production on 2026-11-01
+        c.execute("UPDATE public.bunny_recording_discoveries SET status = 'REVIEW_REQUIRED', reason_code = "
+                  "'RECORDING_SET_CHANGED', review_reason = 'RECORDING_SET_CHANGED', next_check_after = NULL "
+                  "WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'RECORDING_SET_CHANGED' WHERE lecture_id = %s AND job_kind = 'RESOLVE_RECORDING' "
+                  "AND status IN ('QUEUED', 'RETRY_WAIT')", (world.lecture_id,))
+    long = _msp_production_files(world, false_start=False)
+    _past_lookback(world)
+    plan = _plan(world)
+    assert (plan["action"], plan["blocking"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, [], 1)
+    chosen = plan["selection"]["candidates"][0]
+    assert (round(chosen["duration_seconds"]), chosen["duration_source"], chosen["locate_status"]) == (
+        8533, "video_facet", "LOCATED")
+    assert [p["graph_recording_id"] for p in plan["released_parts"]] == [short["id"]]
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    world.run(rounds=14)
+    assert _sources(world) == [(1, long["id"], "LOCATED")] and len(world.bunny.fetch_calls) == 1
+    assert _view(world)["verified_ready"]

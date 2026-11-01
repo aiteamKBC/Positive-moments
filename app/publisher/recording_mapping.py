@@ -19,6 +19,10 @@ No database, no Graph, no clock. Every rule reuses an existing validated one:
   createdDateTime - applied PER PART. A file that fits two parts, or a part
   that two different files fit, is ambiguous; byte-identical copies of one file
   collapse first (app/recordings/resolution.collapse_copies).
+  A part the file-name rule leaves with NO file may instead be proven by the
+  Teams source facet Teams writes on the driveItem (teams_source_file): its
+  externalId IS the part's callId and its threadId IS the lecture's meeting
+  thread - exact identities, never a name or a duration alone.
 * DURATION (an independent check): the file's measured video duration must
   equal the part's Graph window, with zero at createdDateTime or at the file
   name's time, within the alignment tolerance (app/media/alignment.py).
@@ -218,17 +222,56 @@ def select_occurrence(rows, *, scheduled_start: datetime, scheduled_end: datetim
 
 # -- files -------------------------------------------------------------------------------------------
 
-def assign_files(parts, candidates, *, subject, session_date: str) -> tuple[list, dict]:
+def teams_source_file(part, candidates, *, expected_subject, session_date, thread_id, all_recordings,
+                      taken) -> tuple[Exact | None, str | None]:
+    """
+    (the ONE file the Teams source facet proves is this part's recording, None) or (None, why not).
+
+    2026-10-30 MSP: Teams named the lecture's MP4 at the CALL start, 1,304 s before the recording's
+    Graph createdDateTime, so the 0..120 s file-name rule cannot see it. The driveItem says which
+    recording it is: source.externalId = the callRecording's callId, source.threadId = the meeting.
+    Every condition is exact, and any doubt decides nothing:
+      * the lecture's meeting thread and the part's call id are known;
+      * the call has exactly ONE recording in Graph (a call id names a recording only then);
+      * every file naming that call names this thread, and there is exactly one such file;
+      * that file has the lecture's subject and business date in its name;
+      * no other part already holds it through the file-name rule.
+    The measured duration is checked afterwards by map_part (check_duration), unchanged.
+    """
+    call = (part.call_id or "").lower()
+    if not thread_id or not call:
+        return None, "TEAMS_SOURCE_IDENTITY_UNKNOWN"
+    if sum(1 for r in (all_recordings or ()) if r.call_id == call) != 1:
+        return None, "CALL_HAS_SEVERAL_RECORDINGS"
+    named = [c for c in candidates if c.teams_call_id == call]
+    if not named:
+        return None, "NO_FILE_FOR_CALL"
+    if any(c.teams_thread_id != thread_id for c in named):
+        return None, "TEAMS_SOURCE_THREAD_CONFLICT"
+    if len(named) != 1:
+        return None, "SEVERAL_FILES_FOR_CALL"
+    [file] = named
+    if file.file_timestamp is None or not expected_subject or file.subject_key != expected_subject             or file.file_date != session_date:
+        return None, "TEAMS_SOURCE_FILE_SUBJECT_OR_DATE_MISMATCH"
+    if file.physical_id in taken:
+        return None, "TEAMS_SOURCE_FILE_HELD_BY_ANOTHER_PART"
+    return Exact(file, round(part.created_at.timestamp() - file.file_timestamp, 3), part), None
+
+
+def assign_files(parts, candidates, *, subject, session_date: str, thread_id: str | None = None,
+                 all_recordings=()) -> tuple[list, dict]:
     """
     Per part, the candidate files that pass the identity rule for THAT part
     (copies collapsed), plus diagnostics. A file fitting several parts goes to
-    none of them: it is reported, and those parts are ambiguous.
+    none of them: it is reported, and those parts are ambiguous. A part with no
+    file at all may be proven by the Teams source facet (teams_source_file).
     """
     expected = normalize_subject(subject)
     per_part = {p.recording_id: [] for p in parts}
     shared: dict[str, int] = {}
     diagnostics = {"candidate_files": 0, "same_subject_date": 0, "subject_mismatch_in_window": 0,
                    "files_fitting_several_parts": 0}
+    taken: set = set()                          # files the file-name rule placed on a part (or on several)
     for candidate in candidates:
         if candidate.file_timestamp is None:
             continue
@@ -243,14 +286,25 @@ def assign_files(parts, candidates, *, subject, session_date: str) -> tuple[list
         diagnostics["same_subject_date"] += 1
         if len(fits) > 1:
             diagnostics["files_fitting_several_parts"] += 1
+            taken.add(candidate.physical_id)
             for p, _ in fits:
                 shared[p.recording_id] = shared.get(p.recording_id, 0) + 1
             continue
         for p, lead in fits:
+            taken.add(candidate.physical_id)
             per_part[p.recording_id].append(Exact(candidate, lead, p))
     assigned = []
     for p in parts:
         kept, _ = collapse_copies(per_part[p.recording_id]) if per_part[p.recording_id] else ([], 0)
+        if not kept and not shared.get(p.recording_id):
+            proven, refused = teams_source_file(p, candidates, expected_subject=expected, session_date=session_date,
+                                                thread_id=thread_id, all_recordings=all_recordings or parts,
+                                                taken=taken)
+            if proven is not None:
+                kept = [proven]
+                diagnostics["files_proven_by_teams_source"] = diagnostics.get("files_proven_by_teams_source", 0) + 1
+            elif refused not in ("NO_FILE_FOR_CALL", "TEAMS_SOURCE_IDENTITY_UNKNOWN"):
+                diagnostics.setdefault("teams_source_refused", []).append(refused)
         assigned.append((p, kept, shared.get(p.recording_id, 0)))
     return assigned, diagnostics
 
