@@ -470,15 +470,138 @@ def test_verification_read_failure_keeps_the_verified_mapping(url):
     assert _discovery(url, lecture_id)[0] == "LOCATED" and _sources(url, lecture_id)[0][2] == "LOCATED"
 
 
-def test_a_late_extra_part_after_location_requires_review(url):
+def test_a_late_extra_part_after_location_is_reevaluated_and_the_longest_stays_selected(url):
     lecture_id, graph = _lecture(url), FakeRecordingGraph()
-    _one_part(graph)
+    recording, mp4 = _one_part(graph)
     worker = _worker(url, graph)
     assert worker.run(lecture_id).kind == LOCATED
     graph.recording(END + timedelta(minutes=5), END + timedelta(minutes=20))   # attaches: within 20 min
     outcome = worker.run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert outcome.detail["recording_set_change"]["resolution"] == "REEVALUATED"
+    assert _selection(url, lecture_id)["part_index"] == 1
+    assert _sources(url, lecture_id)[0][1:5] == (recording["id"], "LOCATED", mp4["parentReference"]["driveId"],
+                                                 mp4["id"])            # never re-pointed
+
+
+# -- a recording set that changes after discovery (2026-10-30 MSP: a 58 s false start, then the lecture) -----
+
+SHORT = (START - timedelta(minutes=5), START - timedelta(minutes=4, seconds=2))   # ~58 s, before the slot
+LONG = (START - timedelta(minutes=3), END + timedelta(minutes=19))                # ~2 h 22 min
+CLOSED = END + timedelta(hours=3, minutes=5)                                      # the occurrence window has closed
+RECHECK = END + timedelta(hours=25)                                               # the bounded re-check
+
+
+def _recording(graph, span, call_id, *, with_file=True):
+    recording = graph.recording(*span, call_id=call_id)
+    return recording, graph.recorded_file(recording) if with_file else None
+
+
+def _part_rows(url, lecture_id):
+    return [(r[0], r[1], r[2]) for r in _sources(url, lecture_id)]
+
+
+def test_a_false_start_located_alone_then_the_lecture_appears_the_longest_is_selected(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    short, _ = _recording(graph, SHORT, "call-a")
+    assert _worker(url, graph).run(lecture_id).reason == "LONGER_RECORDING_MAY_FOLLOW"
+    alone = _worker(url, graph, clock=CLOSED).run(lecture_id)
+    assert (alone.kind, alone.reason) == (LOCATED, "ALL_PARTS_LOCATED")       # Teams listed only the false start
+    long, mp4 = _recording(graph, LONG, "call-b")                              # ... and the lecture later
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert _selection(url, lecture_id)["part_index"] == 2 and _discovery(url, lecture_id)[0] == "LOCATED"
+    assert _part_rows(url, lecture_id) == [(1, short["id"], "LOCATED"), (2, long["id"], "LOCATED")]
+    assert _sources(url, lecture_id)[1][3:5] == (mp4["parentReference"]["driveId"], mp4["id"])
+    again = _worker(url, graph, clock=RECHECK + timedelta(hours=1)).run(lecture_id, verify=True)
+    assert again.reason == "SOURCES_VERIFIED" and _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_both_recordings_visible_at_the_first_discovery_select_the_lecture(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording(graph, SHORT, "call-a")
+    long, _ = _recording(graph, LONG, "call-b")
+    outcome = _worker(url, graph).run(lecture_id)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    selection = _selection(url, lecture_id)
+    assert selection["part_index"] == 2 and selection["candidates"][1]["graph_recording_id"] == long["id"]
+
+
+def test_an_earlier_recording_listed_later_renumbers_the_verified_parts_and_keeps_their_files(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    long, mp4 = _recording(graph, LONG, "call-b")
+    assert _worker(url, graph).run(lecture_id).kind == LOCATED
+    assert _part_rows(url, lecture_id) == [(1, long["id"], "LOCATED")]
+    short, _ = _recording(graph, SHORT, "call-a")                              # the false start shows up late
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert outcome.detail["recording_parts_renumbered"] == [[1, 2]]
+    assert _part_rows(url, lecture_id) == [(1, short["id"], "LOCATED"), (2, long["id"], "LOCATED")]
+    assert _sources(url, lecture_id)[1][3:5] == (mp4["parentReference"]["driveId"], mp4["id"])
+    assert _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_a_lecture_already_in_review_for_a_changed_set_is_kept_until_an_operator_reopens_it(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    long, _ = _recording(graph, LONG, "call-b")
+    assert _worker(url, graph).run(lecture_id).kind == LOCATED
+    short, _ = _recording(graph, SHORT, "call-a")
+    with psycopg.connect(url, autocommit=True) as c:                         # the state the previous version left
+        c.execute("""UPDATE public.bunny_recording_discoveries
+                        SET status = 'REVIEW_REQUIRED', reason_code = 'RECORDING_SET_CHANGED',
+                            review_reason = 'RECORDING_SET_CHANGED', metadata = metadata - 'recording_selection'
+                      WHERE lecture_id = %s""", (lecture_id,))
+    retained = _worker(url, graph, clock=RECHECK).run(lecture_id)
+    assert (retained.kind, retained.reason, retained.detail) == (REVIEW, "RECORDING_SET_CHANGED", {"retained": True})
+    reopened = _worker(url, graph, clock=RECHECK).run(lecture_id, rediscover=True)    # the audited operator retry
+    assert (reopened.kind, reopened.reason) == (LOCATED, "LONGEST_RECORDING_SELECTED")
+    assert _part_rows(url, lecture_id) == [(1, short["id"], "LOCATED"), (2, long["id"], "LOCATED")]
+    assert _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_a_verified_recording_that_left_the_occurrence_still_requires_review(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    long, mp4 = _recording(graph, LONG, "call-b")
+    assert _worker(url, graph).run(lecture_id).kind == LOCATED
+    graph.recordings = [r for r in graph.recordings if r["id"] != long["id"]]
+    _recording(graph, (LONG[0] + timedelta(minutes=1), LONG[1]), "call-c")     # another recording in its place
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
     assert (outcome.kind, outcome.reason) == (REVIEW, "RECORDING_SET_CHANGED")
-    assert _sources(url, lecture_id)[0][2] == "LOCATED"           # never re-pointed automatically
+    assert _part_rows(url, lecture_id) == [(1, long["id"], "LOCATED")]
+
+
+def test_a_longer_recording_without_a_proven_file_is_never_selected_and_the_false_start_is_not_kept(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording(graph, SHORT, "call-a")
+    assert _worker(url, graph, clock=CLOSED).run(lecture_id).kind == LOCATED
+    _recording(graph, LONG, "call-b", with_file=False)                          # Graph lists it; no MP4 proves it
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (WAITING, "RECORDING_FILE_NOT_FOUND")
+    assert _discovery(url, lecture_id)[0] == "WAITING" and _selection(url, lecture_id)["part_index"] == 2
+
+
+def test_a_longer_recording_with_two_candidate_files_requires_review(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording(graph, SHORT, "call-a")
+    assert _worker(url, graph, clock=CLOSED).run(lecture_id).kind == LOCATED
+    long, _ = _recording(graph, LONG, "call-b")
+    graph.recorded_file(long, lead=50, size=700_000_000)                       # a second, different file fits it
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (REVIEW, "SEVERAL_FILES_FOR_PART")
+    assert _discovery(url, lecture_id)[0] == "REVIEW_REQUIRED"
+
+
+def test_a_changed_set_of_a_lecture_with_bunny_work_still_requires_review(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _recording(graph, SHORT, "call-a")
+    assert _worker(url, graph, clock=CLOSED).run(lecture_id).kind == LOCATED
+    with psycopg.connect(url, autocommit=True) as c:                         # part 1 already has a Bunny job
+        PublisherQueueRepository().enqueue(c, job_kind="IMPORT_VIDEO", subject_key=f"lecture:{lecture_id}:part:1",
+                                           lecture_id=lecture_id, priority=80)
+    _recording(graph, LONG, "call-b")
+    outcome = _worker(url, graph, clock=RECHECK).run(lecture_id, verify=True)
+    assert (outcome.kind, outcome.reason) == (REVIEW, "RECORDING_SET_CHANGED")
+    assert _discovery(url, lecture_id)[0] == "REVIEW_REQUIRED" and len(_sources(url, lecture_id)) == 1
 
 
 def test_one_file_can_never_belong_to_two_lectures(url):

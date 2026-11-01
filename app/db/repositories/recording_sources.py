@@ -127,9 +127,24 @@ ON CONFLICT (recording_source_id) DO UPDATE SET
     updated_at = EXCLUDED.updated_at
 """
 TOUCH_SOURCE = """
-UPDATE public.bunny_recording_sources SET last_checked_at = %s
+UPDATE public.bunny_recording_sources SET last_checked_at = %s, recording_part_index = %s
  WHERE lecture_id = %s AND graph_recording_id = %s
 """
+# Kept rows take their new place in one statement each way: first out of the 1.. range, then upserted.
+PARK_LOCATED = """
+UPDATE public.bunny_recording_sources SET recording_part_index = recording_part_index + 100000
+ WHERE lecture_id = %s
+"""
+# Anything keyed by a recording part index: a Bunny video row, a Bunny job, an operator part decision.
+# 027 does not depend on 024/026/028: a table that is not installed holds nothing.
+PART_INDEXED_TABLES = {
+    "bunny_videos": "SELECT 1 FROM public.bunny_videos WHERE lecture_id = %(lecture_id)s",
+    "bunny_publisher_part_decisions": "SELECT 1 FROM public.bunny_publisher_part_decisions "
+                                      "WHERE lecture_id = %(lecture_id)s",
+    "bunny_publisher_jobs": "SELECT 1 FROM public.bunny_publisher_jobs WHERE lecture_id = %(lecture_id)s "
+                            "AND job_kind IN ('IMPORT_VIDEO', 'POLL_ENCODING', 'PUBLISH_CAPTION')",
+}
+INSTALLED = "SELECT name FROM unnest(%s::text[]) AS name WHERE to_regclass('public.' || name) IS NOT NULL"
 VERIFY_SOURCE = """
 UPDATE public.bunny_recording_sources
    SET locate_status = %(status)s, last_checked_at = %(now)s,
@@ -212,13 +227,27 @@ class RecordingSourceRepository:
         except Exception as exc:
             raise _db("recording discovery write failed", exc) from exc
 
-    def replace_parts(self, connection, lecture_id, mappings, *, method: str, now, kept_reason: str) -> None:
-        """Replace the lecture's non-located part rows with this evaluation's; LOCATED rows are upserted."""
+    def part_indexed_state(self, connection, lecture_id) -> bool:
+        """True when a Bunny video, a Bunny job or an operator decision refers to one of the lecture's parts."""
+        installed = [r[0] for r in connection.execute(INSTALLED, (list(PART_INDEXED_TABLES),)).fetchall()]
+        if not installed:
+            return False
+        query = "SELECT " + " OR ".join(f"EXISTS ({PART_INDEXED_TABLES[t]})" for t in installed)
+        return bool(connection.execute(query, {"lecture_id": str(lecture_id)}).fetchone()[0])
+
+    def replace_parts(self, connection, lecture_id, mappings, *, method: str, now, kept_reason: str,
+                      renumber: bool = False) -> None:
+        """
+        Replace the lecture's non-located part rows with this evaluation's; LOCATED rows are upserted.
+        `renumber`: a kept LOCATED row moves to its new part index (every one of them is in `mappings`).
+        """
         try:
             connection.execute(DELETE_UNLOCATED, (str(lecture_id),))
+            if renumber:
+                connection.execute(PARK_LOCATED, (str(lecture_id),))
             for m in mappings:
                 if m.reason == kept_reason:
-                    connection.execute(TOUCH_SOURCE, (now, str(lecture_id), m.recording.recording_id))
+                    connection.execute(TOUCH_SOURCE, (now, m.part_index, str(lecture_id), m.recording.recording_id))
                     continue
                 c = m.candidate
                 connection.execute(UPSERT_SOURCE, {

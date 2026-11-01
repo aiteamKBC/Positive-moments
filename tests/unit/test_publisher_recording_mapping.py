@@ -238,6 +238,17 @@ def test_a_verified_part_is_never_re_pointed():
     assert rm.merge_with_stored(mappings, gone)[1] == "RECORDING_SET_CHANGED"
 
 
+def test_a_moved_verified_part_takes_its_new_place_only_when_renumbering_is_allowed():
+    _, occurrence, mappings = _located_two_parts()
+    moved = {mappings[0].recording.recording_id: _stored(mappings[0], part_index=2)}
+    merged, conflict = rm.merge_with_stored(mappings, moved, renumber=True)
+    assert conflict is None and [m.part_index for m in merged] == [1, 2]
+    other_file = {mappings[0].recording.recording_id: _stored(mappings[0], part_index=2, source_item_id="OTHER")}
+    assert rm.merge_with_stored(mappings, other_file, renumber=True)[1] == "SOURCE_CONFLICT_WITH_VERIFIED_FILE"
+    gone = {"rec-gone": _stored(mappings[0])}
+    assert rm.merge_with_stored(mappings, gone, renumber=True)[1] == "RECORDING_SET_CHANGED"
+
+
 def test_no_url_survives_candidate_mapping():
     g = FakeRecordingGraph()
     r = g.recording(START, END)

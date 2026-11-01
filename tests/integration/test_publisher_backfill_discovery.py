@@ -386,3 +386,22 @@ def test_e_an_event_crossing_cairo_midnight_belongs_to_one_date_only(url):
     preview_run, rows = finish_preview(world, task, request_preview(world, D1, D1))
     # The business date is the Cairo date of the start, never the UTC date or the asked window.
     assert [(r["subject"], r["session_date"]) for r in rows] == [("Backfill Teams LATE", D1.isoformat())]
+
+
+# =========================================================================== a false start next to the lecture
+def test_a_historical_lecture_with_a_false_start_imports_only_the_lecture_recording(url):
+    world, teams = world_with_teams(url)
+    subject = teams.lecture("R1", at(D1, 11), recordings=((-5, -124), (-3, 19)))   # ~1 min, then ~2 h 22 min
+    task = task_for(world)
+    preview_run, rows = finish_preview(world, task, request_preview(world, D1, D1))
+    run = confirm(world, preview_run, rows)
+    world.run(rounds=16)
+    [(lid, _)] = registered(world, subject)
+    assert items(world, run["run_id"])[lid]["status"] == "COMPLETED"
+    assert world.q("SELECT status, (metadata -> 'recording_selection' ->> 'part_index')::int FROM "
+                   "public.bunny_recording_discoveries WHERE lecture_id = %s", lid) == [("LOCATED", 2)]
+    assert world.q("SELECT recording_part_index, import_status, encoding_status FROM public.bunny_videos "
+                   "WHERE lecture_id = %s", lid) == [(2, "IDENTIFIED", "VERIFIED")]
+    assert len(world.bunny.fetch_calls) == 1
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == 1

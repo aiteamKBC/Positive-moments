@@ -159,6 +159,11 @@ The read-only API for the future dashboard tab lives at `/operations/publisher/s
 - **AI in Project Control 2026** (2026-10-23): `NO_LMS_SESSION`. Its recording and transcript are stored, and it isn't imported. The LMS team is investigating. No LMS occurrence is faked or bypassed.
 - **LMS session `OCC-C3535F99…`** (Marketing Executive L4, 2026-10-23 11:00): `LMS_ONLY_PENDING`; no Teams lecture was discovered for it.
 - **Orphan staging video** `be785a53-…` (2026-10-21, the single-video pilot): reported as `ORPHAN_BUNNY_VIDEO` and deliberately untouched.
+- **`RECORDING_SET_CHANGED`**: Teams listed another recording of the same occurrence after the lecture was located (for example a ~1 min false start located alone, then the 2 h lecture recording appears later). Since this fix, the re-check runs the full discovery again and selects the longest verified recording by itself, provided no Bunny video, Bunny job or operator part decision refers to the lecture's parts yet. Otherwise review stays. A lecture already left in this review by an earlier version stays there until someone takes one audited action:
+  1. `recording-preview --lecture-id <id>` (read-only) should show `RESELECT_AND_IMPORT` (or `IMPORT_PENDING`) with the longest part selected.
+  2. Then run `reselect-recording --lecture-id <id> --actor <name> --reason "<why>"`. It re-runs discovery, audits `OPERATOR_RECORDING_RESELECTED` and queues the selected part's import, even outside the lookback window.
+
+  A recording that left the occurrence, a file that can't be proven, or several candidate files all still need review.
 
 ## 9. Historical Backfill (Publishing Monitor → Historical Backfill tab)
 

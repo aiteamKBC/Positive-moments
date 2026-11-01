@@ -337,3 +337,89 @@ def test_an_uncertain_import_in_review_is_never_requeued_and_keeps_its_operator_
     world.run(rounds=12)
     assert len(world.bunny.fetch_calls) == 2 and _view(world)["verified_ready"]
     assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+
+
+# =========================================================================== a recording set that changes later
+# 2026-10-30 Managing Successful Programmes: a ~58 s false start at 13:55, then the lecture 13:57-16:19 (slot 14-16).
+MSP_SHORT = (START - timedelta(minutes=5), START - timedelta(minutes=4, seconds=2))
+MSP_LONG = (START - timedelta(minutes=3), END + timedelta(minutes=19))
+
+
+def _until(world, moment):
+    world.clock.now = max(world.clock.now, moment)
+
+
+def _window_closed(world):
+    _until(world, END + timedelta(hours=3, minutes=5))       # the occurrence's recordings are final
+
+
+def _recheck(world):
+    _until(world, END + timedelta(hours=24, minutes=5))      # the bounded re-check of a located lecture
+
+
+def _recording_reviews(world):
+    return [j for j in world.jobs("RESOLVE_RECORDING") if j[2] == "REVIEW_REQUIRED"]
+
+
+def _recording_state(world):
+    return world.q("SELECT status, (metadata -> 'recording_selection' ->> 'part_index')::int "
+                   "FROM public.bunny_recording_discoveries WHERE lecture_id = %s", world.lecture_id)[0]
+
+
+def test_a_false_start_located_alone_then_the_lecture_appears_it_is_imported_without_an_operator(url):
+    world = World(url)
+    world.part(*MSP_SHORT, transcript=False, call_id="call-a")
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=4)
+    assert _recording_state(world) == ("LOCATED", 1) and world.videos() == []   # a lone fragment is not imported
+    world.part(*MSP_LONG, call_id="call-b")                    # Teams lists the lecture's recording later
+    _recheck(world)
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _recording_state(world) == ("LOCATED", 2)
+    [video] = world.videos()
+    assert video[0] == 2 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+    world.reconciler.run("FULL")                               # retries and reconciliation create nothing twice
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1
+    assert _plan(world)["action"] == reselection.NO_CHANGE
+
+
+def test_the_full_recording_already_imported_a_late_false_start_goes_to_review_and_nothing_is_reimported(url):
+    world = World(url)
+    long = world.part(*MSP_LONG, call_id="call-b")
+    world.run(rounds=12)
+    assert world.ready()
+    world.part(*MSP_SHORT, transcript=False, call_id="call-a")   # an earlier recording listed late
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world)                           # part 1 has a video: never renumbered silently
+    assert [v[0] for v in world.videos(live=True)] == [1] and len(world.bunny.fetch_calls) == 1
+    assert world.q("SELECT recording_part_index, graph_recording_id FROM public.bunny_recording_sources "
+                   "WHERE lecture_id = %s", world.lecture_id) == [(1, long["id"])]
+
+
+def test_a_released_false_start_is_never_replaced_automatically_the_audited_reselection_imports_the_lecture(url):
+    world = World(url)
+    world.part(START - timedelta(minutes=5), START - timedelta(minutes=2), call_id="call-a")   # transcribed: imported
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=12)
+    assert [v[0] for v in world.videos(live=True)] == [1]
+    assert act(world, "release")["changed"]
+    fetches = len(world.bunny.fetch_calls)
+    world.part(START - timedelta(minutes=1), END + timedelta(minutes=19), call_id="call-b")
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world)
+    assert len(world.bunny.fetch_calls) == fetches and _view(world)["release"] == "RELEASED"
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [1]
+    plan = _plan(world)
+    assert (plan["action"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, 2)
+    reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                      library_id=LIBRARY_ID, planner=world.planner)
+    world.run(rounds=14)
+    assert len(world.bunny.fetch_calls) == fetches + 1         # exactly one upload: the lecture
+    assert sorted(v[0] for v in world.videos(live=True)) == [1, 2]
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]

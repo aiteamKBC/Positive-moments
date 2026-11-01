@@ -216,6 +216,13 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _moved_parts(mappings, stored) -> list:
+    """[[stored, now], ...] part indexes of verified recordings whose place in the recording order changed."""
+    now = {m.recording.recording_id: m.part_index for m in mappings}
+    return sorted([row["part_index"], now[rid]] for rid, row in stored.items()
+                  if row["locate_status"] == rm.LOCATED and rid in now and now[rid] != row["part_index"])
+
+
 def _cause(exc) -> BaseException:
     return exc.__cause__ if isinstance(exc, PlatformError) and exc.__cause__ is not None else exc
 
@@ -408,11 +415,40 @@ class RecordingWorker:
             outcome = self._review(lid, conflict, expected, detail)
             outcome.transcript_pairing = pairing
             return outcome, {"call_ids": call_ids, "pairing": pairing}
-        mappings, merge_conflict = rm.merge_with_stored(mappings, stored)
+        moved = _moved_parts(mappings, stored)
+        renumber = bool(moved) and self._nothing_keyed_by_part(connection, lid)
+        mappings, merge_conflict = rm.merge_with_stored(mappings, stored, renumber=renumber)
         if merge_conflict:
             return self._review(lid, merge_conflict, expected, detail), {"call_ids": call_ids}
+        if moved:
+            detail["recording_parts_renumbered"] = moved
         return self._aggregate(lid, mappings, pairing, detail, since_end, lecture, now, stored), {
-            "call_ids": call_ids, "pairing": pairing, "mappings": mappings}
+            "call_ids": call_ids, "pairing": pairing, "mappings": mappings, "renumber": bool(moved)}
+
+    def _nothing_keyed_by_part(self, connection, lecture_id) -> bool:
+        with connection.transaction():
+            return not self.repository.part_indexed_state(connection, lecture_id)
+
+    def _set_change(self, connection, lecture, stored, now, counters, occurrence, now_ids):
+        """
+        A LOCATED lecture whose occurrence now lists other recordings (Teams made a recording of the same
+        occurrence visible later). Re-evaluated from scratch by _discover - the same occurrence, file, duration
+        and transcript rules and longest-recording selection as a first discovery - but only when it is still
+        the same occurrence (every verified recording still in it) and nothing is keyed by part index yet (no
+        Bunny video, Bunny job or operator decision). Anything else returns None: review, as before.
+        """
+        verified = [rid for rid, row in stored.items() if row["locate_status"] == rm.LOCATED]
+        if occurrence.status != rm.SELECTED or not verified or any(rid not in now_ids for rid in verified):
+            return None
+        if not self._nothing_keyed_by_part(connection, lecture.lecture_id):
+            return None
+        outcome, write = self._discover(connection, lecture, stored, now, 1, counters)
+        if outcome.kind == RETRY:
+            return self._stored(lecture.lecture_id, "REVERIFY_FAILED_STORED_KEPT", stored,
+                                detail={"verify_failure": outcome.reason}), {"touch": True}
+        outcome.detail["recording_set_change"] = {"stored_part_count": len(stored), "now_part_count": len(now_ids),
+                                                  "resolution": "REEVALUATED"}
+        return outcome, write
 
     def _aggregate(self, lid, mappings, pairing, detail, since_end, lecture, now, stored) -> RecordingOutcome:
         selection = rm.select_recording(mappings, stored)
@@ -467,6 +503,9 @@ class RecordingWorker:
         now_ids = [p.recording_id for p in occurrence.parts]
         stored_ids = [k for k, _ in sorted(on_record.items(), key=lambda kv: kv[1]["part_index"])]
         if occurrence.status != rm.SELECTED or now_ids != stored_ids:
+            reevaluated = self._set_change(connection, lecture, stored, now, counters, occurrence, now_ids)
+            if reevaluated is not None:
+                return reevaluated
             outcome = self._review(lid, "RECORDING_SET_CHANGED", len(now_ids),
                                    {**occurrence.detail, "stored_part_count": len(stored_ids)})
             outcome.located_part_count = min(len(stored_ids), len(now_ids))
@@ -546,7 +585,7 @@ class RecordingWorker:
                           if isinstance(v, (int, float, str, bool, list, dict))})
             if mappings is not None:
                 self.repository.replace_parts(connection, lid, mappings, method=rm.VERIFICATION_METHOD, now=now,
-                                              kept_reason=KEPT)
+                                              kept_reason=KEPT, renumber=bool(write.get("renumber")))
             if write.get("verified"):
                 self.repository.mark_verified(connection, lid, write["verified"], now=now)
             if write.get("transcripts"):

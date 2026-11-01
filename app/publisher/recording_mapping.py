@@ -424,23 +424,28 @@ def pair_transcripts(mappings, all_recordings, transcript_parts) -> tuple[list, 
 
 # -- previously stored parts --------------------------------------------------------------------------
 
-def merge_with_stored(mappings, stored: dict) -> tuple[list, str | None]:
+def merge_with_stored(mappings, stored: dict, *, renumber: bool = False) -> tuple[list, str | None]:
     """
     Keep what was verified before. `stored` maps graph_recording_id to the
     stored row ({part_index, locate_status, source_drive_id, source_item_id}).
 
     * a stored LOCATED part is never downgraded by a later read: a part that
       is now not found / pending keeps its verified file;
-    * a stored LOCATED part that now resolves to a DIFFERENT file, or now has
-      another place in the recording order, or is no longer part of this
-      occurrence, is a conflict for review - never re-pointed automatically.
+    * a stored LOCATED part that now resolves to a DIFFERENT file, or is no
+      longer part of this occurrence, is a conflict for review - never
+      re-pointed automatically;
+    * a stored LOCATED part that now has another place in the recording order
+      (an EARLIER recording of the occurrence became visible later) is a
+      conflict too, unless `renumber`: the caller has proven that nothing is
+      keyed by part index yet (no Bunny video, job or operator decision), so
+      the same recording and file simply take their new place.
     """
     current = {m.recording.recording_id: m for m in mappings}
     for recording_id, row in stored.items():
         if row["locate_status"] != LOCATED:
             continue
         mapping = current.get(recording_id)
-        if mapping is None or mapping.part_index != row["part_index"]:
+        if mapping is None or (mapping.part_index != row["part_index"] and not renumber):
             return list(mappings), "RECORDING_SET_CHANGED"
         if mapping.candidate is not None and mapping.candidate.physical_id != (
                 row["source_drive_id"], row["source_item_id"]) and mapping.locate_status in (LOCATED, DURATION_PENDING):
