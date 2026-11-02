@@ -1,7 +1,9 @@
 """P0-C: the pure multipart recording mapping rules (no database, no Graph)."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from app.publisher import recording_mapping as rm
 from app.recordings.candidates import candidate_from_drive_item
@@ -116,7 +118,8 @@ def test_duration_mismatch_pending_and_origin_ambiguity():
     assert (m2.locate_status, m2.reason) == (rm.DURATION_PENDING, "FILE_DURATION_UNAVAILABLE")
     g3 = FakeRecordingGraph()
     r3 = g3.recording(START, END)
-    [m3], _ = _map(_select(g3), _candidates(g3.recorded_file(r3, lead=3)))     # both origins fit, 3 s apart
+    # both origins fit, 3 s apart, and the file sits half way: neither residual is within 1 s
+    [m3], _ = _map(_select(g3), _candidates(g3.recorded_file(r3, lead=3, duration=EXPECTED + 1.5)))
     assert (m3.locate_status, m3.reason) == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")
 
 
@@ -302,10 +305,11 @@ def test_genuine_ambiguity_is_never_resolved():
     a, b = g.recorded_file(r, lead=40, duration=EXPECTED - 900, size=1), g.recorded_file(r, lead=90, duration=87, size=2)
     [m], _ = _map(_select(g), _candidates(a, b))
     assert (m.locate_status, m.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
-    # one file fits the duration but its media origin is itself ambiguous (named 3 s before the recording)
+    # one file fits the duration but its media origin is itself ambiguous (named 3 s early, 1.5 s from both)
     g2 = FakeRecordingGraph()
     r2 = g2.recording(START, END)
-    c, d = g2.recorded_file(r2, lead=3, size=1), g2.recorded_file(r2, lead=60, duration=87, size=2)
+    c = g2.recorded_file(r2, lead=3, duration=EXPECTED + 1.5, size=1)
+    d = g2.recorded_file(r2, lead=60, duration=87, size=2)
     [m2], _ = _map(_select(g2), _candidates(c, d))
     assert (m2.locate_status, m2.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
 
@@ -563,3 +567,93 @@ def test_msp_false_start_by_file_name_and_lecture_by_teams_source_longest_select
     selection = rm.select_recording([m])
     assert m.located and m.candidate.item_id == mp4["id"] and selection.part_index == 1
     assert round(selection.candidates[0]["duration_seconds"]) == 8533
+
+
+# -- media origin precision (2026-11-02: backfill run 9c23773d, 2026-09-02) ---------------------------
+# Teams named these three MP4s ~5.3 s before the Graph createdDateTime. With a 0.1 % tolerance (8-10 s on a
+# 2-3 h recording) both origins passed, so the lectures went to review. The values are production's.
+SEPT_2 = (  # (lecture, createdDateTime, Graph window s, file-name time, measured video s)
+    ("Andrew SP", datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc), 8034.22,
+     datetime(2026, 9, 2, 10, 54, 35, tzinfo=timezone.utc), 8034.304),
+    ("Ray PMP", datetime(2026, 9, 2, 7, 58, 4, 504789, tzinfo=timezone.utc), 9338.94,
+     datetime(2026, 9, 2, 7, 57, 59, tzinfo=timezone.utc), 9339.008),
+    ("Steve EVM", datetime(2026, 9, 2, 7, 34, 10, 275690, tzinfo=timezone.utc), 10282.24,
+     datetime(2026, 9, 2, 7, 34, 5, tzinfo=timezone.utc), 10282.304),
+)
+
+
+def _graph_part(created, window):
+    return rm.RecordingPart("rec-1", "call-1", created, created + timedelta(seconds=window))
+
+
+@pytest.mark.parametrize("name, created, window, named, measured", SEPT_2, ids=[c[0] for c in SEPT_2])
+def test_september_2_lectures_resolve_to_the_graph_origin(name, created, window, named, measured):
+    lead = created.timestamp() - named.timestamp()
+    assert 5.2 < lead < 5.6
+    status, reason, origin, difference = rm.check_duration(_graph_part(created, window), measured, lead)
+    assert (status, reason, origin) == (rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+    assert 0.06 <= difference <= 0.09
+
+
+def test_a_september_2_shaped_lecture_is_located_end_to_end():
+    g = FakeRecordingGraph()
+    created = START + timedelta(seconds=40.266825)
+    r = g.recording(created, created + timedelta(seconds=8034.22))
+    mp4 = g.recorded_file(r, lead=5.266825, duration=8034.304)
+    [m], _ = _map(_select(g), _candidates(mp4))
+    assert (m.locate_status, m.media_origin, m.candidate.item_id) == (rm.LOCATED, rm.METHOD_GRAPH_CREATED, mp4["id"])
+    assert round(m.lead_seconds, 3) == 5.267 and m.duration_difference_seconds == 0.084
+
+
+def test_october_28_near_miss_still_resolves_to_the_graph_origin():
+    # Advanced Project and Logistics Management: lead 14.736 s, tolerance 14.4 s - the name origin missed by 0.27 s.
+    created = datetime(2026, 10, 28, 8, 0, 14, 736000, tzinfo=timezone.utc)
+    assert rm.check_duration(_graph_part(created, 14400.0), 14400.064, 14.736)[:3] == (
+        rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+    # the same recording named 2 s later: both origins now pass the tolerance, the 1 s bound decides
+    assert rm.check_duration(_graph_part(created, 14400.0), 14400.064, 12.736)[2] == rm.METHOD_GRAPH_CREATED
+
+
+def test_october_30_msp_is_unchanged():
+    created = datetime(2026, 10, 30, 12, 19, 9, 947192, tzinfo=timezone.utc)
+    status, _, origin, difference = rm.check_duration(_graph_part(created, 8532.502), 8532.625, 1303.947)
+    assert (status, origin, difference) == (rm.LOCATED, rm.METHOD_GRAPH_CREATED, 0.123)
+
+
+def test_a_file_that_really_starts_at_its_name_time_resolves_to_the_file_name_origin():
+    created = datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc)
+    status, _, origin, difference = rm.check_duration(_graph_part(created, 8034.22), 8034.22 + 5.267 + 0.07, 5.267)
+    assert (status, origin) == (rm.LOCATED, rm.METHOD_FILE_NAME) and abs(difference - 0.07) < 1e-6
+
+
+def test_both_or_neither_residual_within_one_second_stays_ambiguous():
+    created = datetime(2026, 9, 2, 10, 54, 40, tzinfo=timezone.utc)
+    part = _graph_part(created, 8034.0)
+    assert rm.check_duration(part, 8034.0 + 0.8, 1.6)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")   # both
+    assert rm.check_duration(part, 8034.0 + 2.6, 5.3)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")   # neither
+    # a smaller residual alone never decides (1.2 s vs 4.1 s)
+    assert rm.check_duration(part, 8034.0 + 1.2, 5.3)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")
+
+
+def test_a_lead_of_one_second_or_less_is_the_existing_same_origin_rule():
+    created = datetime(2026, 9, 2, 10, 54, 40, tzinfo=timezone.utc)
+    for measured in (8034.0 + 0.5, 8034.0 + 0.9, 8034.0 + 2.5):
+        assert rm.check_duration(_graph_part(created, 8034.0), measured, 0.9)[:3] == (
+            rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+
+
+def test_a_september_2_shaped_file_with_another_subject_or_date_is_never_matched():
+    g = FakeRecordingGraph()
+    created = START + timedelta(seconds=40.266825)
+    r = g.recording(created, created + timedelta(seconds=8034.22))
+    other = g.recorded_file(r, lead=5.266825, duration=8034.304, subject="Another Cohort Lecture")
+    yesterday = g.mp4(started=created - timedelta(days=1, seconds=5.266825), duration_seconds=8034.304)
+    [m], diagnostics = _map(_select(g), _candidates(other, yesterday))
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["subject_mismatch_in_window"] == 1
+
+
+def test_a_september_2_shaped_file_with_the_wrong_duration_is_a_mismatch():
+    created = datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc)
+    for measured in (8034.22 + 30, 8034.22 - 30, 8034.22 + 5.267 + 15):
+        assert rm.check_duration(_graph_part(created, 8034.22), measured, 5.267)[:2] == (
+            rm.DURATION_MISMATCH, "FILE_DURATION_CONTRADICTS_RECORDING")

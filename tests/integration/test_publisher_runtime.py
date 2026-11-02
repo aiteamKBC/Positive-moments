@@ -191,11 +191,11 @@ class World:
         self.lms.occurrences.append(self.occurrence)
         return self.occurrence
 
-    def part(self, start, end, *, transcript=True, minutes=None, call_id="call-1"):
+    def part(self, start, end, *, transcript=True, minutes=None, call_id="call-1", lead=35, duration=None):
         """One Graph recording + its SharePoint MP4 (+ the transcript of the same stretch)."""
         correlation = f"corr-{uuid.uuid4().hex[:10]}"
         recording = self.rgraph.recording(start, end, call_id=call_id, correlation=correlation)
-        self.rgraph.recorded_file(recording, lead=35)
+        self.rgraph.recorded_file(recording, lead=lead, duration=duration)
         if transcript:
             self.transcript(start, end, correlation, minutes=minutes, call_id=call_id)
         return recording
@@ -615,6 +615,36 @@ def test_a_revised_transcript_revises_the_caption(url):
     captions = world.captions()
     assert [c[:2] for c in captions] == [("SUPERSEDED", 1), ("VERIFIED", 2)] and captions[1][3]
     assert recording
+
+
+def _short_lead_world(url, *, file_starts_at_its_name):
+    """2026-09-02 shape: the MP4 is named 5.267 s before the Graph createdDateTime (inside the 0.1 % tolerance)."""
+    world = World(url)
+    created = START + timedelta(minutes=1, seconds=40.266825)
+    end = created + timedelta(seconds=6900.22)
+    lead = 5.266825
+    world.part(created, end, lead=lead, duration=6900.22 + (lead + 0.07 if file_starts_at_its_name else 0.084))
+    return world
+
+
+def _source(world):
+    return world.q("SELECT locate_status, media_origin, round(file_name_lead_seconds, 3)::float8 "
+                   "FROM public.bunny_recording_sources WHERE lecture_id = %s", world.lecture_id)
+
+
+def test_a_file_named_5_s_early_is_published_with_its_graph_origin_caption(url):
+    world = _short_lead_world(url, file_starts_at_its_name=False)
+    world.run(rounds=10)
+    assert _source(world) == [("LOCATED", "graph_created_origin", 5.267)]
+    assert "RECORDING_REVIEW_REQUIRED" not in world.events()
+    assert world.ready() and world.captions() == [("VERIFIED", 1, 0, True)]          # cues at createdDateTime
+
+
+def test_a_file_that_starts_at_its_name_time_shifts_the_caption_by_the_lead(url):
+    world = _short_lead_world(url, file_starts_at_its_name=True)
+    world.run(rounds=10)
+    assert _source(world) == [("LOCATED", "file_name_origin", 5.267)]
+    assert world.ready() and world.captions() == [("VERIFIED", 1, 5267, True)]       # 5.267 s into the file
 
 
 def test_an_invalid_caption_is_never_published(url):

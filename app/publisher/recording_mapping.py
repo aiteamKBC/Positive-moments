@@ -25,7 +25,8 @@ No database, no Graph, no clock. Every rule reuses an existing validated one:
   thread - exact identities, never a name or a duration alone.
 * DURATION (an independent check): the file's measured video duration must
   equal the part's Graph window, with zero at createdDateTime or at the file
-  name's time, within the alignment tolerance (app/media/alignment.py).
+  name's time, within the alignment tolerance (app/media/alignment.py). When
+  both origins fit, the one also within 1 s decides (alignment.media_origin).
 * TRANSCRIPT (corroboration, optional): contentCorrelationId first, then
   createdDateTime within 2 s, exactly as alignment pairs them. A transcript part
   that belongs to a recording OUTSIDE this occurrence, or call ids that do not
@@ -49,7 +50,7 @@ from datetime import datetime, timedelta
 from app.common.time import parse_graph_datetime
 from app.media.alignment import (
     DURATION_TOLERANCE_RATIO, METHOD_FILE_NAME, METHOD_GRAPH_CREATED, MIN_DURATION_TOLERANCE_SECONDS,
-    PAIR_TOLERANCE_SECONDS, SAME_ORIGIN_SECONDS,
+    ORIGIN_AMBIGUOUS, PAIR_TOLERANCE_SECONDS, media_origin,
 )
 from app.recordings.candidates import normalize_subject
 from app.recordings.models import MAX_FILE_LEAD_SECONDS
@@ -318,12 +319,12 @@ def check_duration(part: RecordingPart, file_duration: float | None, lead: float
         return DURATION_PENDING, "FILE_DURATION_UNAVAILABLE", None, None
     tolerance = max(MIN_DURATION_TOLERANCE_SECONDS, DURATION_TOLERANCE_RATIO * reference)
     graph_gap, name_gap = abs(file_duration - reference), abs(file_duration - (reference + lead))
-    graph_fits, name_fits = graph_gap <= tolerance, name_gap <= tolerance
-    if graph_fits and name_fits and lead > SAME_ORIGIN_SECONDS:
+    origin = media_origin(graph_gap, name_gap, tolerance, lead)
+    if origin == ORIGIN_AMBIGUOUS:
         return AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS", None, round(graph_gap, 3)
-    if graph_fits:
+    if origin == METHOD_GRAPH_CREATED:
         return LOCATED, "EXACT_RECORDING_FILE_MATCHED", METHOD_GRAPH_CREATED, round(file_duration - reference, 3)
-    if name_fits:
+    if origin == METHOD_FILE_NAME:
         return LOCATED, "EXACT_RECORDING_FILE_MATCHED", METHOD_FILE_NAME, round(file_duration - reference - lead, 3)
     return DURATION_MISMATCH, "FILE_DURATION_CONTRADICTS_RECORDING", None, round(file_duration - reference, 3)
 

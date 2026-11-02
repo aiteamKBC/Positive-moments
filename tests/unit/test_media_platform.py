@@ -131,6 +131,45 @@ def test_created_time_pairing_is_used_without_correlation_ids():
     assert result.confidence == 0.95
 
 
+def _named(lead):
+    return (f"AI in Project Control 2026-{GRAPH_CREATED - timedelta(seconds=lead):%Y%m%d_%H%M%S}"
+            "UTC-Meeting Recording.mp4")
+
+
+def test_a_short_lead_is_decided_by_the_one_origin_within_a_second():
+    # 2026-09-02 shape: named 5 s early, 0.084 s longer than the Graph window -> zero at createdDateTime.
+    result = al.align(file_name=_named(5), file_duration_seconds=WINDOW + 0.084,
+                      recordings=[recording()], parts=[part()])
+    assert (result.status, result.method, result.media_offset_seconds) == (al.ALIGNED, al.METHOD_GRAPH_CREATED, 0.0)
+    assert result.detail["origin_decided_by"] == "precision"
+    # the same file really starting at its name time -> zero 5 s before createdDateTime
+    result = al.align(file_name=_named(5), file_duration_seconds=WINDOW + 5.07,
+                      recordings=[recording()], parts=[part()])
+    assert (result.status, result.method, result.media_offset_seconds) == (al.ALIGNED, al.METHOD_FILE_NAME, -5.0)
+
+
+def test_both_or_neither_origin_within_a_second_stays_ambiguous():
+    for lead, duration in ((2, WINDOW + 1.0), (5, WINDOW + 2.5), (5, WINDOW + 1.2)):     # names carry whole seconds
+        result = al.align(file_name=_named(lead), file_duration_seconds=duration, recordings=[recording()],
+                          parts=[part()])
+        assert result.code == "ALIGNMENT_ORIGIN_AMBIGUOUS", (lead, duration)
+
+
+def test_a_long_lead_never_needs_the_precision_rule():
+    result = aligned()
+    assert result.method == al.METHOD_GRAPH_CREATED and "origin_decided_by" not in result.detail
+
+
+def test_media_origin_rules():
+    assert al.media_origin(0.08, 5.2, 8.0, 5.27) == al.METHOD_GRAPH_CREATED
+    assert al.media_origin(5.3, 0.07, 8.0, 5.27) == al.METHOD_FILE_NAME
+    assert al.media_origin(0.8, 0.8, 8.0, 1.6) == al.ORIGIN_AMBIGUOUS
+    assert al.media_origin(2.5, 2.5, 8.0, 5.0) == al.ORIGIN_AMBIGUOUS
+    assert al.media_origin(0.4, 0.5, 8.0, 0.9) == al.METHOD_GRAPH_CREATED       # same origin within a second
+    assert al.media_origin(0.1, 14.7, 14.4, 14.8) == al.METHOD_GRAPH_CREATED    # only one fits: unchanged
+    assert al.media_origin(20.0, 30.0, 8.0, 10.0) is None
+
+
 def test_both_origins_fitting_with_a_real_lead_is_ambiguous():
     name = (f"AI in Project Control 2026-{GRAPH_CREATED - timedelta(seconds=3):%Y%m%d_%H%M%S}"
             "UTC-Meeting Recording.mp4")

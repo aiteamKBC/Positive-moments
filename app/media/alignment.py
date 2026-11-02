@@ -25,8 +25,9 @@ HOW THE OFFSET IS PROVEN
       A  zero at createdDateTime   ->  D ~ W
       B  zero at the file-name time ->  D ~ W + lead
    Exactly one must hold within DURATION_TOLERANCE. Both holding is only
-   accepted when they are the same origin within a second; neither holding,
-   or no measurement, is refused.
+   accepted when they are the same origin within a second, or when exactly
+   one of them also holds within ORIGIN_PRECISION_SECONDS (media_origin);
+   neither holding, or no measurement, is refused.
 4. media_seconds = canonical_seconds - media_offset_seconds, where
       media_offset_seconds = part_offset + (origin - part_created_at)
 
@@ -53,9 +54,15 @@ PAIR_TOLERANCE_SECONDS = 2.0
 MIN_DURATION_TOLERANCE_SECONDS = 2.0
 DURATION_TOLERANCE_RATIO = 0.001        # 7 s on a 2 h recording
 SAME_ORIGIN_SECONDS = 1.0
+# When BOTH origins fit DURATION_TOLERANCE (a lead shorter than the tolerance: 0.1 % is 8-10 s on a 2-3 h
+# recording), the one origin whose residual is also within this bound is the file's. Production 2026-11-02:
+# every one of 42 measured Teams MP4s was 0.04-0.13 s longer than its Graph window, so the true origin's
+# residual sits far inside 1 s while the other's is about the lead (5.3 s on the 2026-09-02 lectures).
+ORIGIN_PRECISION_SECONDS = 1.0
 
 METHOD_GRAPH_CREATED = "graph_created_origin"
 METHOD_FILE_NAME = "file_name_origin"
+ORIGIN_AMBIGUOUS = "ORIGIN_AMBIGUOUS"
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,28 @@ def _ts(value) -> float | None:
         return None
 
 
+def media_origin(graph_gap: float, name_gap: float, tolerance: float, lead: float) -> str | None:
+    """
+    Where the file's time zero is, from the residuals of its measured duration against the two origins:
+    METHOD_GRAPH_CREATED, METHOD_FILE_NAME, ORIGIN_AMBIGUOUS, or None (neither fits: the duration
+    contradicts the recording). `tolerance` is the identity gate, unchanged. Only when BOTH origins pass it
+    and they are more than SAME_ORIGIN_SECONDS apart is the strict bound consulted: exactly one residual
+    within ORIGIN_PRECISION_SECONDS decides; both or neither within it stays ambiguous. A merely smaller
+    residual never decides.
+    """
+    graph_fits, name_fits = graph_gap <= tolerance, name_gap <= tolerance
+    if graph_fits and name_fits and lead > SAME_ORIGIN_SECONDS:
+        graph_exact, name_exact = graph_gap <= ORIGIN_PRECISION_SECONDS, name_gap <= ORIGIN_PRECISION_SECONDS
+        if graph_exact == name_exact:
+            return ORIGIN_AMBIGUOUS
+        return METHOD_GRAPH_CREATED if graph_exact else METHOD_FILE_NAME
+    if graph_fits:
+        return METHOD_GRAPH_CREATED
+    if name_fits:
+        return METHOD_FILE_NAME
+    return None
+
+
 def _review(code, **detail):
     return Alignment(REVIEW_REQUIRED_ALIGNMENT, code, detail=detail)
 
@@ -168,8 +197,9 @@ def align(*, file_name: str | None, file_duration_seconds: float | None,
         return Alignment(WAITING_FOR_ALIGNMENT, "FILE_DURATION_UNAVAILABLE")
 
     tolerance = max(MIN_DURATION_TOLERANCE_SECONDS, DURATION_TOLERANCE_RATIO * reference)
-    graph_origin = abs(file_duration_seconds - reference) <= tolerance
-    name_origin = abs(file_duration_seconds - (reference + lead)) <= tolerance
+    graph_gap = abs(file_duration_seconds - reference)
+    name_gap = abs(file_duration_seconds - (reference + lead))
+    graph_origin, name_origin = graph_gap <= tolerance, name_gap <= tolerance
     detail = {"pairing": pairing, "part_index": part.part_index,
               "graph_recording_id": recording.recording_id,
               "file_name_lead_seconds": round(lead, 3),
@@ -177,11 +207,14 @@ def align(*, file_name: str | None, file_duration_seconds: float | None,
               "reference_source": reference_source,
               "duration_tolerance_seconds": round(tolerance, 3),
               "graph_origin_fits": graph_origin, "file_name_origin_fits": name_origin}
-    if graph_origin and name_origin and lead > SAME_ORIGIN_SECONDS:
+    decided = media_origin(graph_gap, name_gap, tolerance, lead)
+    if decided == ORIGIN_AMBIGUOUS:
         return _review("ALIGNMENT_ORIGIN_AMBIGUOUS", **detail)
-    if graph_origin:
+    if graph_origin and name_origin and lead > SAME_ORIGIN_SECONDS:
+        detail["origin_decided_by"] = "precision"
+    if decided == METHOD_GRAPH_CREATED:
         origin, method = created, METHOD_GRAPH_CREATED
-    elif name_origin:
+    elif decided == METHOD_FILE_NAME:
         origin, method = file_ts, METHOD_FILE_NAME
     else:
         return _review("FILE_DURATION_CONTRADICTS_RECORDING", **detail,
