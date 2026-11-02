@@ -13,7 +13,7 @@ import {
   cancelBackfill, getBackfillPreview, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
 } from '../src/services/publishing'
 import type { BackfillPreview, BackfillRun, BackfillRunDetail, BackfillRuns } from '../src/types/backfill'
-import { CATEGORY, ORIGIN, canRun, duration, inclusiveDays, rangeProblem } from '../src/utils/backfill'
+import { CATEGORY, ORIGIN, QA_ONLY_CODE, canRun, duration, inclusiveDays, provenance, rangeProblem, rowKey } from '../src/utils/backfill'
 
 vi.mock('../src/services/publishing', () => ({
   getBackfillRuns: vi.fn(), previewBackfill: vi.fn(), getBackfillPreview: vi.fn(), startBackfill: vi.fn(),
@@ -136,7 +136,17 @@ describe('Historical Backfill vocabulary and checks', () => {
     for (const key of ['MISSING_LMS_MATCH', 'MISSING_RECORDING', 'REVIEW_REQUIRED', 'ERROR']) {
       expect(CATEGORY[key].tone).not.toBe('ok')
     }
-    expect(Object.keys(ORIGIN)).toEqual(['TEAMS_NEW', 'TEAMS_EXISTING', 'STORED_ONLY', 'DISCOVERED_AT_RUN'])
+    expect(Object.keys(ORIGIN)).toEqual(['TEAMS_NEW', 'TEAMS_EXISTING', 'STORED_ONLY', 'DISCOVERED_AT_RUN', 'QA_ONLY'])
+    expect(ORIGIN.QA_ONLY.tone).not.toBe('ok')
+  })
+
+  it('names where a lecture was seen and keys QA-only rows without a lecture id', () => {
+    expect(provenance(['TEAMS', 'PUBLISHER', 'QA'])).toBe('Teams + existing + QA')
+    expect(provenance(['QA'])).toBe('QA')
+    expect(provenance(undefined)).toBe('')
+    expect(rowKey({ lecture_id: 'L1', session_date: '2026-09-01' })).toBe('L1')
+    expect(rowKey({ lecture_id: null, qa_ref: 'abc', session_date: '2026-09-02' })).toBe('qa:abc:2026-09-02')
+    expect(QA_ONLY_CODE.QA_ONLY_NO_LMS_SESSION).toMatch(/No LMS session/)
   })
 })
 
@@ -166,6 +176,32 @@ describe('Historical Backfill panel', () => {
     expect(wrapper.find('[data-test="bf-preview-table"]').text()).toContain('checked at run')
     expect(wrapper.text()).toContain('Teams lectures discovered')
     expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('shows both sources per day, QA-only lectures with their blocker, and a genuinely empty day', async () => {
+    const p = preview('complete')
+    p.preview.coverage = [
+      { date: '2026-09-01', status: 'COMPLETE', teams: { status: 'COMPLETE' }, qa: { status: 'COMPLETE', records: 2 } },
+      { date: '2026-09-02', status: 'COMPLETE', teams: { status: 'COMPLETE' }, qa: { status: 'COMPLETE', records: 0 } },
+      ...p.preview.coverage.slice(2),
+    ]
+    p.summary!.per_day['2026-09-02'] = { total: 0, eligible: 0, teams: 0, discovery: 'COMPLETE', outcome: 'COMPLETED_EMPTY_DAY' }
+    p.summary = { ...p.summary!, qa_records: 2, qa_matched: 1, qa_only: 1 }
+    p.lectures = [{ ...p.lectures[0], sources: ['TEAMS', 'QA'], qa: { status: 'MATCHED', records: 1 } }, {
+      ...p.lectures[0], lecture_id: null, qa_ref: 'ref1', subject: 'Finished Course', origin: 'QA_ONLY', sources: ['QA'],
+      category: 'MISSING_LMS_MATCH', proposed_action: 'NONE', code: 'QA_ONLY_NO_LMS_SESSION',
+      reason: 'Only in the QA database.', scheduled_start: null, scheduled_end: null,
+    }]
+    vi.mocked(getBackfillPreview).mockResolvedValue(p)
+    const wrapper = await mounted()
+    await previewed(wrapper)
+    expect(wrapper.find('[data-test="bf-day-2026-09-01"]').text()).toContain('Teams discovered, 2 QA')
+    expect(wrapper.find('[data-test="bf-day-2026-09-02"]').text()).toContain('empty day')
+    const table = wrapper.find('[data-test="bf-preview-table"]').text()
+    expect(table).toContain('Teams + QA')
+    expect(table).toContain('QA database only')
+    expect(table).toContain('No LMS session of its Teams meeting that day')
+    expect(wrapper.text()).toContain('QA database records')
   })
 
   it('never offers Run for an incomplete preview and says which days are missing', async () => {

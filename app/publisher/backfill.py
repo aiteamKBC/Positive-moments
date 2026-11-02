@@ -62,6 +62,7 @@ from pathlib import Path
 from app.common.time import CAIRO
 from app.db.repositories.publisher_backfill import EXECUTE, PREVIEW, BackfillRepository
 from app.db.repositories.publisher_queue import PublisherQueueRepository
+from app.publisher import historical_sources as sources
 from app.publisher import monitor
 from app.publisher.handlers import HISTORICAL_PRIORITY, HISTORICAL_TAG, MAX_ATTEMPTS, subject_key
 from app.publisher.recording_mapping import RULE_SINGLE_RECORDING
@@ -98,6 +99,8 @@ TEAMS_NEW, TEAMS_EXISTING, STORED_ONLY, DISCOVERED_AT_RUN = "TEAMS_NEW", "TEAMS_
 # Verification labels: what the preview has checked and what only the run checks.
 LIVE_TEAMS, LIVE_DRY_RUN, STORED, AT_RUN = "LIVE", "LIVE_DRY_RUN", "STORED", "TO_BE_VERIFIED_AT_RUN"
 COMPLETE, FAILED_DAY, NOT_AVAILABLE = "COMPLETE", "FAILED", "NOT_AVAILABLE"
+# A day where one source answered and the other failed: never complete, never empty; retried like a failure.
+PARTIAL, NOT_CHECKED, COMPLETED_EMPTY_DAY = "PARTIAL", "NOT_CHECKED", "COMPLETED_EMPTY_DAY"
 DAY_ATTEMPTS = 3
 PUBLISHED_STATES = (monitor.PLAYABLE, monitor.PLAYABLE_NO_CAPTIONS, monitor.RELEASED_PLAYBACK_OFF)
 _MISSING_HINTS = ("NOT_FOUND", "NO_RECORDING", "DEADLINE_PASSED", "RECORDING_FILE_NOT_FOUND")
@@ -264,7 +267,7 @@ def _import_estimate(category: str, row: dict | None, recording: dict | None) ->
 def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from: date, date_to: date,
                   library_id: int, now: datetime, auto_release: bool | None = None,
                   playback_enabled: bool = False, errors: dict | None = None, discovered: dict | None = None,
-                  coverage: dict | None = None) -> dict:
+                  coverage: dict | None = None, registry: list | None = None) -> dict:
     """
     The preview of a range from data already read. Pure: no I/O.
 
@@ -272,31 +275,72 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
                                      monitor.resolve, load_recordings)
         discovered                   lecture_id -> the live Teams discovery entry (discovered_entry), or None when
                                      no source discovery was attempted (then `complete` is False)
-        coverage                     day -> {"status": COMPLETE | FAILED | NOT_AVAILABLE, ...}
+        coverage                     day -> {"status": COMPLETE | PARTIAL | FAILED | NOT_AVAILABLE,
+                                             "teams": {...}, "qa": {"status", "entries": [...]}}
+        registry                     the range's registry lectures with their meeting reference
+                                     (historical_sources.registered): what QA records are matched against
+
+    Three sources, one inventory: a lecture seen in Teams, in the registry and in the QA database is ONE row
+    (its lecture_id) whose `sources` say where it was seen; a QA record matching no lecture is a QA-only row.
     """
     errors, found = errors or {}, discovered if discovered is not None else {}
     rows, counts = [], {c: 0 for c in CATEGORIES}
     days = business_days(date_from, date_to)
     coverage = coverage or {}
-    per_day = {d.isoformat(): {"total": 0, "eligible": 0, "teams": 0,
-                               "discovery": (coverage.get(d.isoformat()) or {}).get("status", NOT_AVAILABLE)}
-               for d in days}
+
+    def day_info(day_key: str) -> dict:
+        cov = coverage.get(day_key) or {}
+        qa = cov.get("qa") or {}
+        return {"total": 0, "eligible": 0, "teams": 0, "discovery": cov.get("status", NOT_AVAILABLE),
+                "teams_status": (cov.get("teams") or {}).get("status", cov.get("status", NOT_AVAILABLE)),
+                "qa_status": qa.get("status", NOT_CHECKED), "qa_records": len(qa.get("entries") or ()),
+                "qa_matched": 0, "qa_only": 0, "qa_conflicts": 0, "existing": 0, "suppressed": 0,
+                "published": 0, "blocked": 0}
+
+    per_day = {d.isoformat(): day_info(d.isoformat()) for d in days}
     known_imports = possible_imports = 0
     known_seconds = 0.0
-    origins = {TEAMS_NEW: 0, TEAMS_EXISTING: 0, STORED_ONLY: 0}
+    origins = {TEAMS_NEW: 0, TEAMS_EXISTING: 0, STORED_ONLY: 0, sources.QA_ONLY: 0}
+    provenance: dict = {}
+
+    # QA records -> lectures, by (Cairo date, Teams meeting) only
+    records = [e for d in days for e in ((coverage.get(d.isoformat()) or {}).get("qa") or {}).get("entries") or ()]
+    lectures = {r["lecture_id"]: r for r in (registry or ())}
+    for lid, entry in found.items():
+        lectures.setdefault(lid, {"lecture_id": lid, "session_date": entry["session_date"],
+                                  "meeting_ref": entry.get("meeting_ref"), "suppressed": False})
+    attached, qa_only = sources.merge(records, list(lectures.values()))
+    suppressed = {lid for lid, r in lectures.items() if r.get("suppressed")}
 
     def add(row_out, category, day_key, known, possible, seconds):
         nonlocal known_imports, possible_imports, known_seconds
         counts[category] += 1
-        day = per_day.setdefault(day_key, {"total": 0, "eligible": 0, "teams": 0, "discovery": NOT_AVAILABLE})
+        day = per_day.setdefault(day_key, day_info(day_key))
         day["total"] += 1
-        day["teams"] += row_out["origin"] != STORED_ONLY
+        day["teams"] += "TEAMS" in row_out["sources"]
+        day["existing"] += "PUBLISHER" in row_out["sources"]
+        day["suppressed"] += row_out.get("lecture_id") in suppressed
+        day["published"] += category == ALREADY_PUBLISHED
+        day["blocked"] += category in BLOCKED_CATEGORIES
+        qa = row_out.get("qa") or {}
+        if qa.get("status") == sources.MATCHED:
+            day["qa_matched"] += qa["records"]
+        elif qa.get("status") == sources.CONFLICT:
+            day["qa_conflicts"] += 1
+        elif qa.get("status") == sources.QA_ONLY:
+            day["qa_only"] += 1
         known_imports, possible_imports = known_imports + known, possible_imports + possible
         if category in ELIGIBLE:
             day["eligible"] += 1
             known_seconds += seconds or 0
         origins[row_out["origin"]] += 1
+        provenance[row_out["provenance"]] = provenance.get(row_out["provenance"], 0) + 1
         rows.append(monitor.redact(row_out))
+
+    def with_sources(row_out, *names):
+        qa = attached.get(row_out["lecture_id"])
+        names = names + (("QA",) if qa and qa["status"] == sources.MATCHED else ())
+        return {**row_out, "sources": list(names), "provenance": " + ".join(names), "qa": qa}
 
     seen = set()
     for fact in facts:
@@ -315,7 +359,7 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
         stored_lms = (row["lms"]["status"] if row else fact["match_status"]) or "PENDING"
         dry_used = stored_lms == "PENDING" and entry and entry.get("lms_dry")
         known, possible = _import_estimate(category, row, recording) if row else (0, 0)
-        add({
+        add(with_sources({
             "lecture_id": lid, "subject": fact["subject"], "module": fact["module"], "origin": origin,
             "session_date": str(fact["session_date"]), "scheduled_start": _iso(fact["scheduled_start"]),
             "scheduled_end": _iso(fact["scheduled_end"]),
@@ -334,6 +378,7 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
             "basis": "DRY_RUN" if dry_used else "STORED",
             "category": category, "proposed_action": ACTIONS[category], "reason": reason,
             "data_source": "LIVE_DISCOVERY+DATABASE" if entry else "DATABASE"},
+            *(("TEAMS", "PUBLISHER") if entry else ("PUBLISHER",))),
             category, str(fact["session_date"]), known, possible,
             (recording or {}).get("selected_duration_seconds"))
 
@@ -341,7 +386,7 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
         if lid in seen:
             continue
         category, reason = new_lecture_category(entry, now=now)
-        add({
+        add(with_sources({
             "lecture_id": lid, "subject": entry.get("subject"), "module": entry.get("module"), "origin": TEAMS_NEW,
             "session_date": entry["session_date"], "scheduled_start": entry.get("scheduled_start"),
             "scheduled_end": entry.get("scheduled_end"),
@@ -352,9 +397,15 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
             "verification": {"teams": LIVE_TEAMS, "lms": LIVE_DRY_RUN if entry.get("lms_dry") else AT_RUN,
                              "recording": AT_RUN},
             "basis": "DRY_RUN", "category": category, "proposed_action": ACTIONS[category], "reason": reason,
-            "data_source": "LIVE_DISCOVERY"},
+            "data_source": "LIVE_DISCOVERY"}, "TEAMS"),
             category, entry["session_date"], *((0, 1) if category in ELIGIBLE else (0, 0)), None)
 
+    for group in qa_only:
+        row_out = sources.qa_only_row(group)
+        add(row_out, row_out["category"], row_out["session_date"], 0, 0, None)
+
+    for info in per_day.values():
+        info["outcome"] = _day_outcome(info)
     incomplete_days = sorted(d for d, info in per_day.items() if info["discovery"] != COMPLETE)
     complete = discovered is not None and not incomplete_days
     summary = {
@@ -366,15 +417,26 @@ def build_preview(facts: list[dict], views: dict, recordings: dict, *, date_from
         "review": counts[REVIEW_REQUIRED],
         "teams_discovered": origins[TEAMS_NEW] + origins[TEAMS_EXISTING], "existing": len(seen),
         "new": origins[TEAMS_NEW], "stored_only": origins[STORED_ONLY],
+        "qa_records": len(records), "qa_matched": sum(d["qa_matched"] for d in per_day.values()),
+        "qa_only": origins[sources.QA_ONLY], "qa_conflicts": sum(d["qa_conflicts"] for d in per_day.values()),
+        "suppressed": sum(d["suppressed"] for d in per_day.values()), "provenance": provenance,
         "categories": counts, "estimated_imports": {"known": known_imports, "possible": possible_imports,
                                                     "upper_bound": known_imports + possible_imports},
         "known_selected_duration_seconds": round(known_seconds, 1), "per_day": per_day,
-        "complete": complete, "incomplete_days": incomplete_days}
+        "complete": complete, "incomplete_days": incomplete_days,
+        "qa_only_lectures": [r for r in rows if r.get("lecture_id") is None]}
     return {"date_from": date_from.isoformat(), "date_to": date_to.isoformat(), "days": len(days),
             "library_id": int(library_id), "generated_at": now.isoformat(),
-            "data_source": "LIVE_DISCOVERY+DATABASE" if discovered is not None else "DATABASE",
+            "data_source": "LIVE_DISCOVERY+QA+DATABASE" if discovered is not None else "DATABASE",
             "complete": complete, "summary": summary, "lectures": rows,
             "fingerprint": fingerprint(date_from, date_to, library_id, rows)}
+
+
+def _day_outcome(info: dict) -> str:
+    """One day as the operator reads it: EMPTY only when BOTH sources answered and nothing exists."""
+    if info["discovery"] != COMPLETE:
+        return "PARTIAL_DISCOVERY" if info["discovery"] == PARTIAL else "DISCOVERY_" + str(info["discovery"])
+    return COMPLETED_EMPTY_DAY if info["total"] == 0 else "DISCOVERED"
 
 
 def discovered_entry(lecture, *, lms_status: str | None = None, lms_occurrence_id: str | None = None) -> dict:
@@ -385,13 +447,14 @@ def discovered_entry(lecture, *, lms_status: str | None = None, lms_occurrence_i
         "subject": lecture.subject, "module": lecture.module,
         "scheduled_start": _iso(lecture.scheduled_start), "scheduled_end": _iso(lecture.scheduled_end),
         "meeting_resolved": bool(lecture.downstream_ready), "lms_dry": lms_status,
-        "lms_occurrence_id": lms_occurrence_id})
+        "lms_occurrence_id": lms_occurrence_id, "meeting_ref": sources.ref(lecture.meeting_id)})
 
 
 def fingerprint(date_from: date, date_to: date, library_id: int, rows: list[dict]) -> str:
     """What a confirmation is bound to: the range, the library and each lecture's category."""
     material = json.dumps({"from": date_from.isoformat(), "to": date_to.isoformat(), "library": int(library_id),
-                           "lectures": sorted([r["lecture_id"], r["category"]] for r in rows)}, sort_keys=True)
+                           "lectures": sorted([r["lecture_id"] or "qa:" + r["qa_ref"], r["category"]] for r in rows)},
+                          sort_keys=True)
     return hashlib.sha256(material.encode()).hexdigest()[:40]
 
 
@@ -400,22 +463,37 @@ def run_items(preview: dict) -> list[dict]:
     return [{"lecture_id": r["lecture_id"], "session_date": r["session_date"], "category": r["category"],
              "status": ITEM_STATUS[r["category"]], "origin": r.get("origin") or STORED_ONLY,
              "reason": None if ITEM_STATUS[r["category"]] in ("PENDING", "PROCESSING") else r["category"],
-             "detail": _identity(r)} for r in preview["lectures"]]
+             "detail": _identity(r)} for r in preview["lectures"] if r.get("lecture_id")]
 
 
 def _identity(row: dict) -> dict:
     """The display identity an item keeps until its lecture is persisted (no URL, no meeting id)."""
-    return {k: row.get(k) for k in ("subject", "module", "scheduled_start", "scheduled_end")}
+    return {k: row.get(k) for k in ("subject", "module", "scheduled_start", "scheduled_end", "sources", "provenance")
+            if k in row}
 
 
 def preview_items(preview: dict) -> list[dict]:
     """A preview's snapshot rows (status PREVIEWED)."""
     return [{"lecture_id": r["lecture_id"], "session_date": r["session_date"], "category": r["category"],
-             "status": "PREVIEWED", "origin": r["origin"], "reason": None, "detail": r} for r in preview["lectures"]]
+             "status": "PREVIEWED", "origin": r["origin"], "reason": None, "detail": r} for r in preview["lectures"]
+            if r.get("lecture_id")]          # a QA-only lecture is no publisher lecture: summary["qa_only_lectures"]
 
 
 def _iso(value):
     return value.isoformat() if isinstance(value, (date, datetime)) else value
+
+
+def _day(teams: dict, qa: dict, attempts: int) -> dict:
+    """
+    One day's coverage from its two sources. COMPLETE only when both answered; PARTIAL when one did (its answer is
+    kept and shown, the day is retried and never counts as empty); FAILED when neither did.
+    """
+    answered = (teams["status"] == COMPLETE) + (qa["status"] == COMPLETE)
+    status = COMPLETE if answered == 2 else PARTIAL if answered == 1 else FAILED_DAY
+    flat = {k: v for k, v in teams.items()              # the fields earlier runs showed (lists stay nested)
+            if k not in ("status", "error") and not isinstance(v, list)}
+    return {"status": status, "attempts": attempts, **flat, "teams": teams, "qa": qa,
+            **({"error": teams.get("error") or qa.get("error")} if status != COMPLETE else {})}
 
 
 # --------------------------------------------------------------------------- the coordinator
@@ -538,22 +616,22 @@ class HistoricalBackfill:
         todo, calendar = self._todo(run, coverage), self._calendar()
         if calendar is None:
             for day in todo:
-                self.runs.record_day(connection, run_id, day, {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF"})
+                self.runs.record_day(connection, run_id, day, {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF",
+                                                               "qa": self._qa_day(date.fromisoformat(day))})
             return None
         for day in todo[:self.config.backfill_discovery_days]:
             attempts = int((coverage.get(day) or {}).get("attempts", 0)) + 1
             try:
                 outcome = calendar.discover_day(connection, date.fromisoformat(day))
-                coverage[day] = {"status": COMPLETE, "attempts": attempts,
-                                 "teams_events": outcome.get("teams_events_found"),
-                                 "lectures": outcome.get("canonical_lecture_candidates"),
-                                 "created": outcome.get("registry_rows_created", 0),
-                                 "updated": outcome.get("registry_rows_updated", 0),
-                                 "locked": outcome.get("registry_rows_locked", 0)}
+                teams = {"status": COMPLETE, "teams_events": outcome.get("teams_events_found"),
+                         "lectures": outcome.get("canonical_lecture_candidates"),
+                         "created": outcome.get("registry_rows_created", 0),
+                         "updated": outcome.get("registry_rows_updated", 0),
+                         "locked": outcome.get("registry_rows_locked", 0)}
             except Exception as exc:  # noqa: BLE001 - one day failing is recorded and retried, never skipped silently
                 log.warning("historical discovery failed for %s: %s", day, type(exc).__name__)
-                coverage[day] = {"status": FAILED_DAY, "attempts": attempts,
-                                 "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+                teams = {"status": FAILED_DAY, "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+            coverage[day] = _day(teams, self._qa_day(date.fromisoformat(day)), attempts)
             self.runs.record_day(connection, run_id, day, coverage[day])
         left = self._todo(run, coverage)
         if not left:
@@ -576,8 +654,9 @@ class HistoricalBackfill:
         for lid, item in items.items():
             if lid in registered or item["status"] not in ("PENDING", "PROCESSING"):
                 continue
-            day = (coverage.get(str(item["session_date"])) or {}).get("status")
-            reason = "TEAMS_DISCOVERY_FAILED" if day == FAILED_DAY else "NOT_REGISTERED_AT_RUN"
+            day = coverage.get(str(item["session_date"])) or {}
+            teams_failed = (day.get("teams") or day).get("status") == FAILED_DAY
+            reason = "TEAMS_DISCOVERY_FAILED" if teams_failed else "NOT_REGISTERED_AT_RUN"
             self.runs.update_item(connection, run_id, lid, status="BLOCKED", reason=reason, stage="TEAMS")
 
     # -- preview -------------------------------------------------------------------------------
@@ -589,7 +668,8 @@ class HistoricalBackfill:
         todo, calendar = self._todo(run, coverage), self._calendar()
         if calendar is None:
             for day in todo:
-                coverage[day] = {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF"}
+                coverage[day] = {"status": NOT_AVAILABLE, "reason": "CALENDAR_DISCOVERY_OFF",
+                                 "qa": self._qa_day(date.fromisoformat(day))}
                 self.runs.record_day(connection, run_id, day, coverage[day])
         else:
             for day in todo[:self.config.backfill_discovery_days]:
@@ -607,27 +687,59 @@ class HistoricalBackfill:
         return connection
 
     def _preview_day(self, day: date, attempts: int) -> dict:
-        """One day's live, read-only discovery (persist=False on a READ ONLY connection) and dry LMS match."""
+        """
+        One day's two independent, read-only sources: live Teams discovery (persist=False on a READ ONLY connection)
+        with a dry LMS match, and the QA database. Either failing never hides the other's answer; the day is
+        COMPLETE only when both answered.
+        """
+        lms_keys = None
         try:
             with self._read_only() as ro:
                 summary, found = self.planner.calendar.preview_day(ro, day)
                 lectures = {str(l.lecture_id): l for l in found if l.session_date == day}   # its own Cairo date only
-                lms, lms_status = self._dry_lms(ro, day, list(lectures.values()))
+                lms, lms_status, lms_keys = self._dry_lms(ro, day, list(lectures.values()))
+            teams = {"status": COMPLETE, "calendar_events": summary.get("calendar_events_found"),
+                     "teams_events": summary.get("teams_events_found"), "lectures_found": len(lectures),
+                     "lms_dry_run": lms_status,
+                     "lectures": [discovered_entry(l, lms_status=(lms.get(lid) or (None, None))[0],
+                                                   lms_occurrence_id=(lms.get(lid) or (None, None))[1])
+                                  for lid, l in sorted(lectures.items())]}
         except Exception as exc:  # noqa: BLE001 - recorded: the preview is INCOMPLETE until the day succeeds
             log.warning("historical preview discovery failed for %s: %s", day, type(exc).__name__)
-            return {"status": FAILED_DAY, "attempts": attempts,
-                    "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
-        return {"status": COMPLETE, "attempts": attempts, "calendar_events": summary.get("calendar_events_found"),
-                "teams_events": summary.get("teams_events_found"), "lectures_found": len(lectures),
-                "lms_dry_run": lms_status,
-                "lectures": [discovered_entry(l, lms_status=(lms.get(lid) or (None, None))[0],
-                                              lms_occurrence_id=(lms.get(lid) or (None, None))[1])
-                             for lid, l in sorted(lectures.items())]}
+            teams = {"status": FAILED_DAY, "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+        if lms_keys is None:
+            lms_keys = self._lms_keys(day)
+        return _day(teams, self._qa_day(day, lms_keys=lms_keys), attempts)
 
-    def _dry_lms(self, ro, day: date, lectures: list) -> tuple[dict, str]:
-        """The LMS matcher's answer for the day's lectures (stored + newly found), evaluated, never persisted."""
+    def _qa_day(self, day: date, *, lms_keys=None) -> dict:
+        """The QA database's lectures of one day (READ ONLY), or the failure - never an empty answer for one."""
+        try:
+            with self._read_only() as ro:
+                records = sources.load_records(ro, day, day)
+        except Exception as exc:  # noqa: BLE001 - recorded: the day stays PARTIAL until the QA source answers
+            log.warning("historical QA source failed for %s: %s", day, type(exc).__name__)
+            return {"status": FAILED_DAY, "error": str(getattr(exc, "code", type(exc).__name__))[:80]}
+        if records and lms_keys is None:
+            lms_keys = self._lms_keys(day)
+        return {"status": COMPLETE, "records": len(records),
+                "entries": [sources.entry(r, lms_keys=lms_keys) for r in records]}
+
+    def _lms_keys(self, day: date):
+        """The meeting keys of the LMS's sessions on one Cairo date, or None when the LMS cannot be read."""
         if self.planner.lms_source is None:
-            return {}, "NOT_CONFIGURED"
+            return None
+        from app.lms.sources import window_for
+        try:
+            return sources.lms_keys_by_day(self.planner.lms_source.load(*window_for(day, day)), [day])[day.isoformat()]
+        except Exception as exc:  # noqa: BLE001 - the QA-only rows then say the LMS was not checked
+            log.warning("historical LMS read failed for %s: %s", day, type(exc).__name__)
+            return None
+
+    def _dry_lms(self, ro, day: date, lectures: list) -> tuple[dict, str, frozenset | None]:
+        """The LMS matcher's answer for the day's lectures (stored + newly found), evaluated, never persisted; and
+        the meeting keys of the day's LMS sessions (for QA-only lectures)."""
+        if self.planner.lms_source is None:
+            return {}, "NOT_CONFIGURED", None
         from app.lms import service as lms_service
         from app.lms.matching import MatchConfig
         from app.lms.sources import lecture_from_row, load_lectures, window_for
@@ -641,8 +753,9 @@ class HistoricalBackfill:
             results = lms_service.evaluate(facts, snapshot, MatchConfig.from_text(self.config.test_programmes))
         except Exception as exc:  # noqa: BLE001 - the LMS being unavailable leaves the match to the run
             log.warning("historical preview LMS dry run failed for %s: %s", day, type(exc).__name__)
-            return {}, "UNAVAILABLE"
-        return {r.lecture_id: (r.status, r.primary.occurrence_id if r.primary else None) for r in results}, "EVALUATED"
+            return {}, "UNAVAILABLE", None
+        return ({r.lecture_id: (r.status, r.primary.occurrence_id if r.primary else None) for r in results},
+                "EVALUATED", sources.lms_keys_by_day(snapshot, [day])[day.isoformat()])
 
     def _finish_preview(self, connection, run, coverage) -> dict:
         run_id, library = str(run["run_id"]), int(run["library_id"])
@@ -651,10 +764,13 @@ class HistoricalBackfill:
             recordings = load_recordings(ro, [f["lecture_id"] for f in facts])
             views = {f["lecture_id"]: monitor.resolve(ro, f, library_id=library, language=self.config.caption_language)
                      for f in facts if monitor.needs_resolution(f)}
-        discovered = {e["lecture_id"]: e for day in coverage.values() for e in (day or {}).get("lectures") or ()}
+            registry = sources.registered(ro, run["date_from"], run["date_to"])
+        discovered = {e["lecture_id"]: e for day in coverage.values()
+                      for e in ((day or {}).get("teams") or day or {}).get("lectures") or ()
+                      if isinstance(e, dict)}
         preview = build_preview(facts, views, recordings, date_from=run["date_from"], date_to=run["date_to"],
                                 library_id=library, now=self.clock(), auto_release=self.config.auto_release,
-                                discovered=discovered, coverage=coverage)
+                                discovered=discovered, coverage=coverage, registry=registry)
         status = "COMPLETED" if preview["complete"] else "INCOMPLETE"
         with connection.transaction():
             self.runs.replace_preview_items(connection, run_id, preview_items(preview))
@@ -795,6 +911,30 @@ class HistoricalBackfill:
                                  actor=str(run["cancel_requested_by"] or "operator"),
                                  detail={"run_id": run_id, "imports_cancelled": cancelled_jobs, "items": items})
         return {"status": "CANCELLED", "imports_cancelled": cancelled_jobs, **items}
+
+
+# --------------------------------------------------------------------------- the QA source in a run
+def coverage_view(day: dict | None) -> dict:
+    """One day's coverage for display: statuses and counts, without the per-lecture lists it keeps."""
+    day = day or {"status": "PENDING"}
+    out = {k: v for k, v in day.items() if k not in ("lectures", "teams", "qa")}
+    for source in ("teams", "qa"):
+        if isinstance(day.get(source), dict):
+            out[source] = {k: v for k, v in day[source].items() if not isinstance(v, list)}
+    return out
+
+
+def run_qa_only(connection, run) -> list[dict]:
+    """
+    The QA-only lectures of a run, from the QA records ITS discovery read (falling back to its preview's), matched
+    against the registry as it is now: a QA record whose lecture the run registered is no longer QA-only.
+    """
+    coverage = run.get("discovery") or {}
+    if not any(isinstance((c or {}).get("qa"), dict) for c in coverage.values()):
+        return list((run.get("preview_summary") or {}).get("qa_only_lectures") or ())
+    records = [e for c in coverage.values() for e in ((c or {}).get("qa") or {}).get("entries") or ()]
+    _, qa_only = sources.merge(records, sources.registered(connection, run["date_from"], run["date_to"]))
+    return [monitor.redact(sources.qa_only_row(g)) for g in qa_only]
 
 
 # --------------------------------------------------------------------------- per-lecture progress

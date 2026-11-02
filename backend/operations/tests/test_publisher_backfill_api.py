@@ -223,6 +223,37 @@ class PreviewTests(Base):
                                   kwargs={"run_id": incomplete["run_id"]})).json()
         self.assertFalse(body["complete"] or body["confirmable"])
 
+    def test_a_preview_lists_qa_only_lectures_and_each_days_two_sources_without_their_lists(self):
+        qa_only = {"lecture_id": None, "qa_ref": "a1b2c3", "session_date": "2026-09-02", "subject": "Old course",
+                   "origin": "QA_ONLY", "sources": ["QA"], "category": "MISSING_LMS_MATCH",
+                   "code": "QA_ONLY_NO_LMS_SESSION", "missing_evidence": ["LMS_SESSION"]}
+        preview = finished_preview()
+        preview["preview_summary"]["qa_only_lectures"] = [qa_only]
+        preview["discovery"]["2026-09-02"] = {
+            "status": "PARTIAL", "teams": {"status": "FAILED", "error": "CALENDAR_QUERY_ERROR"},
+            "qa": {"status": "COMPLETE", "records": 1, "entries": [{"qa_ref": "a1b2c3"}]}}
+        body = self.client_for(self.viewer).get(reverse("operations-publisher-backfill-preview-detail",
+                                                        kwargs={"run_id": preview["run_id"]})).json()
+        self.assertEqual([r["lecture_id"] for r in body["lectures"]], [L1, L2, L3, None])
+        self.assertEqual(body["lectures"][-1]["code"], "QA_ONLY_NO_LMS_SESSION")
+        day = body["preview"]["coverage"][1]
+        self.assertEqual((day["status"], day["teams"]["status"], day["qa"]), ("PARTIAL", "FAILED",
+                                                                              {"status": "COMPLETE", "records": 1}))
+
+    def test_a_run_shows_its_qa_only_lectures_as_blocked_with_the_missing_evidence(self):
+        qa_only = {"qa_ref": "a1b2c3", "session_date": "2026-09-02", "subject": "Old course", "module": None,
+                   "origin": "QA_ONLY", "sources": ["QA"], "category": "MISSING_LMS_MATCH",
+                   "code": "QA_ONLY_NO_LMS_SESSION", "reason": "Only in the QA database.",
+                   "missing_evidence": ["TEAMS_CALENDAR_OCCURRENCE", "EXACT_SCHEDULED_START", "LMS_SESSION"]}
+        STATE.add(run_row(status="RUNNING"))
+        with mock.patch("operations.publisher_backfill_views.backfill.run_qa_only", lambda c, run: [qa_only]):
+            body = self.client_for(self.viewer).get(reverse("operations-publisher-backfill-run",
+                                                            kwargs={"run_id": RUN_ID})).json()
+        [row_] = body["lectures"]
+        self.assertEqual((row_["lecture_id"], row_["status"], row_["reason"], row_["registered"]),
+                         (None, "BLOCKED", "QA_ONLY_NO_LMS_SESSION", False))
+        self.assertEqual(body["run"]["qa_only"], 1)
+
     def test_invalid_reversed_future_and_oversized_ranges_are_refused(self):
         client = self.client_for(self.viewer)
         future = (datetime.now(timezone.utc) + timedelta(days=3)).date().isoformat()

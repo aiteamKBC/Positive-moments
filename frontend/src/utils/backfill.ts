@@ -62,6 +62,7 @@ export const ORIGIN: Record<string, Badge> = {
   TEAMS_EXISTING: badge('Teams + existing', 'neutral'),
   STORED_ONLY: badge('Existing · not in Teams now', 'review'),
   DISCOVERED_AT_RUN: badge('Found at run', 'brand'),
+  QA_ONLY: badge('QA database only', 'review'),
 }
 
 /** What the preview has verified, and what only the run verifies. */
@@ -78,6 +79,28 @@ export const COVERAGE: Record<string, Badge> = {
   PENDING: badge('Waiting', 'quiet'),
   FAILED: badge('Failed', 'error'),
   NOT_AVAILABLE: badge('Not available', 'error'),
+  PARTIAL: badge('Partial', 'error'),
+  NOT_CHECKED: badge('Not checked', 'quiet'),
+}
+
+/** Why a QA-only lecture is not processed (app/publisher/historical_sources.py). */
+export const QA_ONLY_CODE: Record<string, string> = {
+  QA_ONLY_NO_LMS_SESSION: 'No LMS session of its Teams meeting that day',
+  QA_ONLY_SCHEDULE_UNKNOWN: 'Not in the Teams calendar: exact start unknown',
+  QA_ONLY_LMS_UNCHECKED: 'LMS could not be checked',
+  QA_ONLY_NO_MEETING: 'No Teams meeting on the QA record',
+  QA_CANCELLED: 'Cancelled in QA',
+}
+
+/** "Teams + existing + QA", from the server's list of the sources a lecture was seen in. */
+export function provenance(sources?: string[] | null): string {
+  if (!sources?.length) return ''
+  return sources.map((s) => (s === 'PUBLISHER' ? 'existing' : s === 'QA' ? 'QA' : 'Teams')).join(' + ')
+}
+
+/** A row key that is unique for QA-only lectures too (they have no lecture id). */
+export function rowKey(row: { lecture_id: string | null; qa_ref?: string | null; session_date: string }): string {
+  return row.lecture_id ?? `qa:${row.qa_ref ?? ''}:${row.session_date}`
 }
 
 export const backfillLabel = {

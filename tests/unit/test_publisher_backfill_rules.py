@@ -155,9 +155,12 @@ def test_the_preview_summarises_every_day_of_the_range_including_empty_days():
                         _fact("C", day=date(2026, 9, 10), match="NO_LMS_SESSION")])
     per_day = preview["summary"]["per_day"]
     assert list(per_day) == [f"2026-09-{d:02d}" for d in range(1, 11)]
-    assert per_day["2026-09-01"] == {"total": 1, "eligible": 1, "teams": 0, "discovery": "NOT_AVAILABLE"}
-    assert per_day["2026-09-10"] == {"total": 2, "eligible": 1, "teams": 0, "discovery": "NOT_AVAILABLE"}
-    assert per_day["2026-09-05"] == {"total": 0, "eligible": 0, "teams": 0, "discovery": "NOT_AVAILABLE"}
+    pick = lambda d: {k: d[k] for k in ("total", "eligible", "teams", "discovery", "qa_status", "outcome")}  # noqa: E731
+    assert pick(per_day["2026-09-01"]) == {"total": 1, "eligible": 1, "teams": 0, "discovery": "NOT_AVAILABLE",
+                                           "qa_status": "NOT_CHECKED", "outcome": "DISCOVERY_NOT_AVAILABLE"}
+    assert pick(per_day["2026-09-10"])["total"] == 2 and per_day["2026-09-10"]["eligible"] == 1
+    assert pick(per_day["2026-09-05"]) == {"total": 0, "eligible": 0, "teams": 0, "discovery": "NOT_AVAILABLE",
+                                           "qa_status": "NOT_CHECKED", "outcome": "DISCOVERY_NOT_AVAILABLE"}
     assert preview["complete"] is False                    # no source discovery: never presented as complete
     assert preview["summary"]["total"] == 3 and preview["summary"]["eligible"] == 2
     assert preview["summary"]["blocked"] == 1 and preview["data_source"] == "DATABASE"
@@ -306,4 +309,5 @@ def test_run_items_keep_origin_and_a_display_identity_without_urls():
     preview = _preview([], discovered={"N1": _entry("N1", lms="VERIFIED")}, coverage=_coverage())
     [item] = backfill.run_items(preview)
     assert (item["origin"], item["status"]) == (backfill.TEAMS_NEW, "PENDING")
-    assert set(item["detail"]) == {"subject", "module", "scheduled_start", "scheduled_end"}
+    assert set(item["detail"]) == {"subject", "module", "scheduled_start", "scheduled_end", "sources", "provenance"}
+    assert item["detail"]["sources"] == ["TEAMS"]

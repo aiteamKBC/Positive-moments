@@ -103,6 +103,11 @@ class TranscriptPolicy:
     # A lecture with no usable transcript this long after its scheduled end
     # leaves the retry loop for review (audit section 15: 72 h -> NO_TRANSCRIPT).
     deadline_after_end: timedelta = timedelta(hours=72)
+    # Past the deadline a TRANSIENT failure (network, 401 after refresh, 408, 429, 5xx, database) is still retried
+    # this many attempts with its own backoff. Only "Teams has no transcript" (WAITING) past the deadline is the
+    # confirmed-unavailable answer (DEADLINE_PASSED:...): a historical lecture is always past the deadline, so one
+    # Graph hiccup must not be recorded as "no transcript".
+    transient_retries_after_deadline: int = 4
     # Bounded revision check: each stored part is re-fetched at most once per
     # point, and never after the last one.
     refresh_points: tuple = (timedelta(hours=6), timedelta(hours=24))
@@ -278,7 +283,7 @@ class TranscriptWorker:
         if lecture.ready is None:
             return self._deadline(lecture, now, TranscriptOutcome(
                 lecture_id, WAITING, "MEETING_NOT_RESOLVED",
-                retry_after=self.policy.waiting_delay(now - lecture.scheduled_end)))
+                retry_after=self.policy.waiting_delay(now - lecture.scheduled_end)), attempt)
         if now < lecture.scheduled_end:
             return TranscriptOutcome(lecture_id, WAITING, "LECTURE_NOT_ENDED",
                                      retry_after=min(lecture.scheduled_end - now + timedelta(minutes=10),
@@ -294,7 +299,7 @@ class TranscriptWorker:
                 self.log.warning("lecture lock release failed for %s; released when the session ends", lecture_id)
         outcome.next_refresh_at = (self.policy.next_refresh_at(lecture.scheduled_end, now)
                                    if outcome.kind == READY else None)
-        return self._deadline(lecture, now, outcome)
+        return self._deadline(lecture, now, outcome, attempt)
 
     def _acquire(self, connection, lecture: _Lecture, now, attempt) -> TranscriptOutcome:
         ready = lecture.ready
@@ -425,7 +430,9 @@ class TranscriptWorker:
                                     detail={"selection_version": SELECTION_VERSION, "parts": parts, **(extra or {})})
         return self._with(outcome, lecture, counters)
 
-    def _deadline(self, lecture, now, outcome) -> TranscriptOutcome:
+    def _deadline(self, lecture, now, outcome, attempt: int = 1) -> TranscriptOutcome:
+        if outcome.kind == RETRY and attempt <= self.policy.transient_retries_after_deadline:
+            return outcome                      # transient: retried with its backoff, whatever the lecture's age
         if outcome.kind in ACQUIRING and lecture.scheduled_end is not None \
                 and now > lecture.scheduled_end + self.policy.deadline_after_end:
             return TranscriptOutcome(outcome.lecture_id, REVIEW, f"DEADLINE_PASSED:{outcome.reason}",

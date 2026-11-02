@@ -20,8 +20,8 @@ import StatusBadge from '../StatusBadge.vue'
 import {
   cancelBackfill, getBackfillPreview, getBackfillRun, getBackfillRuns, previewBackfill, retryBackfill, startBackfill,
 } from '../../services/publishing'
-import type { BackfillPreview, BackfillRunDetail, BackfillRuns } from '../../types/backfill'
-import { CATEGORY, COUNTERS, VERIFICATION, backfillLabel, canRun, duration, rangeProblem } from '../../utils/backfill'
+import type { BackfillPreview, BackfillRunDetail, BackfillRuns, DayCoverage } from '../../types/backfill'
+import { CATEGORY, COUNTERS, QA_ONLY_CODE, VERIFICATION, backfillLabel, canRun, duration, provenance, rangeProblem, rowKey } from '../../utils/backfill'
 import { businessDate, cairoDateTime, cairoTimeRange, sinceNow } from '../../utils/datetime'
 import { errorMessage } from '../../utils/format'
 import { label } from '../../utils/publishing'
@@ -217,12 +217,33 @@ onBeforeUnmount(() => {
   if (previewTimer) clearTimeout(previewTimer)
 })
 
+/** One day's chip: each source's answer, and the day's count (an empty day only when both sources answered). */
+function dayTitle(day: DayCoverage): string {
+  const error = day.error ? ` · ${day.error}` : ''
+  return `Teams: ${day.teams?.status ?? day.status} · QA database: ${day.qa?.status ?? 'NOT_CHECKED'}${error}`
+}
+function daySources(day: DayCoverage): string {
+  const teams = backfillLabel.coverage(day.teams?.status ?? day.status).label.toLowerCase()
+  const qa = day.qa?.status === 'COMPLETE' ? `${day.qa.records ?? 0} QA` : `QA ${backfillLabel.coverage(day.qa?.status).label.toLowerCase()}`
+  return `Teams ${teams}, ${qa}`
+}
+function dayCount(date: string): string {
+  const day = preview.value?.summary?.per_day[date]
+  if (day?.outcome === 'COMPLETED_EMPTY_DAY') return 'empty day'
+  return `${day?.eligible ?? 0}/${day?.total ?? 0}`
+}
+
 const summaryTiles = computed(() => {
   const s = preview.value?.summary
   if (!s) return []
   return [
+    { label: 'Unique lectures', value: String(s.total) },
     { label: 'Teams lectures discovered', value: String(s.teams_discovered) },
+    { label: 'QA database records', value: String(s.qa_records ?? 0) },
+    { label: 'QA records matched', value: String(s.qa_matched ?? 0) },
+    { label: 'QA database only', value: String(s.qa_only ?? 0), tone: s.qa_only ? 'text-orange-700' : '' },
     { label: 'Existing lectures', value: String(s.existing) },
+    { label: 'Suppressed duplicates', value: String(s.suppressed ?? 0) },
     { label: 'Newly discovered', value: String(s.new), tone: s.new ? 'text-brand-700' : '' },
     { label: 'Already published', value: String(s.already_published) },
     { label: 'Ready to process', value: String(s.ready), tone: s.ready ? 'text-brand-700' : '' },
@@ -275,9 +296,9 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
     </section>
 
     <!-- Preview progress and coverage -->
-    <section v-if="preview" class="surface px-4 py-3" aria-label="Teams discovery coverage" data-test="bf-coverage">
+    <section v-if="preview" class="surface px-4 py-3" aria-label="Teams and QA discovery coverage" data-test="bf-coverage">
       <div class="flex flex-wrap items-center gap-2">
-        <p class="tile-label">Teams discovery</p>
+        <p class="tile-label">Teams + QA discovery</p>
         <StatusBadge v-bind="backfillLabel.run(preview.preview.status)" />
         <span class="text-xs text-muted">{{ preview.preview.days_discovered }} / {{ preview.preview.coverage.length }} days discovered</span>
       </div>
@@ -285,13 +306,14 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
         <span
           v-for="day in preview.preview.coverage" :key="day.date" class="chip tabular-nums"
           :class="day.status === 'COMPLETE' ? '' : day.status === 'PENDING' ? 'opacity-60' : 'text-rose-700'"
-          :title="day.error ? `${day.status}: ${day.error}` : day.status"
+          :title="dayTitle(day)"
+          :data-test="`bf-day-${day.date}`"
         >
-          {{ businessDate(day.date) }} · {{ backfillLabel.coverage(day.status).label }}<template v-if="day.status === 'COMPLETE' && preview.summary"> · {{ preview.summary.per_day[day.date]?.eligible ?? 0 }}/{{ preview.summary.per_day[day.date]?.total ?? 0 }}</template>
+          {{ businessDate(day.date) }} · {{ backfillLabel.coverage(day.status).label }}<template v-if="day.qa"> · {{ daySources(day) }}</template><template v-if="day.status === 'COMPLETE' && preview.summary"> · {{ dayCount(day.date) }}</template>
         </span>
       </div>
       <p v-if="previewDone && !preview.complete" class="notice-error mt-2" role="alert" data-test="bf-incomplete">
-        INCOMPLETE preview: {{ preview.summary?.incomplete_days?.length ?? 0 }} day(s) could not be discovered in Teams
+        INCOMPLETE preview: {{ preview.summary?.incomplete_days?.length ?? 0 }} day(s) could not be discovered in both Teams and the QA database
         ({{ (preview.summary?.incomplete_days ?? []).map(d => businessDate(d)).join(', ') }}). The lists below are not the whole range and cannot be run.
       </p>
     </section>
@@ -335,13 +357,16 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in previewRows" :key="row.lecture_id">
+              <tr v-for="row in previewRows" :key="rowKey(row)">
                 <td class="min-w-[14rem]">
                   <p class="font-semibold text-ink">{{ row.subject ?? 'Lecture' }}</p>
                   <p class="text-2xs text-muted">{{ cairoTimeRange(row.scheduled_start, row.scheduled_end) }}<template v-if="row.module"> · {{ row.module }}</template></p>
                 </td>
                 <td class="whitespace-nowrap">{{ businessDate(row.session_date) }}</td>
-                <td><StatusBadge v-bind="backfillLabel.origin(row.origin)" /></td>
+                <td>
+                  <StatusBadge v-bind="backfillLabel.origin(row.origin)" />
+                  <p v-if="row.sources" class="text-2xs text-muted" data-test="bf-provenance">{{ provenance(row.sources) }}<template v-if="row.qa?.status === 'CONFLICT'"> · QA conflict</template><template v-else-if="(row.qa?.records ?? 0) > 1"> · {{ row.qa?.records }} QA records</template></p>
+                </td>
                 <td>
                   <StatusBadge v-bind="label.lms(row.lms.status)" />
                   <p class="text-2xs text-muted">{{ verified(row.verification?.lms) }}</p>
@@ -365,7 +390,10 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
                   <StatusBadge v-bind="backfillLabel.category(row.category)" />
                   <p class="mt-0.5 text-2xs text-muted">{{ backfillLabel.action(row.proposed_action).label }}</p>
                 </td>
-                <td class="max-w-xs text-2xs leading-snug text-muted">{{ row.reason }}</td>
+                <td class="max-w-xs text-2xs leading-snug text-muted">
+                  <p v-if="row.code && QA_ONLY_CODE[row.code]" class="font-semibold text-ink">{{ QA_ONLY_CODE[row.code] }}</p>
+                  {{ row.reason }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -468,18 +496,19 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
               </tr>
             </thead>
             <tbody>
-              <tr v-for="lecture in detailRows" :key="lecture.lecture_id">
+              <tr v-for="lecture in detailRows" :key="rowKey(lecture)">
                 <td class="min-w-[14rem]">
                   <p class="font-semibold text-ink">{{ lecture.subject ?? 'Lecture' }}</p>
                   <p class="text-2xs text-muted">{{ businessDate(lecture.session_date) }} · {{ cairoTimeRange(lecture.scheduled_start, lecture.scheduled_end) }}</p>
                 </td>
                 <td>
                   <StatusBadge v-bind="backfillLabel.origin(lecture.origin)" />
-                  <p v-if="!lecture.registered" class="text-2xs text-muted">not registered yet</p>
+                  <p v-if="lecture.sources" class="text-2xs text-muted">{{ provenance(lecture.sources) }}</p>
+                  <p v-if="!lecture.registered" class="text-2xs text-muted">{{ lecture.origin === 'QA_ONLY' ? 'not a publisher lecture' : 'not registered yet' }}</p>
                 </td>
                 <td class="min-w-[11rem]">
                   <StatusBadge v-bind="backfillLabel.item(lecture.status)" />
-                  <p v-if="lecture.reason" class="mt-0.5 max-w-xs text-2xs leading-snug text-muted">{{ lecture.reason }}</p>
+                  <p v-if="lecture.reason" class="mt-0.5 max-w-xs text-2xs leading-snug text-muted" :title="lecture.reason_detail">{{ QA_ONLY_CODE[lecture.reason] ?? lecture.reason }}</p>
                 </td>
                 <td>
                   <ol v-if="lecture.pipeline.length" class="flex flex-wrap items-center gap-1" :aria-label="`Pipeline of ${lecture.subject ?? 'lecture'}`">

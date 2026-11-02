@@ -199,6 +199,25 @@ Publishes the lectures of a past, **inclusive** range of Cairo dates, including 
 
 It writes **only its own** `bunny_backfill_runs` / `_items` rows: no lecture, job, discovery run or lock. A day that cannot be discovered (3 attempts) makes the preview **INCOMPLETE**, and an incomplete preview can't be run.
 
+**Two sources every day (2026-11-02).** Each day also reads the QA database (`qa_doctors_sessions`, READ ONLY, never written), independently of Teams. Code: `app/publisher/historical_sources.py`.
+- A QA record and a lecture are **one lecture** when they share the Teams meeting id on the same Cairo date. Several QA records for one lecture are duplicates. Several live lectures sharing a meeting that day are a **conflict**, never merged. A suppressed duplicate stays suppressed. Titles are never evidence.
+- A day is **COMPLETE** only when both sources answered. One failing makes it **PARTIAL**, which is retried and never shown as empty. **Empty day** means both answered with nothing.
+- A **QA-only** lecture (Teams no longer lists it) is shown with its blocker and is **never registered**: the LMS match needs the calendar occurrence's exact start, which QA lacks.
+  - `QA_ONLY_NO_LMS_SESSION`: the LMS has no session of that meeting that day.
+  - `QA_ONLY_SCHEDULE_UNKNOWN`: the LMS has one, and an operator decision is needed.
+  - `QA_ONLY_LMS_UNCHECKED`, `QA_ONLY_NO_MEETING`, and `QA_CANCELLED` (skipped).
+- Production, read-only on 2026-11-02:
+  - 803 QA records (2026-02-02 to 2026-10-30). The 630 from February–August have no registry lecture.
+  - Of the 615 not cancelled, 599 have **no LMS session** for their meeting on their date.
+  - Sep 1–5: 29 unique lectures, with all 19 QA records matched.
+  - Feb 2–8: 23 lectures, 22 of them QA-only.
+
+**Transcripts never hold a video back.** A missing transcript is not a blocker: import, encoding and AUTO_RELEASE need only a verified recording, a VERIFIED LMS match and verified encoding. A transcript that arrives later is captioned onto the same video, with no re-upload and no re-release.
+
+Past the 72 h deadline, which covers every historical lecture:
+- Teams having nothing is the confirmed answer (`DEADLINE_PASSED:…`).
+- A **transient** Graph or database failure is still retried with its backoff, for 4 attempts, before review. This applies to both the transcript and the recording worker, for daily and historical lectures alike.
+
 **Run.** Operators only, for a COMPLETE preview less than 30 minutes old. Stale stored state is refused. The run then:
 1. registers every day's Teams lectures exactly as the daily publisher does (`CalendarDiscovery.discover_day`), and adds lectures found now;
 2. matches the range against the LMS;

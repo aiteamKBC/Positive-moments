@@ -100,6 +100,10 @@ class RecordingPolicy:
     # A lecture whose recording is still not located this long after its end
     # leaves the retry loop for review.
     deadline_after_end: timedelta = timedelta(hours=72)
+    # Past the deadline a TRANSIENT failure (network, 429, 5xx, database) is still retried this many attempts
+    # with its own backoff: only "not produced" (WAITING) means the recording is not there. A historical
+    # lecture is always past the deadline, so one Graph hiccup must not read as a missing recording.
+    transient_retries_after_deadline: int = 4
     # Bounded re-check of a LOCATED lecture: late parts, moved or changed files.
     verify_points: tuple = (timedelta(hours=24),)
     defer_delay: timedelta = timedelta(minutes=10)
@@ -301,7 +305,7 @@ class RecordingWorker:
                 discovery, stored = self.repository.load(connection, lecture_id)
             outcome, write = self._evaluate(connection, lecture, discovery, stored, now, attempt, verify,
                                             rediscover, counters)
-            outcome = self._deadline(lecture, now, outcome)
+            outcome = self._deadline(lecture, now, outcome, attempt)
             if write is not None and not dry_run:
                 self._persist(connection, lecture, outcome, write, now)
             if outcome.kind == LOCATED:
@@ -726,7 +730,9 @@ class RecordingWorker:
         return RecordingOutcome(lid, LOCATED, reason, expected_part_count=count,
                                 located_part_count=count, parts=parts, detail=detail)
 
-    def _deadline(self, lecture, now, outcome) -> RecordingOutcome:
+    def _deadline(self, lecture, now, outcome, attempt: int = 1) -> RecordingOutcome:
+        if outcome.kind == RETRY and attempt <= self.policy.transient_retries_after_deadline:
+            return outcome                      # transient: retried with its backoff, whatever the lecture's age
         if outcome.kind in ACQUIRING and lecture.scheduled_end is not None \
                 and now > lecture.scheduled_end + self.policy.deadline_after_end:
             reason = f"DEADLINE_PASSED:{outcome.reason}"

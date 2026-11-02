@@ -264,6 +264,33 @@ def test_deadline_turns_waiting_into_review(url):
     assert outcome.kind == REVIEW and outcome.reason == "DEADLINE_PASSED:NO_TRANSCRIPTS_AVAILABLE"
 
 
+def test_past_the_deadline_a_transient_failure_is_retried_and_only_then_reviewed(url):
+    # A historical lecture is always past the 72 h deadline: a Graph 503 there is a hiccup, not "no transcript".
+    lecture_id, graph = _lecture(url), FakeGraph()
+    worker = _worker(url, graph, clock=END + timedelta(days=200))
+    graph.listing_errors = [http(503)] * 5
+    for attempt in (1, 2, 3, 4):
+        outcome = worker.run(lecture_id, attempt=attempt)
+        assert (outcome.kind, outcome.reason) == (RETRY, "GRAPH_SERVER_ERROR:503") and outcome.retry_after
+    last = worker.run(lecture_id, attempt=5)
+    assert (last.kind, last.reason) == (REVIEW, "DEADLINE_PASSED:GRAPH_SERVER_ERROR:503")   # bounded
+
+
+def test_past_the_deadline_a_transient_failure_then_a_transcript_is_ready(url):
+    lecture_id, graph = _lecture(url), FakeGraph()
+    _one_part(graph)
+    graph.listing_errors = [http(429)]
+    worker = _worker(url, graph, clock=END + timedelta(days=200))
+    assert worker.run(lecture_id, attempt=1).kind == RETRY
+    assert worker.run(lecture_id, attempt=2).kind == READY          # a historical transcript, fetched late
+
+
+def test_past_the_deadline_no_transcript_is_the_confirmed_unavailable_answer_at_once(url):
+    lecture_id, graph = _lecture(url), FakeGraph()
+    outcome = _worker(url, graph, clock=END + timedelta(days=200)).run(lecture_id, attempt=1)
+    assert (outcome.kind, outcome.reason) == (REVIEW, "DEADLINE_PASSED:NO_TRANSCRIPTS_AVAILABLE")
+
+
 @pytest.mark.parametrize("kwargs, kind, reason", [
     ({"cancelled": True}, NOT_APPLICABLE, "LECTURE_CANCELLED"),
     ({"suppressed": True}, NOT_APPLICABLE, "LI_DUPLICATE"),

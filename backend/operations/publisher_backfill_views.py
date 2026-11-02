@@ -131,8 +131,7 @@ def _shape(run: dict | None, counts: dict | None = None) -> dict | None:
            for k, v in run.items() if k not in ("preview_fingerprint", "discovery")}
     coverage = run.get("discovery") or {}
     days = backfill.business_days(run["date_from"], run["date_to"])
-    out["coverage"] = [{"date": d.isoformat(), **{k: v for k, v in (coverage.get(d.isoformat()) or {"status": "PENDING"})
-                                                  .items() if k != "lectures"}} for d in days]
+    out["coverage"] = [{"date": d.isoformat(), **backfill.coverage_view(coverage.get(d.isoformat()))} for d in days]
     out["days_discovered"] = sum(1 for c in out["coverage"] if c["status"] in (backfill.COMPLETE, backfill.NOT_AVAILABLE))
     if counts is not None:
         out["counts"] = {"total": sum(counts.values()), **{k.lower(): v for k, v in counts.items()}}
@@ -149,7 +148,8 @@ def _preview_answer(run: dict, items: list[dict]) -> dict:
             "complete": run["status"] == "COMPLETED",
             "confirmable": run["status"] == "COMPLETED" and age is not None and age <= PREVIEW_TTL,
             "expires_in_seconds": max(0, int(PREVIEW_TTL - age)) if age is not None else None,
-            "lectures": [i["detail"] for i in items] if finished else [],
+            "lectures": ([i["detail"] for i in items] + list((run["preview_summary"] or {}).get("qa_only_lectures") or ()))
+            if finished else [],
             "production_writes": 0, "jobs_queued": 0, "bunny_calls": 0}
 
 
@@ -221,7 +221,7 @@ def run_view(request, run_id):
     for item in items:
         lid = str(item["lecture_id"])
         row, known = by_id.get(lid), item["detail"] or {}
-        lectures.append(monitor.redact({
+        lectures.append(monitor.redact({"sources": known.get("sources"),
             "lecture_id": lid, "session_date": _iso(item["session_date"]), "status": item["status"],
             "origin": item["origin"], "initial_category": item["initial_category"], "reason": item["reason"],
             "stage": item["stage"], "retries": item["retries"], "started_at": _iso(item["started_at"]),
@@ -234,7 +234,20 @@ def run_view(request, run_id):
             "monitor_state": row["state"] if row else None, "monitor_reason": row["reason"] if row else None,
             "pipeline": backfill.pipeline(row) if row else [],
         }))
-    return Response({"run": _shape(run, counts), "lectures": lectures, "generated_at": generated_at,
+    with reading() as connection:
+        qa_only = backfill.run_qa_only(connection, run)
+    for row in qa_only:            # never queued: not a publisher lecture (the reason says what evidence it lacks)
+        lectures.append(monitor.redact({
+            "lecture_id": None, "qa_ref": row["qa_ref"], "session_date": row["session_date"],
+            "status": "SKIPPED" if row["category"] == backfill.SKIPPED else "BLOCKED", "origin": row["origin"],
+            "initial_category": row["category"], "reason": row["code"], "reason_detail": row["reason"],
+            "missing_evidence": row["missing_evidence"], "stage": "SOURCE_DISCOVERY", "retries": 0,
+            "started_at": None, "finished_at": None, "updated_at": None, "registered": False,
+            "subject": row["subject"], "module": row["module"], "scheduled_start": None, "scheduled_end": None,
+            "monitor_state": None, "monitor_reason": None, "pipeline": [], "sources": row["sources"]}))
+    shaped = _shape(run, counts)
+    shaped["qa_only"] = len(qa_only)
+    return Response({"run": shaped, "lectures": lectures, "generated_at": generated_at,
                      "operator": is_operator(request.user)})
 
 

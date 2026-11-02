@@ -12,8 +12,24 @@ export interface BackfillRecording {
   selected_duration_seconds: number | null
 }
 
+export interface BackfillQa {
+  status: 'MATCHED' | 'CONFLICT' | 'QA_ONLY'
+  records: number
+  cancelled?: boolean
+  transcript_reference?: boolean
+  recording_reference?: boolean
+  lectures_sharing_meeting?: number
+}
+
 export interface BackfillPreviewRow {
-  lecture_id: string
+  /** null for a QA-only lecture: it is not a publisher lecture. */
+  lecture_id: string | null
+  qa_ref?: string | null
+  sources?: string[]
+  provenance?: string
+  qa?: BackfillQa | null
+  code?: string
+  missing_evidence?: string[]
   subject: string | null
   module: string | null
   session_date: string
@@ -53,7 +69,19 @@ export interface BackfillPreviewSummary {
   categories: Record<string, number>
   estimated_imports: { known: number; possible: number; upper_bound: number }
   known_selected_duration_seconds: number
-  per_day: Record<string, { total: number; eligible: number; teams: number; discovery: string }>
+  qa_records?: number
+  qa_matched?: number
+  qa_only?: number
+  qa_conflicts?: number
+  suppressed?: number
+  provenance?: Record<string, number>
+  qa_only_lectures?: BackfillPreviewRow[]
+  per_day: Record<string, {
+    total: number; eligible: number; teams: number; discovery: string
+    teams_status?: string; qa_status?: string; qa_records?: number; qa_matched?: number; qa_only?: number
+    qa_conflicts?: number; existing?: number; suppressed?: number; published?: number; blocked?: number
+    outcome?: string
+  }>
   complete: boolean
   incomplete_days: string[]
 }
@@ -66,6 +94,8 @@ export interface DayCoverage {
   teams_events?: number | null
   lectures_found?: number
   lms_dry_run?: string
+  teams?: { status: string; error?: string; teams_events?: number | null; lectures_found?: number }
+  qa?: { status: string; error?: string; records?: number }
 }
 
 /** A preview request: the publisher service discovers the range in Teams, read-only; the page polls it. */
@@ -114,6 +144,7 @@ export interface BackfillRun {
   started_at: string | null
   finished_at: string | null
   counts?: BackfillCounts
+  qa_only?: number
   is_finished: boolean
   cancel_requested: boolean
 }
@@ -138,7 +169,11 @@ export interface PipelineStep {
 }
 
 export interface BackfillRunLecture {
-  lecture_id: string
+  lecture_id: string | null
+  qa_ref?: string | null
+  sources?: string[] | null
+  reason_detail?: string
+  missing_evidence?: string[]
   session_date: string
   status: string
   origin: string

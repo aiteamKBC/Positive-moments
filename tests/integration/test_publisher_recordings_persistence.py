@@ -386,6 +386,26 @@ def test_deadline_ends_the_wait_in_review(url):
                                                 "DEADLINE_PASSED:RECORDING_NOT_YET_AVAILABLE")
 
 
+def test_past_the_deadline_a_transient_failure_is_retried_never_a_missing_recording(url):
+    # A historical lecture is always past the deadline: a Graph 503 must not be stored as DEADLINE_PASSED review
+    # (the backfill would show it as "missing recording").
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    _one_part(graph)
+    graph.recording_errors = [http(503)]
+    worker = _worker(url, graph, clock=END + timedelta(days=200))
+    outcome = worker.run(lecture_id, attempt=1)
+    assert (outcome.kind, outcome.reason) == (RETRY, "GRAPH_RECORDINGS_SERVER_ERROR:503")
+    assert worker.run(lecture_id, attempt=2).kind == LOCATED
+
+
+def test_past_the_deadline_transient_retries_are_bounded(url):
+    lecture_id, graph = _lecture(url), FakeRecordingGraph()
+    graph.recording_errors = [http(503)] * 5
+    worker = _worker(url, graph, clock=END + timedelta(days=200))
+    assert [worker.run(lecture_id, attempt=a).kind for a in (1, 2, 3, 4)] == [RETRY] * 4
+    assert worker.run(lecture_id, attempt=5).reason == "DEADLINE_PASSED:GRAPH_RECORDINGS_SERVER_ERROR:503"
+
+
 def test_not_ended_cancelled_duplicate_unresolved_and_unknown(url):
     graph = FakeRecordingGraph()
     early = _worker(url, graph, clock=START + timedelta(minutes=30)).run(_lecture(url))
