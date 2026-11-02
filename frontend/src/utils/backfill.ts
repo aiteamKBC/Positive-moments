@@ -165,7 +165,7 @@ type PreviewLike = {
  * Run Backfill is offered only for a COMPLETE, fresh preview (`confirmable`, decided by the server) of exactly
  * the chosen range with something to process. An incomplete preview can never be run.
  */
-export function canRun(preview: PreviewLike | null, from: string, to: string, operator: boolean, activeRun: boolean): boolean {
-  return Boolean(operator && !activeRun && preview && preview.confirmable && preview.preview.date_from === from
+export function canRun(preview: PreviewLike | null, from: string, to: string, activeRun: boolean): boolean {
+  return Boolean(!activeRun && preview && preview.confirmable && preview.preview.date_from === from
     && preview.preview.date_to === to && (preview.summary?.eligible ?? 0) > 0)
 }

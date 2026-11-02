@@ -153,7 +153,6 @@ export interface BackfillRuns {
   runs: BackfillRun[]
   active: BackfillRun | null
   latest_preview: BackfillRun | null
-  operator: boolean
   library_id: number
   max_days: number
   today: string
@@ -198,7 +197,6 @@ export interface BackfillRunDetail {
   run: BackfillRun
   lectures: BackfillRunLecture[]
   generated_at: string
-  operator: boolean
 }
 
 export interface BackfillRetryResult {

@@ -246,7 +246,7 @@ Each lecture resumes from its persisted stage, and nothing already in Bunny is u
 
 The web reads `PUBLISHER_BACKFILL_MAX_DAYS` (default 31).
 
-**Operator role.** Start, cancel and retry need the Django group `kbc_publisher_backfill_operators`. Grant it with `backend/venv/bin/python backend/manage.py publisher_backfill_operator --grant <username>` (`--list`, `--revoke`).
+**Access.** Every signed-in user of the Publishing page may preview, start, cancel and retry a backfill (the same IsAuthenticated policy as the rest of the page); there is no separate operator role. Unauthenticated requests get 401. Each start, cancel and retry is audited with the signed-in username.
 
 **Schema 029:**
 - check (read-only): `python -m app.cli.publisher --env-file backend/config/publisher.env backfill-schema`;

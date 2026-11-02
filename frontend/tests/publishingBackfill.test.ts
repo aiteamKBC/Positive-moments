@@ -1,7 +1,7 @@
 /**
  * Historical Backfill in the Publishing Monitor: the inclusive range check, a preview the publisher service
  * discovers live in Teams (followed until every day is discovered), Run only for a COMPLETE preview after an
- * explicit confirmation (operators only), and the run's progress read back from the server.
+ * explicit confirmation (any signed-in user), and the run's progress read back from the server.
  *
  * The API module is mocked with the shapes the backfill endpoints return (values are made up).
  */
@@ -28,7 +28,7 @@ const PREVIEW_ID = 'dddddddd-0000-0000-0000-000000000001'
 const DAYS = ['2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04', '2026-09-05']
 
 function runs(over: Partial<BackfillRuns> = {}): BackfillRuns {
-  return { runs: [], active: null, latest_preview: null, operator: true, library_id: 786045, max_days: 31,
+  return { runs: [], active: null, latest_preview: null, library_id: 786045, max_days: 31,
     today: '2026-10-29', timezone: 'Africa/Cairo', ...over }
 }
 
@@ -75,7 +75,7 @@ function preview(state: 'running' | 'complete' | 'incomplete' = 'complete', elig
 
 function detail(): BackfillRunDetail {
   return {
-    run: run(), generated_at: '2026-10-29T10:05:00Z', operator: true,
+    run: run(), generated_at: '2026-10-29T10:05:00Z',
     lectures: [{
       lecture_id: 'L1', session_date: '2026-09-01', status: 'PROCESSING', origin: 'TEAMS_NEW', registered: true,
       initial_category: 'READY_TO_QUEUE', reason: null, stage: 'ENCODING', retries: 0, started_at: null, finished_at: null,
@@ -119,15 +119,14 @@ describe('Historical Backfill vocabulary and checks', () => {
     expect(rangeProblem('', '2026-09-10', '2026-10-29', 31)).toMatch(/both/)
   })
 
-  it('offers Run only for a complete, fresh preview of the same range, to an operator, with nothing else running', () => {
-    expect(canRun(preview(), '2026-09-01', '2026-09-05', true, false)).toBe(true)
-    expect(canRun(preview('incomplete'), '2026-09-01', '2026-09-05', true, false)).toBe(false)
-    expect(canRun(preview('running'), '2026-09-01', '2026-09-05', true, false)).toBe(false)
-    expect(canRun(null, '2026-09-01', '2026-09-05', true, false)).toBe(false)
-    expect(canRun(preview(), '2026-09-01', '2026-09-06', true, false)).toBe(false)
-    expect(canRun(preview(), '2026-09-01', '2026-09-05', false, false)).toBe(false)
-    expect(canRun(preview(), '2026-09-01', '2026-09-05', true, true)).toBe(false)
-    expect(canRun(preview('complete', 0), '2026-09-01', '2026-09-05', true, false)).toBe(false)
+  it('offers Run only for a complete, fresh preview of the same range, with nothing else running', () => {
+    expect(canRun(preview(), '2026-09-01', '2026-09-05', false)).toBe(true)
+    expect(canRun(preview('incomplete'), '2026-09-01', '2026-09-05', false)).toBe(false)
+    expect(canRun(preview('running'), '2026-09-01', '2026-09-05', false)).toBe(false)
+    expect(canRun(null, '2026-09-01', '2026-09-05', false)).toBe(false)
+    expect(canRun(preview(), '2026-09-01', '2026-09-06', false)).toBe(false)
+    expect(canRun(preview(), '2026-09-01', '2026-09-05', true)).toBe(false)
+    expect(canRun(preview('complete', 0), '2026-09-01', '2026-09-05', false)).toBe(false)
   })
 
   it('writes durations for people and never shows a blocked category as success', () => {
@@ -231,12 +230,12 @@ describe('Historical Backfill panel', () => {
     expect(getBackfillRun).toHaveBeenCalledWith(RUN_ID)
   })
 
-  it('lets a non-operator preview but never start', async () => {
+  it('offers Run to every signed-in user and never mentions an operator role', async () => {
     vi.mocked(getBackfillPreview).mockResolvedValue(preview('complete'))
-    const wrapper = await mounted({ operator: false })
+    const wrapper = await mounted()
     await previewed(wrapper)
-    expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('backfill operator role')
+    expect(wrapper.find('[data-test="bf-run"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).not.toMatch(/operator role/i)
   })
 
   it('picks up a preview still being discovered after a page refresh', async () => {

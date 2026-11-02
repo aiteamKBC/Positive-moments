@@ -2,7 +2,8 @@
 Historical Backfill API contract (Publishing Monitor).
 
 The platform database is patched: these tests never open a platform connection and never reach Graph, the
-LMS or Bunny. They pin the HTTP layer - authentication, the operator role on every write, range validation,
+LMS or Bunny. They pin the HTTP layer - authentication (every signed-in Publishing user may preview, start,
+cancel and retry; nobody unauthenticated may do anything), range validation,
 that a preview request only queues the preview (the publisher service discovers the range), that a start is
 accepted only for a COMPLETE, fresh preview whose stored state has not changed, that a second active run is
 refused, and that no secret reaches the browser. Discovery and the run itself are covered in
@@ -14,7 +15,6 @@ from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.core.management import CommandError, call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.authtoken.models import Token
@@ -132,8 +132,7 @@ class Base(TestCase):
         STATE = State()
         users = get_user_model().objects
         self.viewer = users.create_user("viewer", password="unused-password-1")
-        self.operator = users.create_user("operator", password="unused-password-2")
-        call_command("publisher_backfill_operator", "--grant", "operator", stdout=mock.MagicMock())
+        self.member = users.create_user("member", password="unused-password-2")     # no group, staff or superuser
 
     def client_for(self, user):
         client = APIClient()
@@ -169,26 +168,29 @@ class AccessTests(Base):
                 response = getattr(client, method)(reverse(name, kwargs=kwargs), {}, format="json")
                 self.assertEqual(response.status_code, 401, name)
 
-    def test_writes_need_the_operator_role_and_previews_do_not(self):
-        viewer = self.client_for(self.viewer)
-        self.assertEqual(self.request_preview(viewer).status_code, 202)
-        self.assertEqual(viewer.get(reverse("operations-publisher-backfill-runs")).json()["operator"], False)
-        for name, kwargs, method in ROUTES:
-            if method == "post" and name != "operations-publisher-backfill-preview":
-                self.assertEqual(viewer.post(reverse(name, kwargs=kwargs), {}, format="json").status_code, 403, name)
-        self.assertEqual(STATE.writes, 1)                         # the preview request only
-        self.assertEqual(self.client_for(self.operator).get(reverse("operations-publisher-backfill-runs")).json()[
-            "operator"], True)
+    def test_every_signed_in_publishing_user_may_operate_without_any_extra_role(self):
+        member = self.client_for(self.member)
+        self.assertFalse(self.member.groups.exists() or self.member.is_staff or self.member.is_superuser)
+        body = member.get(reverse("operations-publisher-backfill-runs")).json()
+        self.assertNotIn("operator", body)
+        self.assertEqual(self.start(member, finished_preview()).status_code, 202)
+        run_id = next(r["run_id"] for r in STATE.runs.values() if r["mode"] == "EXECUTE")
+        cancel = member.post(reverse("operations-publisher-backfill-cancel", kwargs={"run_id": run_id}), {}, format="json")
+        self.assertEqual(cancel.status_code, 202)
+        with mock.patch("operations.publisher_backfill_views.backfill.retry_items",
+                        return_value={"run_id": run_id, "lectures_reopened": 0, "jobs_reopened": 0, "refused": [],
+                                      "lms_rematch": False}):
+            retry = member.post(reverse("operations-publisher-backfill-retry", kwargs={"run_id": run_id}),
+                                {"reason": "LMS session created"}, format="json")
+        self.assertEqual(retry.status_code, 202)
 
-    def test_the_operator_role_is_granted_and_revoked_by_command_only_for_existing_users(self):
-        out = mock.MagicMock()
-        call_command("publisher_backfill_operator", "--revoke", "operator", stdout=out)
-        self.assertFalse(views.is_operator(self.operator))
-        call_command("publisher_backfill_operator", "--grant", "operator", stdout=out)
-        self.assertTrue(views.is_operator(self.operator))
-        self.assertFalse(self.operator.is_staff or self.operator.is_superuser)
-        with self.assertRaises(CommandError):
-            call_command("publisher_backfill_operator", "--grant", "nobody", stdout=out)
+    def test_an_unauthenticated_request_can_never_start_a_run(self):
+        preview, forged = finished_preview(), APIClient()
+        forged.credentials(HTTP_AUTHORIZATION="Token not-a-real-token")
+        for client in (APIClient(), forged):
+            self.assertEqual(self.start(client, preview).status_code, 401)
+        self.assertFalse(any(r["mode"] == "EXECUTE" for r in STATE.runs.values()))
+        self.assertEqual(STATE.writes, 0)
 
 
 @patched
@@ -276,65 +278,65 @@ class PreviewTests(Base):
 class StartTests(Base):
     def test_a_complete_preview_starts_one_run_including_lectures_only_in_teams(self):
         preview = finished_preview()
-        response = self.start(self.client_for(self.operator), preview)
+        response = self.start(self.client_for(self.member), preview)
         self.assertEqual(response.status_code, 202, response.content)
         run = next(r for r in STATE.runs.values() if r["mode"] == "EXECUTE")
-        self.assertEqual((run["preview_run_id"], run["requested_by"]), (preview["run_id"], "operator"))
+        self.assertEqual((run["preview_run_id"], run["requested_by"]), (preview["run_id"], "member"))
         items = {i["lecture_id"]: i for i in STATE.items[str(run["run_id"])]}
         self.assertEqual((items[L1]["status"], items[L1]["origin"]), ("PENDING", "TEAMS_NEW"))
         self.assertEqual(items[L2]["status"], "PENDING")
         self.assertEqual(items[L3]["status"], "BLOCKED")
 
     def test_only_a_complete_finished_fresh_preview_can_be_confirmed(self):
-        operator = self.client_for(self.operator)
-        missing = self.start(operator, {"run_id": "not-a-run", "preview_summary": {"eligible": 1}})
+        member = self.client_for(self.member)
+        missing = self.start(member, {"run_id": "not-a-run", "preview_summary": {"eligible": 1}})
         self.assertEqual((missing.status_code, missing.json()["code"]), (400, "PREVIEW_REQUIRED"))
         for preview, code in ((finished_preview(status="INCOMPLETE"), "PREVIEW_INCOMPLETE"),
                               (finished_preview(age=timedelta(minutes=45)), "PREVIEW_EXPIRED")):
-            refused = self.start(operator, preview)
+            refused = self.start(member, preview)
             self.assertEqual((refused.status_code, refused.json()["code"]), (409, code))
         running = STATE.add(run_row(run_id=str(uuid.uuid4()), mode="PREVIEW", status="RUNNING", preview_summary={"eligible": 1}))
-        self.assertEqual(self.start(operator, running).json()["code"], "PREVIEW_NOT_READY")
+        self.assertEqual(self.start(member, running).json()["code"], "PREVIEW_NOT_READY")
         self.assertFalse(any(r["mode"] == "EXECUTE" for r in STATE.runs.values()))
 
     def test_a_stale_preview_or_a_wrong_confirmation_is_refused(self):
-        operator = self.client_for(self.operator)
+        member = self.client_for(self.member)
         preview = finished_preview()
-        wrong = self.start(operator, preview, confirm={"library_id": 785080, "eligible": 2})
+        wrong = self.start(member, preview, confirm={"library_id": 785080, "eligible": 2})
         self.assertEqual((wrong.status_code, wrong.json()["code"]), (409, "CONFIRMATION_MISMATCH"))
         STATE.stored[L2] = "ALREADY_PROCESSING"                       # its stored state changed after the preview
-        stale = self.start(operator, preview)
+        stale = self.start(member, preview)
         self.assertEqual((stale.status_code, stale.json()["code"]), (409, "PREVIEW_STALE"))
         self.assertFalse(any(r["mode"] == "EXECUTE" for r in STATE.runs.values()))
 
     def test_a_second_start_is_refused_while_a_run_is_active(self):
-        operator = self.client_for(self.operator)
-        self.assertEqual(self.start(operator, finished_preview()).status_code, 202)
-        again = self.start(operator, finished_preview())
+        member = self.client_for(self.member)
+        self.assertEqual(self.start(member, finished_preview()).status_code, 202)
+        again = self.start(member, finished_preview())
         self.assertEqual((again.status_code, again.json()["code"]), (409, "BACKFILL_ALREADY_ACTIVE"))
 
     def test_nothing_eligible_is_not_started(self):
-        refused = self.start(self.client_for(self.operator), finished_preview(eligible=0, rows=[row(L3, "MISSING_LMS_MATCH")]))
+        refused = self.start(self.client_for(self.member), finished_preview(eligible=0, rows=[row(L3, "MISSING_LMS_MATCH")]))
         self.assertEqual((refused.status_code, refused.json()["code"]), (409, "NOTHING_TO_QUEUE"))
 
 
 @patched
 class CancelAndRetryTests(Base):
     def test_cancel_requests_the_stop_of_the_active_run_only(self):
-        operator = self.client_for(self.operator)
+        member = self.client_for(self.member)
         url = reverse("operations-publisher-backfill-cancel", kwargs={"run_id": RUN_ID})
-        self.assertEqual(operator.post(url, {}, format="json").status_code, 404)
+        self.assertEqual(member.post(url, {}, format="json").status_code, 404)
         STATE.add(run_row(status="RUNNING"))
-        response = operator.post(url, {}, format="json")
+        response = member.post(url, {}, format="json")
         self.assertEqual((response.status_code, response.json()["run"]["cancel_requested"]), (202, True))
 
     def test_retry_needs_a_reason_and_goes_through_the_audited_path(self):
-        operator = self.client_for(self.operator)
+        member = self.client_for(self.member)
         url = reverse("operations-publisher-backfill-retry", kwargs={"run_id": RUN_ID})
-        self.assertEqual(operator.post(url, {}, format="json").json()["code"], "REASON_REQUIRED")
+        self.assertEqual(member.post(url, {}, format="json").json()["code"], "REASON_REQUIRED")
         with mock.patch("operations.publisher_backfill_views.backfill.retry_items",
                         return_value={"run_id": RUN_ID, "lectures_reopened": 2, "jobs_reopened": 1, "refused": [],
                                       "lms_rematch": False}) as retry:
-            response = operator.post(url, {"reason": "Bunny outage fixed"}, format="json")
+            response = member.post(url, {"reason": "Bunny outage fixed"}, format="json")
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(retry.call_args.kwargs, {"actor": "operator", "reason": "Bunny outage fixed"})
+        self.assertEqual(retry.call_args.kwargs, {"actor": "member", "reason": "Bunny outage fixed"})

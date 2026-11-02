@@ -1,13 +1,13 @@
 """
 Historical Backfill (Lecture Publishing Monitor): the operations API.
 
-    GET  publishing-monitor/backfill/runs/                 runs, newest first, the active preview, your role
+    GET  publishing-monitor/backfill/runs/                 runs, newest first, the active preview, the limits
     POST publishing-monitor/backfill/preview/              request a live preview of an inclusive date range
     GET  publishing-monitor/backfill/preview/<id>/         the preview: per-day coverage, summary, every lecture
-    POST publishing-monitor/backfill/runs/start/           start a run of a COMPLETE preview (operator)
+    POST publishing-monitor/backfill/runs/start/           start a run of a COMPLETE preview
     GET  publishing-monitor/backfill/runs/<id>/            one run: counts, every lecture's live pipeline
-    POST publishing-monitor/backfill/runs/<id>/cancel/     stop pending work (operator)
-    POST publishing-monitor/backfill/runs/<id>/retry/      re-open blocked / failed lectures (operator)
+    POST publishing-monitor/backfill/runs/<id>/cancel/     stop pending work
+    POST publishing-monitor/backfill/runs/<id>/retry/      re-open blocked / failed lectures
 
 PREVIEW discovers the range LIVE in Microsoft Teams, which only the publisher service can do (it holds the
 Graph, Aptem and LMS credentials). So the request writes one PREVIEW row and returns; the service works
@@ -21,8 +21,9 @@ items - including lectures that so far exist only in Teams (at most one run is a
 gets 409). The publisher service's HISTORICAL_BACKFILL task does the rest, through the publisher's own
 discovery, jobs and workers - nothing is discovered or imported inside an HTTP request.
 
-Start, cancel and retry need the operator group (settings.PUBLISHER_BACKFILL_OPERATOR_GROUP); every response
-carries codes, counts and identities only - never a URL, key or transcript text.
+Every route - preview, start, cancel, retry and the reads - uses the Publishing page's own access policy: any
+signed-in user (DRF TokenAuthentication + IsAuthenticated, config/settings.py); no extra role or group. Every
+response carries codes, counts and identities only - never a URL, key or transcript text.
 """
 from __future__ import annotations
 
@@ -32,8 +33,7 @@ from datetime import datetime, timezone
 import psycopg
 from django.conf import settings
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import BasePermission, IsAuthenticated
+from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from app.common.errors import PlatformError
@@ -46,18 +46,6 @@ from . import publishing_monitor_views as pm
 from .platform import reading, writing
 
 PREVIEW_TTL = 30 * 60
-
-
-def is_operator(user) -> bool:
-    return bool(user and user.is_authenticated and user.is_active
-                and user.groups.filter(name=settings.PUBLISHER_BACKFILL_OPERATOR_GROUP).exists())
-
-
-class IsBackfillOperator(BasePermission):
-    message = "Starting, cancelling or retrying a historical backfill needs the publisher backfill operator role."
-
-    def has_permission(self, request, view):
-        return is_operator(request.user)
 
 
 def _actor(request) -> str:
@@ -157,7 +145,7 @@ def _preview_answer(run: dict, items: list[dict]) -> dict:
 @api_view(["GET"])
 @_handle
 def runs_view(request):
-    """Recent runs (newest first), the active one and preview, the limits, and whether you may operate."""
+    """Recent runs (newest first), the active one and preview, and the limits."""
     repository = BackfillRepository()
     with reading() as connection:
         runs = repository.recent(connection, limit=25)
@@ -165,7 +153,7 @@ def runs_view(request):
         previews = repository.recent(connection, limit=1, mode=PREVIEW)
     active = next((r for r in shaped if r["status"] in ("QUEUED", "RUNNING")), None)
     return Response({"runs": shaped, "active": active, "latest_preview": _shape(previews[0]) if previews else None,
-                     "operator": is_operator(request.user), "library_id": pm._library(),
+                     "library_id": pm._library(),
                      "max_days": settings.PUBLISHER_BACKFILL_MAX_DAYS, "today": pm.cairo_today().isoformat(),
                      "timezone": "Africa/Cairo"})
 
@@ -247,13 +235,11 @@ def run_view(request, run_id):
             "monitor_state": None, "monitor_reason": None, "pipeline": [], "sources": row["sources"]}))
     shaped = _shape(run, counts)
     shaped["qa_only"] = len(qa_only)
-    return Response({"run": shaped, "lectures": lectures, "generated_at": generated_at,
-                     "operator": is_operator(request.user)})
+    return Response({"run": shaped, "lectures": lectures, "generated_at": generated_at})
 
 
-# --------------------------------------------------------------------------- writes (operators only)
+# --------------------------------------------------------------------------- writes (audited with the signed-in user)
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsBackfillOperator])
 @_handle
 def start_view(request):
     """
@@ -318,7 +304,6 @@ def start_view(request):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsBackfillOperator])
 @_handle
 def cancel_view(request, run_id):
     """Stop pending work of the active run; in-flight imports, encoding and captions finish normally."""
@@ -339,7 +324,6 @@ def cancel_view(request, run_id):
 
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated, IsBackfillOperator])
 @_handle
 def retry_view(request, run_id):
     """Re-open the run's BLOCKED / FAILED lectures (all, or `lecture_ids`). Body: {reason, lecture_ids?}."""

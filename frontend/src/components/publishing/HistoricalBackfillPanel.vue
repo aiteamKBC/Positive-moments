@@ -4,8 +4,8 @@
  *
  *   From / To (inclusive Cairo business dates) -> Preview Backfill: the publisher service discovers the range
  *   LIVE in Microsoft Teams, read-only (nothing is registered, queued or imported), and compares it with what
- *   the publisher already holds -> Run Backfill (operators only, after an explicit confirmation, and only for a
- *   COMPLETE preview) -> the service registers the Teams lectures and works through them behind daily publishing.
+ *   the publisher already holds -> Run Backfill (any signed-in user of this page, after an explicit confirmation,
+ *   and only for a COMPLETE preview) -> the service registers the Teams lectures and works through them behind daily publishing.
  *
  * Nothing on this page publishes anything itself. Every state is re-read from the server, so a preview or a
  * run survives a page refresh or a service restart, and the browser does not need to stay open.
@@ -48,8 +48,7 @@ const categoryFilter = ref('')
 const previewDone = computed(() => Boolean(preview.value?.preview.is_finished))
 const previewRows = computed(() => (preview.value?.lectures ?? [])
   .filter(r => !categoryFilter.value || r.category === categoryFilter.value))
-const runnable = computed(() => canRun(preview.value, dateFrom.value, dateTo.value, Boolean(runs.value?.operator),
-  Boolean(runs.value?.active)))
+const runnable = computed(() => canRun(preview.value, dateFrom.value, dateTo.value, Boolean(runs.value?.active)))
 const runBlockedBecause = computed(() => {
   const p = preview.value
   if (!p) return 'Preview the range first.'
@@ -57,7 +56,6 @@ const runBlockedBecause = computed(() => {
   if (!p.preview.is_finished) return 'The preview is still discovering the range in Teams.'
   if (!p.complete) return 'The preview is INCOMPLETE: not every day could be discovered in Teams. Preview again.'
   if (!p.confirmable) return 'The preview is older than 30 minutes: preview again.'
-  if (!runs.value?.operator) return 'Starting a backfill needs the publisher backfill operator role.'
   if (runs.value?.active) return 'Another historical backfill is running.'
   if (!(p.summary?.eligible)) return 'No lecture in this range needs processing.'
   return ''
@@ -288,7 +286,6 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
         Both dates are included. Dates are Cairo business dates (the publisher's lecture date); at most {{ maxDays }} days per run.
         Preview discovers the range live in Microsoft Teams and compares it with the publisher's records — read-only: nothing is
         registered, queued, imported or released.
-        <template v-if="runs && !runs.operator"> You can preview; starting a run needs the backfill operator role.</template>
       </p>
       <p v-if="problem && (dateFrom || dateTo)" class="notice-error mt-2" data-test="bf-problem">{{ problem }}</p>
       <p v-if="previewError" class="notice-error mt-2">{{ previewError }}</p>
@@ -460,7 +457,7 @@ const verified = (code?: string) => VERIFICATION[code ?? ''] ?? code ?? ''
           </dl>
           <span class="ml-auto text-2xs text-muted">Updated {{ cairoDateTime(detail.generated_at) }}</span>
         </div>
-        <div v-if="detail.operator" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+        <div class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
           <button
             v-if="!detail.run.is_finished" type="button" class="btn-secondary btn-sm"
             :disabled="acting || detail.run.cancel_requested" data-test="bf-cancel" @click="cancelRun"
