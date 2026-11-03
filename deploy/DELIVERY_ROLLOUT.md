@@ -47,7 +47,7 @@
    **Expected:**
    - `health`: `"status": "ok"`, `"library_id": 786045`, `"playback_enabled": false`.
    - The occurrence: `"state": "READY"`, `"release": {"status": "NOT_RELEASED"}`, `"playback": {"available": false, "reason": "NOT_RELEASED"}`.
-7. **Hand over to the LMS team:** the token (through a secure channel), the base URL, [the guide](../docs/integration/LMS_INTEGRATION_GUIDE.md) and [the OpenAPI spec](../docs/api/publisher_lms_v1.openapi.yaml).
+7. **Hand over to the LMS team:** the token (through a secure channel), the base URL, [the guide](../docs/integration/LMS_INTEGRATION_GUIDE.md) and [the OpenAPI document](../docs/api/publisher_lms_v1.openapi.json).
 
 **Rollback for Phase A:**
 - Remove `PUBLISHER_LMS_SERVICE_TOKENS`, so every call answers 401.

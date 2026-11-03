@@ -3,7 +3,8 @@
 // Placeholders only; every secret comes from the LMS backend's environment / secret store:
 //   PUBLISHER_API_BASE       e.g. https://<positive-moments-host>/api/publisher/v1
 //   PUBLISHER_SERVICE_TOKEN  the service token Kent issued to the LMS backend (never sent to a browser)
-//   BUNNY_EMBED_TOKEN_KEY    library 786045 > Security > "Token authentication key" (NOT the library API key)
+//   BUNNY_EMBED_TOKEN_KEY    library 796471 > Security > "Token authentication key" (NOT the library API key);
+//                            the library GET /health reports as library_id. The 786045 key no longer signs anything.
 //
 // The LMS must check enrolment BEFORE calling playableParts().
 import { createHash } from "node:crypto";

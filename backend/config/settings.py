@@ -70,6 +70,14 @@ PUBLISHER_LMS_LIBRARY_ID = int(_publisher_lms_library) if _publisher_lms_library
 PUBLISHER_LMS_PLAYBACK_ENABLED = env_bool("PUBLISHER_LMS_PLAYBACK_ENABLED", False)
 PUBLISHER_LMS_RATE = os.getenv("PUBLISHER_LMS_RATE", "600/min").strip() or "600/min"
 PUBLISHER_LMS_CAPTION_LANGUAGE = os.getenv("PUBLISHER_LMS_CAPTION_LANGUAGE", "en").strip() or "en"
+# Swagger UI for the API above at /api/docs/ (+ /api/schema/), Django staff accounts only
+# (operations/api_docs.py). Off = every docs route answers 404.
+PUBLISHER_API_DOCS_ENABLED = env_bool("PUBLISHER_API_DOCS_ENABLED", False)
+# Origins whose form posts Django accepts, e.g. https://positive-moments.kentbusinesscollege.net.
+# Behind the TLS-terminating proxy Django sees plain HTTP, so an HTTPS sign-in form (the API docs)
+# fails the CSRF origin check unless its origin is listed here. Empty = Django's default.
+CSRF_TRUSTED_ORIGINS = [value.strip() for value in os.getenv(
+    "DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if value.strip()]
 # Historical Backfill in the Publishing Monitor (operations/publisher_backfill_views.py): the longest
 # inclusive range one run may cover. Every signed-in user of the Publishing page may preview, start,
 # cancel and retry a run (the default IsAuthenticated policy below); no extra role.

@@ -25,6 +25,8 @@ RUN pip install --no-cache-dir -r backend-requirements.txt gunicorn==23.0.0
 # implementation of every QA rule.
 COPY app ./app
 COPY backend ./backend
+# The LMS API's OpenAPI document, served to staff at /api/schema/ (operations/api_docs.py).
+COPY docs/api ./docs/api
 
 # Africa/Cairo business dates are computed in Python, not by the container
 # clock, but a correct TZ keeps logs readable next to the scheduler's.

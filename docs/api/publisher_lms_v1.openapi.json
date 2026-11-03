@@ -1,0 +1,547 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "KBC Publisher LMS Delivery API",
+    "version": "1",
+    "description": "Read-only API the KBC LMS backend uses to find the verified Bunny Stream recording of an LMS live-session occurrence, and whether it may be played. Served by the Continuous Bunny Publisher's Django backend.\n\n* Lookup is by the LMS's own identifier, `curriculum.live_session_occurrences.id`.\n* Every answer is computed live from the publisher's readiness rule; nothing is cached.\n* The LMS backend decides who may watch (enrolment) and signs the Bunny embed URL. This API never sees a learner and never returns a signed URL, a key, a Teams link, a SharePoint identifier or any job information.\n* `playback.available` is the ONLY field that says a recording may be shown to a learner.\n\n**Delivery library.** Recordings are delivered from Bunny Stream library **796471**. `GET /health` and every `playback.library_id` report the library in use; always store a `video_id` together with its `library_id`. Production publishing covers lectures from **1 November 2026**. Recordings in the retired library 786045 are not migrated: an occurrence before 1 November 2026 does not become available.\n\n**Authentication.** Every route needs `Authorization: Bearer <service token>`. The token is issued to the LMS backend only and never belongs in a browser.\n\n**Every response**, errors included, carries `Cache-Control: no-store` and `X-Publisher-Contract: 1`.\n\n**Methods.** `GET` only. Once the token is accepted, any other method gets 405; without a valid token, 401 comes first.\n\n**Rate limit.** Per service token (default 600 requests per minute, counted per server process). Over the limit: 429 with `Retry-After`.\n\n**Versioning.** Contract v1 only gains optional fields. A breaking change gets `/v2/`."
+  },
+  "servers": [
+    {
+      "url": "https://{host}/api/publisher/v1",
+      "variables": {
+        "host": {
+          "default": "positive-moments.kentbusinesscollege.net",
+          "description": "The Positive Moments backend host. HTTPS only: plain-HTTP requests to /api/publisher/ are refused (403) before they reach the API."
+        }
+      }
+    }
+  ],
+  "security": [
+    {"lmsServiceToken": []}
+  ],
+  "tags": [
+    {"name": "Occurrences", "description": "The recording of an LMS occurrence, one at a time or as a change feed."},
+    {"name": "Health", "description": "Contract version, delivery library and service status."}
+  ],
+  "paths": {
+    "/occurrences/{occurrence_id}/recording": {
+      "get": {
+        "tags": ["Occurrences"],
+        "operationId": "getOccurrenceRecording",
+        "summary": "The recording of one LMS occurrence, and whether it can be played",
+        "description": "Ask at playback time, after your own login and enrolment checks, and embed nothing unless `playback.available` is true. Play `recording.parts` in `sequence` order and sign one embed URL per part with the delivery library's token authentication key.",
+        "parameters": [
+          {"$ref": "#/components/parameters/OccurrenceId"}
+        ],
+        "responses": {
+          "200": {
+            "description": "The publisher knows this occurrence. Read `state` and `playback.available`.",
+            "headers": {
+              "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+              "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/OccurrenceRecording"},
+                "examples": {
+                  "released": {"$ref": "#/components/examples/ReleasedRecording"},
+                  "notDiscovered": {"$ref": "#/components/examples/NotDiscoveredRecording"}
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "404": {
+            "description": "The publisher has never seen this occurrence (code `OCCURRENCE_NOT_FOUND`), e.g. a session that did not run in Teams. Fall back to Teams or show \"not available\".",
+            "headers": {
+              "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+              "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Error"},
+                "example": {"code": "OCCURRENCE_NOT_FOUND", "detail": "the publisher has never seen this occurrence"}
+              }
+            }
+          },
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/occurrences": {
+      "get": {
+        "tags": ["Occurrences"],
+        "operationId": "listChangedOccurrences",
+        "summary": "Occurrences whose answer may have changed (incremental sync feed)",
+        "description": "Ordered by change time, oldest first, then by occurrence id. At-least-once: an occurrence can appear again whenever anything it is computed from changes, so upsert by `lms_occurrence_id`. To sync, keep the newest `updated_at` you stored and pass it as `changed_since` on the next run, minus a small overlap (e.g. 2 minutes). Follow `next_cursor` while `has_more` is true.\n\nThe feed keeps listings current (\"recording available\" badges). Playback must still ask the single-occurrence route.",
+        "parameters": [
+          {
+            "name": "changed_since",
+            "in": "query",
+            "required": false,
+            "description": "ISO 8601 with a timezone (exclusive), e.g. `2026-11-01T00:00:00Z`. Omit for a full resync.",
+            "schema": {"type": "string", "format": "date-time"}
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque: the `next_cursor` of the previous page, passed back unchanged.",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Items per page.",
+            "schema": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "headers": {
+              "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+              "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Feed"},
+                "example": {
+                  "contract_version": "1",
+                  "items": [],
+                  "next_cursor": "eyJ0IjoiMjAyNi0xMS0wM1QxNDo1Mzo1My4yMTU3OTIrMDA6MDAiLCJvIjoiT0NDLUVYQU1QTEUtMDAwMSJ9",
+                  "has_more": true
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {"$ref": "#/components/responses/Unavailable"}
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["Health"],
+        "operationId": "getHealth",
+        "summary": "Contract version, delivery library and whether playback is switched on",
+        "description": "Needs the same service token. `library_id` is the Bunny library every recording is delivered from: sign embeds with that library's token authentication key.",
+        "responses": {
+          "200": {
+            "description": "Healthy.",
+            "headers": {
+              "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+              "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Health"},
+                "example": {
+                  "contract_version": "1",
+                  "status": "ok",
+                  "library_id": 796471,
+                  "playback_enabled": true,
+                  "database": "ok",
+                  "time": "2026-11-03T15:00:00.123456Z"
+                }
+              }
+            }
+          },
+          "401": {"$ref": "#/components/responses/Unauthorized"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "429": {"$ref": "#/components/responses/TooManyRequests"},
+          "503": {
+            "description": "Degraded: the database is unavailable or the delivery library is not configured. Same body as 200.",
+            "headers": {
+              "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+              "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+            },
+            "content": {
+              "application/json": {
+                "schema": {"$ref": "#/components/schemas/Health"},
+                "example": {
+                  "contract_version": "1",
+                  "status": "degraded",
+                  "library_id": 796471,
+                  "playback_enabled": true,
+                  "database": "unavailable",
+                  "time": "2026-11-03T15:00:00.123456Z"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "lmsServiceToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A service token (at least 32 characters) issued to the LMS backend only, sent as `Authorization: Bearer <token>`. Two tokens may be valid at once during a rotation. Keep it server side: never in a browser, a mobile app, a log line or Git."
+      }
+    },
+    "parameters": {
+      "OccurrenceId": {
+        "name": "occurrence_id",
+        "in": "path",
+        "required": true,
+        "description": "The LMS occurrence id: `curriculum.live_session_occurrences.id`. Look up by occurrence, never by live session (a live session is a weekly series).",
+        "schema": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+        "example": "OCC-EXAMPLE-0001"
+      }
+    },
+    "headers": {
+      "CacheControl": {
+        "description": "Sent by the API on every response. Never cache an answer for playback: a withdrawal takes effect on the next request.",
+        "schema": {"type": "string", "enum": ["no-store"]}
+      },
+      "PublisherContract": {
+        "description": "The contract version, on every response (errors included).",
+        "schema": {"type": "string", "enum": ["1"]}
+      },
+      "WWWAuthenticate": {
+        "description": "Sent when the Authorization header is missing or not accepted.",
+        "schema": {"type": "string", "example": "Bearer realm=\"publisher-lms\""}
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before the next request.",
+        "schema": {"type": "integer", "example": 12}
+      },
+      "Allow": {
+        "description": "The methods the route accepts.",
+        "schema": {"type": "string", "example": "GET, OPTIONS"}
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "A malformed parameter: `INVALID_OCCURRENCE_ID`, `INVALID_CHANGED_SINCE`, `INVALID_LIMIT` or `INVALID_CURSOR`. Fix the caller; do not retry.",
+        "headers": {
+          "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+          "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+        },
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"code": "INVALID_LIMIT", "detail": "limit must be 1..50"}
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing, malformed or unknown service token. Alert; do not retry in a loop.",
+        "headers": {
+          "WWW-Authenticate": {"$ref": "#/components/headers/WWWAuthenticate"},
+          "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+          "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+        },
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Detail"},
+            "example": {"detail": "Invalid service token."}
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "A method other than GET, sent with an accepted token. (Without a valid token the answer is 401.)",
+        "headers": {
+          "Allow": {"$ref": "#/components/headers/Allow"},
+          "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+          "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+        },
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Detail"},
+            "example": {"detail": "Method \"POST\" not allowed."}
+          }
+        }
+      },
+      "TooManyRequests": {
+        "description": "The rate limit for this service token is exceeded. Back off and honour `Retry-After`.",
+        "headers": {
+          "Retry-After": {"$ref": "#/components/headers/RetryAfter"},
+          "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+          "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+        },
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Detail"},
+            "example": {"detail": "Request was throttled. Expected available in 12 seconds."}
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "Temporary: `NOT_CONFIGURED` (no delivery library) or `PLATFORM_UNAVAILABLE` (the publisher database could not answer). Retry with backoff; meanwhile treat the recording as not playable.",
+        "headers": {
+          "Cache-Control": {"$ref": "#/components/headers/CacheControl"},
+          "X-Publisher-Contract": {"$ref": "#/components/headers/PublisherContract"}
+        },
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"code": "PLATFORM_UNAVAILABLE", "detail": "the publisher database could not answer"}
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["code", "detail"],
+        "properties": {
+          "code": {"type": "string", "description": "Machine-readable.", "example": "OCCURRENCE_NOT_FOUND"},
+          "detail": {"type": "string", "description": "Human-readable. Never contains an exception message."}
+        }
+      },
+      "Detail": {
+        "type": "object",
+        "description": "The framework's error body (401, 405, 429).",
+        "required": ["detail"],
+        "properties": {
+          "detail": {"type": "string"}
+        }
+      },
+      "State": {
+        "type": "string",
+        "description": "One state, in this precedence:\n* `NOT_DISCOVERED`: the publisher has no lecture for this occurrence (yet).\n* `NOT_APPLICABLE`: cancelled, test or inactive.\n* `BLOCKED`: duplicate calendar entry, or every part excluded.\n* `WITHDRAWN`: Kent withdrew it.\n* `REVIEW_REQUIRED`: waiting for a Kent operator.\n* `PROCESSING`: still being recorded, imported or encoded.\n* `READY`: every included part has a verified video in the delivery library. Captions are optional and never hold a video back; see `recording.caption_status`.",
+        "enum": ["READY", "PROCESSING", "REVIEW_REQUIRED", "BLOCKED", "WITHDRAWN", "NOT_DISCOVERED", "NOT_APPLICABLE"]
+      },
+      "OccurrenceRecording": {
+        "type": "object",
+        "required": ["contract_version", "lms_occurrence_id", "updated_at", "lms_live_session_id", "lms_module_catalogue_id", "lms_session_number", "link_role", "state", "blocking", "lecture", "recording", "release", "playback"],
+        "properties": {
+          "contract_version": {"type": "string", "enum": ["1"]},
+          "lms_occurrence_id": {"type": "string"},
+          "updated_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When anything this answer is computed from last changed."},
+          "lms_live_session_id": {"type": "string", "nullable": true},
+          "lms_module_catalogue_id": {"type": "string", "nullable": true},
+          "lms_session_number": {"type": "integer", "nullable": true},
+          "link_role": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["PRIMARY", "SHARED_MODULE", null],
+            "description": "`SHARED_MODULE`: the LMS shares this Teams meeting between modules, so the same recording can answer several occurrences. Null when no lecture is linked."
+          },
+          "state": {"$ref": "#/components/schemas/State"},
+          "blocking": {
+            "type": "array",
+            "description": "Machine-readable reasons the recording is not READY or not RELEASED. Informational: show them to staff only.",
+            "items": {"type": "string", "example": "PART_1_FRAGMENT_NEEDS_DECISION"}
+          },
+          "lecture": {"$ref": "#/components/schemas/Lecture"},
+          "recording": {"$ref": "#/components/schemas/Recording"},
+          "release": {"$ref": "#/components/schemas/Release"},
+          "playback": {"$ref": "#/components/schemas/Playback"}
+        }
+      },
+      "Lecture": {
+        "type": "object",
+        "nullable": true,
+        "description": "The publisher's lecture linked to the occurrence. Null when none is linked (`NOT_DISCOVERED` / `NOT_APPLICABLE`).",
+        "required": ["lecture_id", "title", "session_date", "scheduled_start", "scheduled_end", "lms_match"],
+        "properties": {
+          "lecture_id": {"type": "string", "format": "uuid"},
+          "title": {"type": "string"},
+          "session_date": {"type": "string", "format": "date"},
+          "scheduled_start": {"type": "string", "format": "date-time"},
+          "scheduled_end": {"type": "string", "format": "date-time"},
+          "lms_match": {
+            "type": "object",
+            "required": ["status", "rule_version"],
+            "properties": {
+              "status": {"type": "string", "description": "`VERIFIED`, or why the match is not verified (e.g. `AMBIGUOUS`, `STALE`); `PENDING` before the first evaluation.", "example": "VERIFIED"},
+              "rule_version": {"type": "string", "nullable": true, "example": "meeting_key_start_v2"}
+            }
+          }
+        }
+      },
+      "Recording": {
+        "type": "object",
+        "nullable": true,
+        "description": "Null when no lecture is linked.",
+        "required": ["teams_part_count", "published_part_count", "total_duration_seconds", "parts", "caption_status", "excluded_parts"],
+        "properties": {
+          "teams_part_count": {"type": "integer", "description": "Recordings Teams made for the meeting."},
+          "published_part_count": {"type": "integer", "description": "Parts the learner plays, in `sequence` order."},
+          "total_duration_seconds": {"type": "integer", "nullable": true},
+          "parts": {"type": "array", "items": {"$ref": "#/components/schemas/Part"}},
+          "caption_status": {
+            "type": "string",
+            "enum": ["VERIFIED", "PARTIAL", "NOT_AVAILABLE"],
+            "description": "English captions across the published parts. `VERIFIED`: every part has a caption that was read back and matched. `PARTIAL`: some parts do. `NOT_AVAILABLE`: none (missing, still being produced, or failed). Captions are optional: a recording plays without them, and a caption produced later is added to the same video with no change to `state`, `release` or `playback`."
+          },
+          "excluded_parts": {
+            "type": "array",
+            "description": "Teams recordings a Kent operator excluded (e.g. a false start). They are not played.",
+            "items": {
+              "type": "object",
+              "required": ["source_part_index", "reason"],
+              "properties": {
+                "source_part_index": {"type": "integer"},
+                "reason": {"type": "string", "enum": ["OPERATOR_EXCLUDED"]}
+              }
+            }
+          }
+        }
+      },
+      "Part": {
+        "type": "object",
+        "required": ["sequence", "source_part_index", "classification", "teams_recording_id", "recorded_start", "recorded_end", "duration_seconds", "bunny", "encoding", "resolutions", "captions", "visibility"],
+        "properties": {
+          "sequence": {"type": "integer", "description": "Play order: 1..`published_part_count`. Show \"Part n of N\" from it."},
+          "source_part_index": {"type": "integer", "description": "Teams recording order (may have gaps where parts were excluded)."},
+          "classification": {"type": "string", "nullable": true, "enum": ["FULL", "PARTIAL", "FRAGMENT", "UNKNOWN", null]},
+          "teams_recording_id": {"type": "string", "description": "The Microsoft Graph callRecording id, equal to `curriculum.live_session_artifacts.graph_artifact_id`: keep viewing analytics keyed on your own artifact id."},
+          "recorded_start": {"type": "string", "format": "date-time"},
+          "recorded_end": {"type": "string", "format": "date-time", "nullable": true},
+          "duration_seconds": {"type": "integer", "nullable": true},
+          "bunny": {
+            "type": "object",
+            "nullable": true,
+            "description": "The Bunny Stream video. Null until the part is imported into the delivery library. Never store `video_id` without `library_id`.",
+            "required": ["library_id", "video_id"],
+            "properties": {
+              "library_id": {"type": "integer", "example": 796471},
+              "video_id": {"type": "string", "format": "uuid"}
+            }
+          },
+          "encoding": {"type": "string", "enum": ["NOT_IMPORTED", "NOT_STARTED", "IN_PROGRESS", "FINISHED", "VERIFIED", "FAILED", "REVIEW_REQUIRED"]},
+          "resolutions": {"type": "array", "items": {"type": "string", "example": "1080p"}},
+          "captions": {
+            "type": "array",
+            "description": "The current caption track per language, as it really is (possibly empty). Optional for playback: offer captions only for a part whose track has `content_verified: true`.",
+            "items": {"$ref": "#/components/schemas/Caption"}
+          },
+          "visibility": {"type": "string", "nullable": true, "enum": ["HIDDEN", "READY_FOR_LMS", "WITHDRAWN", null], "description": "Null until the part is imported."}
+        }
+      },
+      "Caption": {
+        "type": "object",
+        "required": ["language", "label", "status", "version", "content_verified"],
+        "properties": {
+          "language": {"type": "string", "example": "en"},
+          "label": {"type": "string", "example": "English"},
+          "status": {"type": "string", "enum": ["PREPARED", "UPLOADING", "UPLOAD_UNCERTAIN", "PUBLISHED", "VERIFIED", "REJECTED", "FAILED", "SUPERSEDED", "REVIEW_REQUIRED"]},
+          "version": {"type": "integer", "nullable": true},
+          "content_verified": {"type": "boolean", "description": "The published caption file was read back and matched its source."}
+        }
+      },
+      "Release": {
+        "type": "object",
+        "required": ["status", "released_at", "withdrawn_at"],
+        "properties": {
+          "status": {"type": "string", "enum": ["NOT_RELEASED", "RELEASED", "WITHDRAWN"], "description": "Release in the delivery library. Kent's Auto-Release (when switched on) or an operator releases a READY lecture; only Kent withdraws."},
+          "released_at": {"type": "string", "format": "date-time", "nullable": true},
+          "withdrawn_at": {"type": "string", "format": "date-time", "nullable": true}
+        }
+      },
+      "Playback": {
+        "type": "object",
+        "required": ["available", "reason", "library_id", "player", "token_authentication_required"],
+        "properties": {
+          "available": {"type": "boolean", "description": "True only when `state` is READY, the lecture is RELEASED and Kent's delivery switch is on. Never show a recording when false."},
+          "reason": {"type": "string", "nullable": true, "description": "Why it is not available: `STATE_<state>` (e.g. `STATE_PROCESSING`), `NOT_RELEASED` or `PLAYBACK_DISABLED`. Null when available."},
+          "library_id": {"type": "integer", "description": "The delivery library. Sign embeds with its token authentication key.", "example": 796471},
+          "player": {"type": "string", "enum": ["BUNNY_STREAM_EMBED"]},
+          "token_authentication_required": {"type": "boolean", "enum": [true]}
+        }
+      },
+      "Feed": {
+        "type": "object",
+        "required": ["contract_version", "items", "next_cursor", "has_more"],
+        "properties": {
+          "contract_version": {"type": "string", "enum": ["1"]},
+          "items": {"type": "array", "items": {"$ref": "#/components/schemas/OccurrenceRecording"}},
+          "next_cursor": {"type": "string", "nullable": true, "description": "Pass as `cursor` for the next page. Null on the last page."},
+          "has_more": {"type": "boolean"}
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": ["contract_version", "status", "library_id", "playback_enabled", "database", "time"],
+        "properties": {
+          "contract_version": {"type": "string", "enum": ["1"]},
+          "status": {"type": "string", "enum": ["ok", "degraded"]},
+          "library_id": {"type": "integer", "nullable": true, "description": "The delivery library; null when not configured."},
+          "playback_enabled": {"type": "boolean", "description": "Kent's global delivery switch."},
+          "database": {"type": "string", "enum": ["ok", "schema_missing", "unavailable"]},
+          "time": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "examples": {
+      "ReleasedRecording": {
+        "summary": "READY and released: playable",
+        "value": {
+          "contract_version": "1",
+          "lms_occurrence_id": "OCC-EXAMPLE-0001",
+          "updated_at": "2026-11-03T14:53:53.215792Z",
+          "lms_live_session_id": "LIVE-EXAMPLE-0001",
+          "lms_module_catalogue_id": "MOD-EXAMPLE-0001",
+          "lms_session_number": 3,
+          "link_role": "PRIMARY",
+          "state": "READY",
+          "blocking": [],
+          "lecture": {
+            "lecture_id": "00000000-0000-5000-8000-000000000001",
+            "title": "Example Module: Lecture 3",
+            "session_date": "2026-11-03",
+            "scheduled_start": "2026-11-03T08:00:00Z",
+            "scheduled_end": "2026-11-03T10:00:00Z",
+            "lms_match": {"status": "VERIFIED", "rule_version": "meeting_key_start_v2"}
+          },
+          "recording": {
+            "teams_part_count": 2,
+            "published_part_count": 1,
+            "total_duration_seconds": 7653,
+            "parts": [
+              {
+                "sequence": 1,
+                "source_part_index": 2,
+                "classification": "FULL",
+                "teams_recording_id": "EXAMPLE-GRAPH-CALL-RECORDING-ID",
+                "recorded_start": "2026-11-03T07:55:30.484072Z",
+                "recorded_end": "2026-11-03T10:03:04.164072Z",
+                "duration_seconds": 7653,
+                "bunny": {"library_id": 796471, "video_id": "00000000-0000-4000-8000-000000000001"},
+                "encoding": "VERIFIED",
+                "resolutions": ["480p", "720p", "1080p"],
+                "captions": [{"language": "en", "label": "English", "status": "VERIFIED", "version": 1, "content_verified": true}],
+                "visibility": "READY_FOR_LMS"
+              }
+            ],
+            "caption_status": "VERIFIED",
+            "excluded_parts": [{"source_part_index": 1, "reason": "OPERATOR_EXCLUDED"}]
+          },
+          "release": {"status": "RELEASED", "released_at": "2026-11-03T12:05:00Z", "withdrawn_at": null},
+          "playback": {"available": true, "reason": null, "library_id": 796471, "player": "BUNNY_STREAM_EMBED", "token_authentication_required": true}
+        }
+      },
+      "NotDiscoveredRecording": {
+        "summary": "Known to the LMS, no lecture linked yet: not playable",
+        "value": {
+          "contract_version": "1",
+          "lms_occurrence_id": "OCC-EXAMPLE-0002",
+          "updated_at": "2026-11-03T09:00:00Z",
+          "lms_live_session_id": "LIVE-EXAMPLE-0002",
+          "lms_module_catalogue_id": "MOD-EXAMPLE-0002",
+          "lms_session_number": null,
+          "link_role": null,
+          "state": "NOT_DISCOVERED",
+          "blocking": ["LMS_COVERAGE_NOT_YET_DUE"],
+          "lecture": null,
+          "recording": null,
+          "release": {"status": "NOT_RELEASED", "released_at": null, "withdrawn_at": null},
+          "playback": {"available": false, "reason": "STATE_NOT_DISCOVERED", "library_id": 796471, "player": "BUNNY_STREAM_EMBED", "token_authentication_required": true}
+        }
+      }
+    }
+  }
+}
