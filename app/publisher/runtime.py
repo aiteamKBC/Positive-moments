@@ -4,10 +4,12 @@ and the systemd service get their objects from.
 
 Write modes refuse to start unless Bunny's core API confirms the destination
 library encodes on the FREE tier (no JIT / Premium) with AI transcribing
-disabled - the same checks the pilot's preflight made - and the library is
-not the old account's.
+disabled - the same checks the pilot's preflight made - that the configured
+API key is that library's own key, and that the library is not the old account's.
 """
 from __future__ import annotations
+
+import hmac
 
 import psycopg
 
@@ -30,6 +32,17 @@ def check_library_settings(settings: dict) -> list[str]:
     if "x264" not in [c.strip().lower() for c in str(settings.get("OutputCodecs") or "").split(",")]:
         problems.append("library has no H.264 (x264) output")
     return problems
+
+
+def check_library_key(settings: dict, api_key: str) -> list[str]:
+    """
+    The configured Stream API key must be THIS library's own key (Get Video Library answers with it), so
+    a library switch can never run with the previous library's key. Compared in memory; never printed.
+    """
+    expected = settings.get("ApiKey")
+    if expected and not hmac.compare_digest(str(expected).encode(), str(api_key or "").encode()):
+        return [f"the configured Bunny API key does not belong to library {settings.get('Id', '?')}"]
+    return []
 
 
 def connector(config: PublisherConfig):
@@ -75,7 +88,7 @@ def build_daemon(config: PublisherConfig, *, graph=None, bunny=None, core=None, 
             from app.bunny.client import BunnyCoreClient
             core = BunnyCoreClient(config.account_api_key)
         settings = core.get_video_library(library)
-        problems = check_library_settings(settings)
+        problems = check_library_settings(settings) + check_library_key(settings, config.api_key)
         if problems:
             raise ConfigError(problems)
         from app.media.delivery import SharePointMedia

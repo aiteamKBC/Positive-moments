@@ -22,6 +22,13 @@ PRODUCTION LIBRARY = THE STAGING LIBRARY, ADOPTED (decision 2026-10-24)
   no Bunny id changes, no readiness resets. A staging library that DIFFERS from
   the production library is still allowed (a separate test library).
 
+LIBRARY CUTOVER (2026-11-03: 786045 -> 796471, from PUBLISHER_START_DATE 2026-11-01)
+  Configuration only: BUNNY_PRODUCTION_LIBRARY_ID / _API_KEY / _CDN_HOSTNAME
+  name the new library and PUBLISHER_LMS_LIBRARY_ID (Django) follows. Every
+  readiness, caption and release fact is keyed by library, so a lecture with
+  only old-library rows is simply not imported yet in the new one: the planner
+  imports it again through the normal pipeline, and the old rows stay as audit.
+
 DATABASE CONNECTION
   PUBLISHER_DATABASE_URL is the publisher's own Lecture Intelligence
   connection and must be Neon's DIRECT endpoint (host without "-pooler"). The

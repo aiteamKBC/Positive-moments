@@ -134,9 +134,10 @@ def main(argv=None) -> int:
             report = {"config": config.describe(), "problems": config.problems()}
             if args.check_library and not report["problems"] and config.writes_bunny:
                 from app.bunny.client import BunnyCoreClient
-                from app.publisher.runtime import check_library_settings
+                from app.publisher.runtime import check_library_key, check_library_settings
                 settings = BunnyCoreClient(config.account_api_key).get_video_library(config.library_id)
-                report["library_problems"] = check_library_settings(settings)
+                report["library_problems"] = check_library_settings(settings) + check_library_key(
+                    settings, config.api_key)
             return _print(report, ok=not report["problems"] and not report.get("library_problems"))
         if args.command == "db-smoke":
             from app.publisher.smoke import run_db_smoke

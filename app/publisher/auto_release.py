@@ -15,7 +15,7 @@ A lecture is released automatically only when ALL of these hold:
   * every live video is still HIDDEN and the lecture has NEVER been released or withdrawn
     (re-checked inside release()'s lock: an operator's withdrawal is never undone, and a lecture that
     gained a new part after an operator release waits for the operator, as before);
-  * library 786045 passes the live learner-delivery security check (read once per run, only when
+  * the delivery library (config.library_id) passes the live learner-delivery security check (read once per run, only when
     something is eligible).
 
 Every candidate is evaluated on every run; at most MAX_PER_RUN are released per run (newest lecture first,

@@ -176,6 +176,17 @@ def test_build_daemon_refuses_a_premium_or_transcribing_library():
                                  "PUBLISH_CAPTION"}
 
 
+def test_build_daemon_refuses_another_librarys_api_key_without_printing_it():
+    from app.publisher.runtime import check_library_key
+    assert check_library_key(library_settings(ApiKey="k"), "k") == []
+    assert check_library_key(library_settings(), "k") == []                # no key in the answer: nothing to compare
+    graph = FakeRecordingGraph()
+    with pytest.raises(ConfigError, match="does not belong to library") as refused:
+        build_daemon(_write_config(), graph=graph, bunny=FakeBunnyLibrary(FakeMedia(graph.items)),
+                     core=FakeCore(ApiKey="SECRET-OTHER-LIBRARY"), lms_source=object(), connect=lambda: None)
+    assert "SECRET" not in str(refused.value) and "'k'" not in str(refused.value)
+
+
 def test_build_daemon_in_shadow_registers_no_bunny_work_and_makes_no_bunny_call():
     core = FakeCore()
     daemon = build_daemon(cfg(PUBLISHER_DISCOVER_CALENDAR="false"), graph=FakeRecordingGraph(), core=core,
