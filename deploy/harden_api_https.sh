@@ -7,11 +7,14 @@
 #   sudo bash deploy/harden_api_https.sh verify     # read-only checks (re-runnable)
 #   sudo bash deploy/harden_api_https.sh rollback   # restore the newest backup, graceful OLS restart
 #
-# What it adds: ONE marked block at the top of the vhost-level rewrite rules of the vhost that
+# What it adds (rules: deploy/kbc_api_https_rules.py): ONE marked block at the top of the vhost-level rewrite rules of the vhost that
 # serves positive-moments.kentbusinesscollege.net, and nothing else:
 #   * plain-HTTP requests (listener port 80) for /api/publisher/ are answered 403 by OpenLiteSpeed
 #     itself: they never reach Django. (A redirect would not help: a Bearer token sent over HTTP is
 #     already exposed, and following the redirect would re-send it.) The LMS must use https://.
+#   * the staff API documentation (/api/docs..., /api/schema...): plain-HTTP GET/HEAD are redirected
+#     301 to https://, any other method is answered 403 by OpenLiteSpeed: the sign-in form is never
+#     served, and a password never processed, over HTTP (2026-11-04).
 #   * plain-HTTP GET/HEAD of normal pages are redirected 301 to https:// on the fixed hostname.
 #   * unchanged: every other /api/ route over HTTP (unknown external callers, POST bodies), and
 #     /.well-known/acme-challenge/ (Let's Encrypt HTTP-01 renewal). HTTPS is not changed at all.
@@ -26,6 +29,7 @@ readonly LSWS=/usr/local/lsws
 readonly CTRL=$LSWS/bin/lswsctrl
 readonly TS=$(date -u +%Y%m%dT%H%M%SZ)
 readonly BACKUPS=/root/kbc-https
+readonly HERE=$(cd "$(dirname "$0")" && pwd)
 MODE=${1:-}
 die() { printf '\nABORT: %s\n' "$*" >&2; exit 1; }
 say() { printf '\n== %s\n' "$*"; }
@@ -77,9 +81,10 @@ PY
 }
 
 # ---------------------------------------------------------------- the checks (curl, status codes only)
-probe() {   # $1 url -> "status contract_header redirect"
-  local h; h=$(mktemp)
-  local code; code=$(curl -s -o /dev/null -D "$h" -w '%{http_code}' --max-time 20 "$1" || true)
+probe() {   # $1 url [$2 method] -> "status contract_header redirect"
+  local h; h=$(mktemp); local body=()
+  [ "${2:-GET}" = POST ] && body=(--data-binary "")          # an empty body: Content-Length 0, no credentials
+  local code; code=$(curl -s -o /dev/null -D "$h" -w '%{http_code}' --max-time 20 -X "${2:-GET}" "${body[@]}" "$1" || true)
   printf '%s %s %s\n' "$code" "$(grep -ci '^x-publisher-contract:' "$h" || true)" \
     "$(grep -i '^location:' "$h" | tr -d '\r' | awk '{print $2}' | head -1)"
   rm -f "$h"
@@ -89,6 +94,13 @@ answers() {
            "https://$DOMAIN/api/publisher/v1/health" "http://$DOMAIN/" "http://$DOMAIN/login?next=x" "https://$DOMAIN/" \
            "http://$DOMAIN/api/health/" "https://$DOMAIN/api/health/" "http://$DOMAIN/.well-known/acme-challenge/kbc-probe"; do
     printf '%-80s %s\n' "$u" "$(probe "$u")"
+  done
+  for u in "http://$DOMAIN/api/docs/" "http://$DOMAIN/api/docs/login/?next=/api/docs/" "http://$DOMAIN/api/schema/" \
+           "https://$DOMAIN/api/docs/" "https://$DOMAIN/api/schema/"; do
+    printf '%-80s %s\n' "$u" "$(probe "$u")"
+  done
+  for u in "http://$DOMAIN/api/docs/login/" "http://$DOMAIN/api/docs/logout/"; do   # no body, no credentials
+    printf '%-80s %s\n' "POST:$u" "$(probe "$u" POST)"
   done
 }
 check() {   # exit 1 on any failure; prints a table
@@ -113,6 +125,15 @@ need(s == "301" and loc == f"https://{dom}/login?next=x", f"HTTP page redirect k
 need(a(f"https://{dom}/")[0] == before.get(f"https://{dom}/", ["?"])[0], "HTTPS website answer unchanged")
 for u in (f"http://{dom}/api/health/", f"https://{dom}/api/health/"):
     need(a(u)[0] == before.get(u, ["?"])[0], f"unrelated API route unchanged: {u} -> {a(u)[0]}")
+for path in ("/api/docs/", "/api/docs/login/?next=/api/docs/", "/api/schema/"):
+    s, _, loc = a(f"http://{dom}{path}")[:3]
+    need(s == "301" and loc == f"https://{dom}{path}", f"HTTP docs page redirected to HTTPS, never served -> {path}: {s} {loc}")
+for path in ("/api/docs/login/", "/api/docs/logout/"):
+    s = a(f"POST:http://{dom}{path}")[0]
+    need(s == "403", f"HTTP docs POST refused by the web server (no credentials processed) -> {path}: {s}")
+for path in ("/api/docs/", "/api/schema/"):
+    s = a(f"https://{dom}{path}")[0]
+    need(s in ("302", "404"), f"HTTPS docs still served by Django (302 sign-in when enabled, 404 when off) -> {path}: {s}")
 s = a(f"http://{dom}/.well-known/acme-challenge/kbc-probe")[0]
 need(s != "301" and s != "403", f"ACME HTTP-01 path not redirected or refused -> {s}")
 sys.exit(1 if fails else 0)
@@ -146,46 +167,7 @@ cp --preserve=all "$VHCONF" "$WORK/vhconf.conf"; printf '%s\n' "$VHCONF" > "$WOR
 cmp -s "$VHCONF" "$WORK/vhconf.conf" || die "backup differs"; echo "backup: $WORK/vhconf.conf"
 
 say "add the marked rewrite block (vhost level, first rules)"
-python3 - "$VHCONF" "$DOMAIN" <<'PY'
-import re, sys
-path, dom = sys.argv[1], sys.argv[2]
-text = open(path, encoding="utf-8").read()
-BEGIN, END = "# BEGIN kbc-api-https (deploy/harden_api_https.sh)", "# END kbc-api-https"
-text = re.sub(rf"\n?{re.escape(BEGIN)}.*?{re.escape(END)}\n?", "\n", text, flags=re.S)   # idempotent
-block = "\n".join([BEGIN,
-    "RewriteCond %{SERVER_PORT} ^80$",
-    "RewriteRule ^/?api/publisher/ - [F,L]",
-    "RewriteCond %{SERVER_PORT} ^80$",
-    "RewriteCond %{REQUEST_URI} !^/api/",
-    "RewriteCond %{REQUEST_URI} !^/\\.well-known/acme-challenge/",
-    "RewriteCond %{REQUEST_METHOD} ^(GET|HEAD)$",
-    f"RewriteRule ^/?(.*)$ https://{dom}/$1 [R=301,L]",
-    END])
-lines = text.split("\n")
-depth, start, end = 0, None, None
-for i, l in enumerate(lines):                       # the TOP-LEVEL rewrite block only (not one inside a context)
-    if depth == 0 and start is None and re.match(r"^\s*rewrite\s*\{", l): start = i
-    depth += l.count("{") - l.count("}")
-    if start is not None and end is None and i > start and depth == 0: end = i; break
-if start is None:
-    lines += ["rewrite  {", "  enable                  1", "  rules                   <<<END_rules", block, "  END_rules", "}", ""]
-else:
-    body = lines[start:end + 1]
-    has_rules = any(re.match(r"^\s*rules\s+<<<END_rules", l) for l in body)
-    enabled = any(re.match(r"^\s*enable\s+1\b", l) for l in body)
-    if not enabled:
-        if has_rules: sys.exit("ABORT: the vhost rewrite block is disabled but holds rules; enabling it would switch them on")
-        body = [l for l in body if not re.match(r"^\s*enable\s+\d", l)]
-        body.insert(1, "  enable                  1")
-    if has_rules:
-        j = next(i for i, l in enumerate(body) if re.match(r"^\s*rules\s+<<<END_rules", l))
-        body.insert(j + 1, block)
-    else:
-        body[-1:-1] = ["  rules                   <<<END_rules", block, "  END_rules"]
-    lines[start:end + 1] = body
-open(path, "w", encoding="utf-8").write("\n".join(lines))    # in place: owner and mode kept
-print("rules block written")
-PY
+python3 "$HERE/kbc_api_https_rules.py" "$VHCONF" "$DOMAIN"
 diff -u "$WORK/vhconf.conf" "$VHCONF" | sed -E 's/(password|secret|key|token)[^ ]*.*/\1 <hidden>/I' || true
 
 say "graceful OpenLiteSpeed restart"

@@ -12,6 +12,16 @@ WHO MAY READ IT
     neither asked for nor accepted here, and the page can never call the API: Try It Out and the
     Authorize dialog are switched off, so no token is ever typed into a browser.
 
+    Over plain HTTP nothing here is served: OpenLiteSpeed redirects GET/HEAD to https:// and refuses
+    every other method (deploy/kbc_api_https_rules.py), so the sign-in form never travels, and a
+    password is never accepted, in clear text.
+
+    Password guessing: failed sign-ins are counted in Django's cache for 15 minutes, per username
+    (5) and per client address (30; behind the proxy that address is shared, so it is a ceiling for
+    everyone). Past either limit the sign-in answers 429 without checking the password. A
+    successful sign-in clears its username's count. Counted per server process (the default
+    local-memory cache), like the LMS API's own rate limit, which this does not touch.
+
 WHAT IT SHOWS
     Only the three LMS routes: the document is hand-written, and the tests hold it to
     operations/lms_urls.py and to the real response bodies. Nothing is read from settings or the
@@ -24,6 +34,7 @@ BROWSER SAFETY
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from functools import wraps
@@ -33,6 +44,7 @@ from django.conf import settings
 from django.contrib.admin.forms import AdminAuthenticationForm
 from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.auth import views as auth_views
+from django.core.cache import cache
 from django.http import Http404, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse_lazy
@@ -46,6 +58,9 @@ SWAGGER_UI_CSS = ("swagger-ui.css", "sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn
 LOGIN = "api-docs-login"
 LOGIN_POLICY = ("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; "
                 "frame-ancestors 'none'; base-uri 'none'")
+FAILED_SIGN_IN_WINDOW = 15 * 60                 # seconds a failed sign-in counts
+MAX_FAILED_PER_USERNAME = 5
+MAX_FAILED_PER_ADDRESS = 30                     # REMOTE_ADDR only: a forwarded-for header can be forged
 
 
 def schema_file() -> Path:
@@ -100,11 +115,45 @@ def schema_view(request):
         return JsonResponse(json.load(handle), json_dumps_params={"indent": 2})
 
 
+def sign_in_counters(request) -> list[tuple[str, int]]:
+    """(cache key, limit) of the failed sign-ins this attempt is counted against: its username, its address."""
+    username = (request.POST.get("username") or "").strip().lower()
+    return [(f"api-docs-login:user:{hashlib.sha256(username.encode()).hexdigest()}", MAX_FAILED_PER_USERNAME),
+            (f"api-docs-login:addr:{request.META.get('REMOTE_ADDR', '')}", MAX_FAILED_PER_ADDRESS)]
+
+
+def _count_failure(key: str) -> None:
+    if not cache.add(key, 1, FAILED_SIGN_IN_WINDOW):     # the window runs from the first failure
+        try:
+            cache.incr(key)
+        except ValueError:                               # expired between add and incr
+            cache.add(key, 1, FAILED_SIGN_IN_WINDOW)
+
+
 class DocsLoginView(auth_views.LoginView):
     """Staff accounts only: AdminAuthenticationForm refuses anyone else before a session exists."""
     template_name = "operations/api_docs_login.html"
     authentication_form = AdminAuthenticationForm
     next_page = reverse_lazy("api-docs")
+
+    def post(self, request, *args, **kwargs):
+        if any(cache.get(key, 0) >= limit for key, limit in sign_in_counters(request)):
+            # Refused before the password is checked; an unbound form, so nothing authenticates.
+            response = self.render_to_response(self.get_context_data(
+                form=self.get_form_class()(request),
+                refused="Too many failed sign-in attempts. Try again in 15 minutes."), status=429)
+            response["Retry-After"] = str(FAILED_SIGN_IN_WINDOW)
+            return response
+        return super().post(request, *args, **kwargs)
+
+    def form_invalid(self, form):
+        for key, _ in sign_in_counters(self.request):
+            _count_failure(key)
+        return super().form_invalid(form)
+
+    def form_valid(self, form):
+        cache.delete(sign_in_counters(self.request)[0][0])   # this account's own count starts again
+        return super().form_valid(form)
 
 
 login_view = documentation(content_policy(LOGIN_POLICY)(DocsLoginView.as_view()))

@@ -24,6 +24,7 @@
   <main>
     <h1>KBC Publisher LMS API</h1>
     <p>Internal documentation. Sign in with a Django staff account.</p>
+    {% if refused %}<div class="errors">{{ refused }}</div>{% endif %}
     {% if form.non_field_errors %}<div class="errors">{% for error in form.non_field_errors %}{{ error }} {% endfor %}</div>{% endif %}
     <form method="post" action="{% url 'api-docs-login' %}">
       {% csrf_token %}

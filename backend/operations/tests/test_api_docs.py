@@ -1,13 +1,16 @@
 """
 API documentation (/api/docs/, /api/schema/): off by default, Django staff only, Swagger UI pinned with
 Subresource Integrity and Try It Out off, and a document that describes exactly the three LMS routes -
-with their real authentication, headers and error bodies - and nothing internal or secret.
+with their real authentication, headers and error bodies - and nothing internal or secret. Over plain
+HTTP no docs route is ever served (the OpenLiteSpeed rules), and failed sign-ins are rate limited.
 
 No platform database is opened: the LMS routes' reads are patched, as in test_lms_api. That the real
 response bodies conform to the document is tests/integration/test_publisher_lms_openapi.py.
 """
+import importlib.util
 import json
 import re
+import time
 from unittest import mock
 from urllib.parse import urlsplit
 
@@ -21,6 +24,7 @@ from rest_framework.test import APIClient
 
 from operations import api_docs
 from operations.tests.test_lms_api import TOKEN, fake_connection, routes
+from tests.ols_rewrite import evaluate
 from tests.openapi_contract import load, problems, references, resolve, schema
 
 DOCS, SCHEMA, LOGIN, LOGOUT = "/api/docs/", "/api/schema/", "/api/docs/login/", "/api/docs/logout/"
@@ -30,6 +34,10 @@ ENABLED = override_settings(PUBLISHER_API_DOCS_ENABLED=True)
 LMS = dict(PUBLISHER_LMS_SERVICE_TOKENS=[TOKEN], PUBLISHER_LMS_LIBRARY_ID=796471,
            PUBLISHER_LMS_PLAYBACK_ENABLED=True, PUBLISHER_LMS_RATE="1000/min")
 SPEC = load()
+_rules = importlib.util.spec_from_file_location(
+    "kbc_api_https_rules", f"{settings.REPO_ROOT}/deploy/kbc_api_https_rules.py")
+HTTPS_RULES = importlib.util.module_from_spec(_rules)
+_rules.loader.exec_module(HTTPS_RULES)
 
 
 def account(username, *, staff=True, active=True):
@@ -100,6 +108,9 @@ class AccessTests(TestCase):
 
 @ENABLED
 class SignInTests(TestCase):
+    def setUp(self):
+        cache.clear()
+
     def test_staff_sign_in_opens_the_documentation_and_sign_out_closes_it(self):
         account("docs-staff")
         client = Client()
@@ -176,6 +187,89 @@ class PageTests(TestCase):
         served = client.get(DOCS).content.decode() + client.get(SCHEMA).content.decode()
         for sentinel in ("lms-secret-sentinel", "social-secret-sentinel", "django-secret-sentinel"):
             self.assertNotIn(sentinel, served)
+
+
+# =========================================================================== plain HTTP and password guessing
+class HttpsOnlyTests(SimpleTestCase):
+    """Every docs route Django serves is covered by the web server's plain-HTTP rules."""
+    DOMAIN = "positive-moments.kentbusinesscollege.net"
+
+    def docs_routes(self):
+        return sorted(r for r in all_routes() if r.startswith(("/api/docs", "/api/schema")))
+
+    def test_no_docs_route_is_served_or_accepts_a_form_over_plain_http(self):
+        rules = HTTPS_RULES.block(self.DOMAIN)
+        self.assertEqual(self.docs_routes(), [DOCS, LOGIN, LOGOUT, SCHEMA])
+        for route in self.docs_routes():
+            for method in ("GET", "HEAD"):
+                self.assertEqual(evaluate(rules, port=80, method=method, uri=route),
+                                 ("301", f"https://{self.DOMAIN}{route}"), (method, route))
+            for method in ("POST", "PUT", "PATCH", "DELETE"):
+                self.assertEqual(evaluate(rules, port=80, method=method, uri=route), ("403", None), (method, route))
+            for method in ("GET", "POST"):
+                self.assertEqual(evaluate(rules, port=443, method=method, uri=route), ("pass", None), (method, route))
+
+    def test_the_lms_api_rules_are_unchanged(self):
+        rules = HTTPS_RULES.block(self.DOMAIN)
+        for route in (r for r in all_routes() if r.startswith(LMS_BASE + "/")):
+            self.assertEqual(evaluate(rules, port=80, method="GET", uri=route), ("403", None), route)
+            self.assertEqual(evaluate(rules, port=443, method="GET", uri=route), ("pass", None), route)
+
+
+@ENABLED
+class SignInRateLimitTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        account("docs-staff")
+
+    def sign_in(self, username="docs-staff", password=PASSWORD, address="203.0.113.7"):
+        client = Client(REMOTE_ADDR=address)
+        return client, client.post(LOGIN, {"username": username, "password": password})
+
+    def fail(self, times, username="docs-staff", address="203.0.113.7"):
+        for _ in range(times):
+            self.assertEqual(self.sign_in(username, "wrong-password", address)[1].status_code, 200)
+
+    def test_five_failures_lock_the_username_without_checking_the_password(self):
+        self.fail(api_docs.MAX_FAILED_PER_USERNAME)
+        with mock.patch("django.contrib.auth.forms.authenticate") as checked:
+            client, response = self.sign_in(address="198.51.100.9")
+        checked.assert_not_called()
+        self.assertEqual((response.status_code, response["Retry-After"]), (429, str(api_docs.FAILED_SIGN_IN_WINDOW)))
+        self.assertContains(response, "Too many failed sign-in attempts", status_code=429)
+        self.assertIn("default-src 'none'", response["Content-Security-Policy"])
+        self.assertEqual(client.get(DOCS).status_code, 302)                     # not signed in
+        account("docs-other")
+        self.assertEqual(self.sign_in("docs-other")[1].status_code, 302)       # other accounts unaffected
+        self.assertEqual(self.sign_in("DOCS-STAFF ")[1].status_code, 429)      # same username, any spelling
+
+    def test_one_client_address_has_a_ceiling_across_usernames(self):
+        for index in range(api_docs.MAX_FAILED_PER_ADDRESS):
+            self.fail(1, username=f"guess-{index}")
+        self.assertEqual(self.sign_in()[1].status_code, 429)
+        self.assertEqual(self.sign_in(address="198.51.100.9")[1].status_code, 302)
+
+    def test_a_successful_sign_in_clears_its_username_count(self):
+        self.fail(api_docs.MAX_FAILED_PER_USERNAME - 1)
+        self.assertEqual(self.sign_in()[1].status_code, 302)
+        self.fail(api_docs.MAX_FAILED_PER_USERNAME - 1)
+        self.assertEqual(self.sign_in()[1].status_code, 302)
+
+    def test_the_lock_ends_with_the_window(self):
+        self.fail(api_docs.MAX_FAILED_PER_USERNAME)
+        self.assertEqual(self.sign_in()[1].status_code, 429)
+        later = time.time() + api_docs.FAILED_SIGN_IN_WINDOW + 1
+        with mock.patch("django.core.cache.backends.locmem.time.time", return_value=later):
+            self.assertEqual(self.sign_in()[1].status_code, 302)
+
+    @override_settings(**LMS)
+    @mock.patch("operations.lms_api.reading", fake_connection)
+    def test_the_lms_api_is_not_limited_by_docs_sign_in_failures(self):
+        for index in range(api_docs.MAX_FAILED_PER_ADDRESS):
+            self.fail(1, username=f"guess-{index}", address="127.0.0.1")
+        lms = APIClient(REMOTE_ADDR="127.0.0.1")
+        lms.credentials(HTTP_AUTHORIZATION=f"Bearer {TOKEN}")
+        self.assertEqual(lms.get(routes()[2]).status_code, 200)
 
 
 # =========================================================================== the document
