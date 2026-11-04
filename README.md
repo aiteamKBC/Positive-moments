@@ -125,9 +125,9 @@ production deployment.
 
 The LMS delivery API (`/api/publisher/v1/`: recording per occurrence, change feed, health) is documented in
 [docs/api/publisher_lms_v1.openapi.json](docs/api/publisher_lms_v1.openapi.json) and the
-[LMS integration guide](docs/integration/LMS_INTEGRATION_GUIDE.md). With `PUBLISHER_API_DOCS_ENABLED=true`
-(and `DJANGO_CSRF_TRUSTED_ORIGINS` set to the site's HTTPS origin behind a TLS proxy), Django staff accounts
-can browse it as Swagger UI at `/api/docs/` (sign-in at `/api/docs/login/`; schema at `/api/schema/`).
+[LMS integration guide](docs/integration/LMS_INTEGRATION_GUIDE.md). With `PUBLISHER_API_DOCS_ENABLED=true`,
+every Dashboard user can browse it as Swagger UI through the Dashboard's "API docs" link
+(`/api-documentation`, which opens `/api/docs/` with the Dashboard sign-in; schema at `/api/schema/`).
 
 Lecture list query parameters:
 

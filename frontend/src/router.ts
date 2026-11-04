@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { hasToken, startMicrosoftSignIn } from './services/api'
+import ApiDocumentationView from './views/ApiDocumentationView.vue'
 import LectureDetailView from './views/LectureDetailView.vue'
 import LecturesView from './views/LecturesView.vue'
 import LoginView from './views/LoginView.vue'
@@ -23,6 +24,7 @@ import SocialMediaView from './views/SocialMediaView.vue'
  *   /positive-moments  the learner-moments feature
  *   /social-media      AI-suggested social media opportunities
  *   /publishing        Lecture Publishing Monitor: Teams -> Bunny -> LMS (read-only)
+ *   /api-documentation opens the LMS API documentation (backend /api/docs/) without a second sign-in
  *
  * The canonical lecture detail is keyed by `lecture_id`, which is always a
  * UUID. The constraint on the parameter is what lets the old bookmark shape
@@ -84,6 +86,7 @@ const router = createRouter({
 
     // --- Social Media ----------------------------------------------------
     { path: '/social-media', name: 'social-media', component: SocialMediaView, meta: { title: 'Social Media' } },
+    { path: '/api-documentation', name: 'api-documentation', component: ApiDocumentationView, meta: { title: 'API documentation' } },
     {
       path: '/social-media/:sessionKey', name: 'social-media-detail',
       component: SocialMediaDetailView, meta: { title: 'Social Media' },

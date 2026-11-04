@@ -330,7 +330,7 @@ GET {base}/api/publisher/v1/occurrences?changed_since=2026-11-01T00:00:00Z&limit
 ## 9. Health, documentation and support
 
 - **Health check:** `GET {base}/api/publisher/v1/health` returns the contract version, the delivery library (`library_id`), whether playback is switched on, and database status. It needs the same token.
-- **API reference:** the [OpenAPI document](../api/publisher_lms_v1.openapi.json) describes every route, parameter, response body, header and status code, with sanitised examples; load it into any OpenAPI viewer. Kent's developers also have an interactive copy at `https://positive-moments.kentbusinesscollege.net/api/docs/` (Kent staff sign-in; it cannot send requests).
+- **API reference:** the [OpenAPI document](../api/publisher_lms_v1.openapi.json) describes every route, parameter, response body, header and status code, with sanitised examples; load it into any OpenAPI viewer. Kent's Dashboard users also have an interactive copy behind the Dashboard's *API docs* link (it cannot send requests).
 - **Logging:** every request writes one access-log line (route, status, duration, token fingerprint, occurrence ID). Quote the occurrence ID when you report a problem.
 - **Contract changes:** v1 only gains optional fields. A breaking change gets `/v2/`.
 

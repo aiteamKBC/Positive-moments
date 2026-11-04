@@ -66,6 +66,17 @@ export async function logout() {
   await api.post('/auth/logout/')
 }
 
+/**
+ * Open the LMS API documentation (Swagger UI at /api/docs/) for the signed-in user.
+ * A page navigation cannot carry the token header, so the token first opens a short,
+ * documentation-only grant in the backend's HttpOnly session cookie. The token never goes into
+ * the URL; signing out of the Dashboard ends the grant.
+ */
+export async function openApiDocumentation(navigate = (url: string) => window.location.replace(url)) {
+  await api.post('/docs/session/')
+  navigate(`${API_BASE}/docs/`)
+}
+
 export async function getSummary(params: Record<string, string | number> = {}) {
   return (await api.get<Summary>('/positive-mentions/summary/', { params })).data
 }

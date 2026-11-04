@@ -71,6 +71,14 @@ async function signOut() {
           <span class="hidden text-2xs font-medium uppercase tracking-kicker text-white/45 lg:inline">
             Internal workspace
           </span>
+          <a
+            href="/api-documentation"
+            target="_blank"
+            rel="noopener"
+            class="hidden items-center gap-1.5 rounded-lg px-3 py-1.5 text-[0.8125rem] font-semibold text-white/70 transition hover:text-white sm:inline-flex"
+          >
+            <AppIcon name="external" :size="15" /> API docs
+          </a>
           <button
             v-if="hasToken()"
             type="button"
@@ -101,6 +109,14 @@ async function signOut() {
         >
           <AppIcon :name="item.icon" :size="16" /> {{ item.label }}
         </RouterLink>
+        <a
+          href="/api-documentation"
+          target="_blank"
+          rel="noopener"
+          class="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-semibold text-white/65"
+        >
+          <AppIcon name="external" :size="16" /> API docs
+        </a>
         <button
           type="button"
           class="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-white/65"

@@ -14,7 +14,7 @@
 #     already exposed, and following the redirect would re-send it.) The LMS must use https://.
 #   * the staff API documentation (/api/docs..., /api/schema...): plain-HTTP GET/HEAD are redirected
 #     301 to https://, any other method is answered 403 by OpenLiteSpeed: the sign-in form is never
-#     served, and a password never processed, over HTTP (2026-11-04).
+#     served, and no request processed, over HTTP (2026-11-04).
 #   * plain-HTTP GET/HEAD of normal pages are redirected 301 to https:// on the fixed hostname.
 #   * unchanged: every other /api/ route over HTTP (unknown external callers, POST bodies), and
 #     /.well-known/acme-challenge/ (Let's Encrypt HTTP-01 renewal). HTTPS is not changed at all.
@@ -95,11 +95,11 @@ answers() {
            "http://$DOMAIN/api/health/" "https://$DOMAIN/api/health/" "http://$DOMAIN/.well-known/acme-challenge/kbc-probe"; do
     printf '%-80s %s\n' "$u" "$(probe "$u")"
   done
-  for u in "http://$DOMAIN/api/docs/" "http://$DOMAIN/api/docs/login/?next=/api/docs/" "http://$DOMAIN/api/schema/" \
+  for u in "http://$DOMAIN/api/docs/" "http://$DOMAIN/api/docs/session/" "http://$DOMAIN/api/schema/" \
            "https://$DOMAIN/api/docs/" "https://$DOMAIN/api/schema/"; do
     printf '%-80s %s\n' "$u" "$(probe "$u")"
   done
-  for u in "http://$DOMAIN/api/docs/login/" "http://$DOMAIN/api/docs/logout/"; do   # no body, no credentials
+  for u in "http://$DOMAIN/api/docs/session/" "http://$DOMAIN/api/docs/"; do   # no body, no credentials
     printf '%-80s %s\n' "POST:$u" "$(probe "$u" POST)"
   done
 }
@@ -125,15 +125,15 @@ need(s == "301" and loc == f"https://{dom}/login?next=x", f"HTTP page redirect k
 need(a(f"https://{dom}/")[0] == before.get(f"https://{dom}/", ["?"])[0], "HTTPS website answer unchanged")
 for u in (f"http://{dom}/api/health/", f"https://{dom}/api/health/"):
     need(a(u)[0] == before.get(u, ["?"])[0], f"unrelated API route unchanged: {u} -> {a(u)[0]}")
-for path in ("/api/docs/", "/api/docs/login/?next=/api/docs/", "/api/schema/"):
+for path in ("/api/docs/", "/api/docs/session/", "/api/schema/"):
     s, _, loc = a(f"http://{dom}{path}")[:3]
     need(s == "301" and loc == f"https://{dom}{path}", f"HTTP docs page redirected to HTTPS, never served -> {path}: {s} {loc}")
-for path in ("/api/docs/login/", "/api/docs/logout/"):
+for path in ("/api/docs/session/", "/api/docs/"):
     s = a(f"POST:http://{dom}{path}")[0]
-    need(s == "403", f"HTTP docs POST refused by the web server (no credentials processed) -> {path}: {s}")
+    need(s == "403", f"HTTP docs POST refused by the web server (no request body processed) -> {path}: {s}")
 for path in ("/api/docs/", "/api/schema/"):
     s = a(f"https://{dom}{path}")[0]
-    need(s in ("302", "404"), f"HTTPS docs still served by Django (302 sign-in when enabled, 404 when off) -> {path}: {s}")
+    need(s in ("302", "404"), f"HTTPS docs still served by Django (302 to the Dashboard when enabled, 404 when off) -> {path}: {s}")
 s = a(f"http://{dom}/.well-known/acme-challenge/kbc-probe")[0]
 need(s != "301" and s != "403", f"ACME HTTP-01 path not redirected or refused -> {s}")
 sys.exit(1 if fails else 0)

@@ -1,14 +1,17 @@
 """
-API documentation (/api/docs/, /api/schema/): off by default, Django staff only, Swagger UI pinned with
-Subresource Integrity and Try It Out off, and a document that describes exactly the three LMS routes -
-with their real authentication, headers and error bodies - and nothing internal or secret. Over plain
-HTTP no docs route is ever served (the OpenLiteSpeed rules), and failed sign-ins are rate limited.
+API documentation (/api/docs/, /api/schema/): off by default; open to exactly the Dashboard's users through
+the Dashboard's own token (a documentation-only session grant, no second sign-in, no separate account);
+Swagger UI pinned with Subresource Integrity and Try It Out off; and a document that describes exactly the
+three LMS routes - with their real authentication, headers and error bodies - and nothing internal or
+secret. Over plain HTTP no docs route is ever served (the OpenLiteSpeed rules).
 
 No platform database is opened: the LMS routes' reads are patched, as in test_lms_api. That the real
 response bodies conform to the document is tests/integration/test_publisher_lms_openapi.py.
 """
+import hashlib
 import importlib.util
 import json
+import logging
 import re
 import time
 from unittest import mock
@@ -27,9 +30,9 @@ from operations.tests.test_lms_api import TOKEN, fake_connection, routes
 from tests.ols_rewrite import evaluate
 from tests.openapi_contract import load, problems, references, resolve, schema
 
-DOCS, SCHEMA, LOGIN, LOGOUT = "/api/docs/", "/api/schema/", "/api/docs/login/", "/api/docs/logout/"
+DOCS, SESSION, SCHEMA = "/api/docs/", "/api/docs/session/", "/api/schema/"
+ENTRY = "/api-documentation"                       # the Dashboard page behind its "API docs" link
 LMS_BASE = "/api/publisher/v1"
-PASSWORD = "docs-test-password-4f9Kq2"
 ENABLED = override_settings(PUBLISHER_API_DOCS_ENABLED=True)
 LMS = dict(PUBLISHER_LMS_SERVICE_TOKENS=[TOKEN], PUBLISHER_LMS_LIBRARY_ID=796471,
            PUBLISHER_LMS_PLAYBACK_ENABLED=True, PUBLISHER_LMS_RATE="1000/min")
@@ -40,13 +43,18 @@ HTTPS_RULES = importlib.util.module_from_spec(_rules)
 _rules.loader.exec_module(HTTPS_RULES)
 
 
-def account(username, *, staff=True, active=True):
-    return get_user_model().objects.create_user(username, password=PASSWORD, is_staff=staff, is_active=active)
+def dashboard_user(username="docs-user", *, active=True):
+    """A Dashboard user as Microsoft sign-in leaves one: not staff, no password, one API token."""
+    user = get_user_model().objects.create_user(username, is_staff=False, is_active=active)
+    return user, Token.objects.create(user=user)
 
 
-def signed_in(user):
-    client = Client()
-    client.force_login(user)
+def granted(token):
+    """A browser after the Dashboard's "API docs" link: one POST with the token header, then cookies only.
+    CSRF checks are on, as for a real browser: the token-authenticated POST needs no CSRF token."""
+    client = Client(enforce_csrf_checks=True)
+    response = client.post(SESSION, HTTP_AUTHORIZATION=f"Token {token.key}")
+    assert response.status_code == 204, response.status_code
     return client
 
 
@@ -71,86 +79,121 @@ class SwitchTests(TestCase):
         self.assertIs(settings.PUBLISHER_API_DOCS_ENABLED, False)   # the test environment sets nothing
 
     @override_settings(PUBLISHER_API_DOCS_ENABLED=False)
-    def test_switched_off_every_docs_route_is_not_found_even_for_staff(self):
-        for client in (Client(), signed_in(account("docs-staff"))):
-            for path in (DOCS, SCHEMA, LOGIN):
-                self.assertEqual(client.get(path).status_code, 404, path)
-            self.assertEqual(client.post(LOGIN, {"username": "docs-staff", "password": PASSWORD}).status_code, 404)
-            self.assertEqual(client.post(LOGOUT).status_code, 404)
+    def test_switched_off_every_docs_route_is_not_found_even_for_a_dashboard_user(self):
+        _, token = dashboard_user()
+        client = Client(HTTP_AUTHORIZATION=f"Token {token.key}")
+        for path in (DOCS, SCHEMA):
+            self.assertEqual(client.get(path).status_code, 404, path)
+        self.assertEqual(client.post(SESSION).status_code, 404)
 
 
 @ENABLED
-class AccessTests(TestCase):
-    def test_anonymous_and_non_staff_are_sent_to_the_staff_sign_in(self):
-        for client in (Client(), signed_in(account("docs-learner", staff=False)),
-                       signed_in(account("docs-disabled", active=False))):
-            for path in (DOCS, SCHEMA):
-                response = client.get(path)
-                self.assertEqual(response.status_code, 302, path)
-                self.assertEqual(response["Location"], f"{LOGIN}?next={path}")
-
-    def test_staff_read_the_page_and_the_document(self):
-        client = signed_in(account("docs-staff"))
-        self.assertEqual(client.get(DOCS).status_code, 200)
+class DashboardAccessTests(TestCase):
+    def test_a_dashboard_user_opens_the_documentation_without_signing_in_again(self):
+        _, token = dashboard_user()
+        client = granted(token)
+        page = client.get(DOCS)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "docs-user")
         response = client.get(SCHEMA)
         self.assertEqual((response.status_code, response["Content-Type"]), (200, "application/json"))
         self.assertEqual(response.json(), SPEC)
         self.assertIn("no-store", response["Cache-Control"])
-        self.assertEqual(client.post(DOCS).status_code, 405)
+        self.assertIn(client.post(DOCS).status_code, (403, 405))         # read-only: CSRF or method refusal
 
     @override_settings(**LMS)
-    def test_neither_the_lms_service_token_nor_a_console_token_opens_the_documentation(self):
-        staff = account("docs-console-staff")
-        for header in (f"Bearer {TOKEN}", f"Token {Token.objects.create(user=staff).key}"):
-            for path in (DOCS, SCHEMA):
-                self.assertEqual(Client(HTTP_AUTHORIZATION=header).get(path).status_code, 302, (header[:6], path))
+    def test_only_a_current_dashboard_token_opens_access(self):
+        _, disabled = dashboard_user("docs-disabled", active=False)
+        for header in (None, "Token not-a-dashboard-token", f"Bearer {TOKEN}", f"Token {disabled.key}"):
+            extra = {"HTTP_AUTHORIZATION": header} if header else {}
+            client = Client()
+            self.assertEqual(client.post(SESSION, **extra).status_code, 401, header and header[:6])
+            self.assertEqual(client.get(DOCS).status_code, 302)
+        _, token = dashboard_user()
+        self.assertEqual(Client().get(SESSION, HTTP_AUTHORIZATION=f"Token {token.key}").status_code, 405)
 
+    @override_settings(**LMS)
+    def test_without_a_grant_the_page_goes_to_the_dashboard_and_the_schema_is_refused(self):
+        _, token = dashboard_user()
+        for header in (None, f"Token {token.key}", f"Bearer {TOKEN}"):   # a header alone opens nothing
+            client = Client(**({"HTTP_AUTHORIZATION": header} if header else {}))
+            page = client.get(DOCS)
+            self.assertEqual((page.status_code, page["Location"]), (302, ENTRY))
+            refused = client.get(SCHEMA)
+            self.assertEqual(refused.status_code, 403)
+            self.assertNotIn("openapi", refused.content.decode())
 
-@ENABLED
-class SignInTests(TestCase):
-    def setUp(self):
-        cache.clear()
+    def test_signing_out_of_the_dashboard_ends_documentation_access_at_once(self):
+        _, token = dashboard_user()
+        client = granted(token)
+        dashboard = APIClient()
+        dashboard.credentials(HTTP_AUTHORIZATION=f"Token {token.key}")
+        self.assertEqual(dashboard.post("/api/auth/logout/").status_code, 204)
+        self.assertEqual(client.get(DOCS)["Location"], ENTRY)
+        self.assertEqual(client.get(SCHEMA).status_code, 403)
 
-    def test_staff_sign_in_opens_the_documentation_and_sign_out_closes_it(self):
-        account("docs-staff")
-        client = Client()
-        page = client.get(LOGIN, {"next": DOCS})
-        self.assertEqual(page.status_code, 200)
-        self.assertContains(page, 'name="csrfmiddlewaretoken"')
-        self.assertIn("default-src 'none'", page["Content-Security-Policy"])
-        response = client.post(LOGIN, {"username": "docs-staff", "password": PASSWORD, "next": SCHEMA})
-        self.assertEqual((response.status_code, response["Location"]), (302, SCHEMA))
-        self.assertEqual(client.get(DOCS).status_code, 200)
-        self.assertEqual(client.post(LOGOUT)["Location"], LOGIN)
+    def test_a_new_token_a_deactivated_user_or_an_hour_later_ends_access(self):
+        user, token = dashboard_user()
+        client = granted(token)
+        token.delete()
+        Token.objects.create(user=user)
         self.assertEqual(client.get(DOCS).status_code, 302)
 
-    def test_a_correct_password_without_staff_status_or_a_wrong_password_signs_nobody_in(self):
-        account("docs-learner", staff=False)
-        account("docs-staff")
-        for username, password in (("docs-learner", PASSWORD), ("docs-staff", "wrong-password")):
-            client = Client()
-            response = client.post(LOGIN, {"username": username, "password": password})
-            self.assertEqual(response.status_code, 200, username)
-            self.assertContains(response, "staff account")
-            self.assertEqual(client.get(DOCS).status_code, 302, username)
+        user, token = dashboard_user("docs-leaver")
+        client = granted(token)
+        user.is_active = False
+        user.save()
+        self.assertEqual(client.get(DOCS).status_code, 302)
 
-    def test_an_https_sign_in_behind_the_proxy_needs_the_trusted_origin(self):
-        """Django sees plain HTTP behind the TLS proxy, so the HTTPS form's Origin must be trusted."""
-        account("docs-staff")
-        for trusted, expected in (([], 403), (["https://testserver"], 302)):
-            with override_settings(CSRF_TRUSTED_ORIGINS=trusted):
-                client = Client(enforce_csrf_checks=True)
-                client.get(LOGIN)
-                response = client.post(LOGIN, {"username": "docs-staff", "password": PASSWORD,
-                                               "csrfmiddlewaretoken": client.cookies["csrftoken"].value},
-                                       HTTP_ORIGIN="https://testserver")
-                self.assertEqual(response.status_code, expected, trusted)
+        _, token = dashboard_user("docs-reader")
+        client = granted(token)
+        self.assertEqual(client.get(DOCS).status_code, 200)
+        later = time.time() + api_docs.GRANT_SECONDS + 1
+        with mock.patch("operations.api_docs.time.time", return_value=later):
+            self.assertEqual(client.get(DOCS).status_code, 302)
+            self.assertEqual(client.get(SCHEMA).status_code, 403)
+
+    def test_the_grant_rides_a_fresh_httponly_session_and_signs_nobody_in_to_django(self):
+        _, token = dashboard_user()
+        client = Client()
+        session = client.session
+        session["sso_pending"] = "kept"                 # whatever the session already held (e.g. a sign-in)
+        session.save()
+        before = session.session_key
+        client.cookies[settings.SESSION_COOKIE_NAME] = before
+        response = client.post(SESSION, HTTP_AUTHORIZATION=f"Token {token.key}")
+        cookie = response.cookies[settings.SESSION_COOKIE_NAME]
+        self.assertNotEqual(cookie.value, before)
+        self.assertTrue(cookie["httponly"])
+        self.assertEqual(cookie["samesite"], "Lax")
+        stored = client.session
+        self.assertEqual(stored["sso_pending"], "kept")
+        self.assertNotIn("_auth_user_id", stored)       # not a Django sign-in
+        self.assertEqual(stored[api_docs.GRANT]["token"], hashlib.sha256(token.key.encode()).hexdigest())
+        self.assertEqual(client.get("/api/auth/me/").status_code, 401)      # no API accepts the session
+
+    def test_no_token_reaches_a_response_a_url_or_a_log(self):
+        _, token = dashboard_user()
+        with self.assertLogs(level="DEBUG") as logs:
+            logging.getLogger("docs-test").debug("start")
+            client = Client()
+            grant = client.post(SESSION, HTTP_AUTHORIZATION=f"Token {token.key}")
+            Client().post(SESSION, HTTP_AUTHORIZATION="Token not-a-dashboard-token")
+            served = [grant, client.get(DOCS), client.get(SCHEMA), Client().get(DOCS)]
+        self.assertEqual(grant.content, b"")
+        for response in served:
+            text = response.content.decode() + json.dumps(dict(response.items()))
+            self.assertNotIn(token.key, text)
+            self.assertNotIn("not-a-dashboard-token", text)
+        self.assertNotIn(token.key, "\n".join(logs.output))
+        self.assertNotIn("not-a-dashboard-token", "\n".join(logs.output))
 
 
 @ENABLED
 class PageTests(TestCase):
     def setUp(self):
-        self.response = signed_in(account("docs-staff")).get(DOCS)
+        _, token = dashboard_user()
+        self.response = granted(token).get(DOCS)
         self.html = self.response.content.decode()
 
     def test_swagger_ui_is_one_pinned_release_with_subresource_integrity(self):
@@ -167,12 +210,14 @@ class PageTests(TestCase):
                         "validatorUrl: null", f'url: "{SCHEMA}"'):
             self.assertIn(setting, self.html)
         self.assertIn(".swagger-ui .auth-wrapper", self.html)
+        self.assertNotIn("<form", self.html)
 
     def test_the_page_is_locked_down(self):
         policy = self.response["Content-Security-Policy"]
         nonce = re.search(r"'nonce-([^']+)'", policy).group(1)
         self.assertIn(f'<script nonce="{nonce}">', self.html)
-        for directive in ("default-src 'none'", "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'"):
+        for directive in ("default-src 'none'", "connect-src 'self'", "form-action 'none'", "frame-ancestors 'none'",
+                          "base-uri 'none'"):
             self.assertIn(directive, policy)
         self.assertNotIn("unsafe-eval", policy)
         self.assertNotRegex(policy.split("script-src")[1].split(";")[0], r"'unsafe-inline'|\*")
@@ -183,13 +228,14 @@ class PageTests(TestCase):
                        SOCIAL_MEDIA_SERVICE_TOKEN="social-secret-sentinel-" + "y" * 32,
                        SECRET_KEY="django-secret-sentinel-" + "z" * 40)
     def test_no_configured_secret_reaches_the_page_or_the_document(self):
-        client = signed_in(account("docs-staff-2"))
+        _, token = dashboard_user("docs-user-2")
+        client = granted(token)
         served = client.get(DOCS).content.decode() + client.get(SCHEMA).content.decode()
         for sentinel in ("lms-secret-sentinel", "social-secret-sentinel", "django-secret-sentinel"):
             self.assertNotIn(sentinel, served)
 
 
-# =========================================================================== plain HTTP and password guessing
+# =========================================================================== plain HTTP
 class HttpsOnlyTests(SimpleTestCase):
     """Every docs route Django serves is covered by the web server's plain-HTTP rules."""
     DOMAIN = "positive-moments.kentbusinesscollege.net"
@@ -197,9 +243,9 @@ class HttpsOnlyTests(SimpleTestCase):
     def docs_routes(self):
         return sorted(r for r in all_routes() if r.startswith(("/api/docs", "/api/schema")))
 
-    def test_no_docs_route_is_served_or_accepts_a_form_over_plain_http(self):
+    def test_no_docs_route_is_served_or_accepts_a_request_body_over_plain_http(self):
         rules = HTTPS_RULES.block(self.DOMAIN)
-        self.assertEqual(self.docs_routes(), [DOCS, LOGIN, LOGOUT, SCHEMA])
+        self.assertEqual(self.docs_routes(), [DOCS, SESSION, SCHEMA])
         for route in self.docs_routes():
             for method in ("GET", "HEAD"):
                 self.assertEqual(evaluate(rules, port=80, method=method, uri=route),
@@ -208,68 +254,13 @@ class HttpsOnlyTests(SimpleTestCase):
                 self.assertEqual(evaluate(rules, port=80, method=method, uri=route), ("403", None), (method, route))
             for method in ("GET", "POST"):
                 self.assertEqual(evaluate(rules, port=443, method=method, uri=route), ("pass", None), (method, route))
+        self.assertEqual(evaluate(rules, port=80, method="GET", uri=ENTRY), ("301", f"https://{self.DOMAIN}{ENTRY}"))
 
     def test_the_lms_api_rules_are_unchanged(self):
         rules = HTTPS_RULES.block(self.DOMAIN)
         for route in (r for r in all_routes() if r.startswith(LMS_BASE + "/")):
             self.assertEqual(evaluate(rules, port=80, method="GET", uri=route), ("403", None), route)
             self.assertEqual(evaluate(rules, port=443, method="GET", uri=route), ("pass", None), route)
-
-
-@ENABLED
-class SignInRateLimitTests(TestCase):
-    def setUp(self):
-        cache.clear()
-        account("docs-staff")
-
-    def sign_in(self, username="docs-staff", password=PASSWORD, address="203.0.113.7"):
-        client = Client(REMOTE_ADDR=address)
-        return client, client.post(LOGIN, {"username": username, "password": password})
-
-    def fail(self, times, username="docs-staff", address="203.0.113.7"):
-        for _ in range(times):
-            self.assertEqual(self.sign_in(username, "wrong-password", address)[1].status_code, 200)
-
-    def test_five_failures_lock_the_username_without_checking_the_password(self):
-        self.fail(api_docs.MAX_FAILED_PER_USERNAME)
-        with mock.patch("django.contrib.auth.forms.authenticate") as checked:
-            client, response = self.sign_in(address="198.51.100.9")
-        checked.assert_not_called()
-        self.assertEqual((response.status_code, response["Retry-After"]), (429, str(api_docs.FAILED_SIGN_IN_WINDOW)))
-        self.assertContains(response, "Too many failed sign-in attempts", status_code=429)
-        self.assertIn("default-src 'none'", response["Content-Security-Policy"])
-        self.assertEqual(client.get(DOCS).status_code, 302)                     # not signed in
-        account("docs-other")
-        self.assertEqual(self.sign_in("docs-other")[1].status_code, 302)       # other accounts unaffected
-        self.assertEqual(self.sign_in("DOCS-STAFF ")[1].status_code, 429)      # same username, any spelling
-
-    def test_one_client_address_has_a_ceiling_across_usernames(self):
-        for index in range(api_docs.MAX_FAILED_PER_ADDRESS):
-            self.fail(1, username=f"guess-{index}")
-        self.assertEqual(self.sign_in()[1].status_code, 429)
-        self.assertEqual(self.sign_in(address="198.51.100.9")[1].status_code, 302)
-
-    def test_a_successful_sign_in_clears_its_username_count(self):
-        self.fail(api_docs.MAX_FAILED_PER_USERNAME - 1)
-        self.assertEqual(self.sign_in()[1].status_code, 302)
-        self.fail(api_docs.MAX_FAILED_PER_USERNAME - 1)
-        self.assertEqual(self.sign_in()[1].status_code, 302)
-
-    def test_the_lock_ends_with_the_window(self):
-        self.fail(api_docs.MAX_FAILED_PER_USERNAME)
-        self.assertEqual(self.sign_in()[1].status_code, 429)
-        later = time.time() + api_docs.FAILED_SIGN_IN_WINDOW + 1
-        with mock.patch("django.core.cache.backends.locmem.time.time", return_value=later):
-            self.assertEqual(self.sign_in()[1].status_code, 302)
-
-    @override_settings(**LMS)
-    @mock.patch("operations.lms_api.reading", fake_connection)
-    def test_the_lms_api_is_not_limited_by_docs_sign_in_failures(self):
-        for index in range(api_docs.MAX_FAILED_PER_ADDRESS):
-            self.fail(1, username=f"guess-{index}", address="127.0.0.1")
-        lms = APIClient(REMOTE_ADDR="127.0.0.1")
-        lms.credentials(HTTP_AUTHORIZATION=f"Bearer {TOKEN}")
-        self.assertEqual(lms.get(routes()[2]).status_code, 200)
 
 
 # =========================================================================== the document

@@ -10,8 +10,8 @@
     body { margin: 0; background: #fafafa; }
     .docs-bar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center;
                 padding: 10px 20px; background: #1f2a44; color: #fff; font: 14px/1.4 system-ui, sans-serif; }
-    .docs-bar form { margin: 0; display: flex; gap: 10px; align-items: center; }
-    .docs-bar button { font: inherit; color: #1f2a44; background: #fff; border: 0; border-radius: 4px; padding: 4px 12px; cursor: pointer; }
+    .docs-user { display: flex; gap: 12px; align-items: center; }
+    .docs-bar a { color: #1f2a44; background: #fff; border-radius: 4px; padding: 4px 12px; text-decoration: none; }
     /* Reading only: this page never sends a request to the API, so no token is ever entered here. */
     .swagger-ui .auth-wrapper, .swagger-ui .authorization__btn { display: none !important; }
   </style>
@@ -19,11 +19,7 @@
 <body>
   <div class="docs-bar">
     <span>KBC Publisher LMS API &middot; contract v1 &middot; internal documentation</span>
-    <form method="post" action="{% url 'api-docs-logout' %}">
-      {% csrf_token %}
-      <span>{{ request.user.get_username }}</span>
-      <button type="submit">Sign out</button>
-    </form>
+    <span class="docs-user"><span>{{ username }}</span><a href="/">Back to the Dashboard</a></span>
   </div>
   <div id="swagger-ui" data-swagger-ui-version="{{ version }}"></div>
   <script src="{{ js_url }}" integrity="{{ js_integrity }}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>

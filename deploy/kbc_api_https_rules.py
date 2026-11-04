@@ -5,8 +5,8 @@ deploy/harden_api_https.sh (`apply`). HTTPS is never touched. On the plain-HTTP 
   * /api/publisher/...              403 from OpenLiteSpeed: a Bearer token sent over HTTP is already
                                     exposed, and following a redirect would send it again;
   * /api/docs..., /api/schema...    GET/HEAD: 301 to the same path on https://. Any other method: 403.
-                                    The staff sign-in form is never served, and a submitted password
-                                    never processed, over HTTP; Django is not reached;
+                                    No documentation page is served, and no request body processed,
+                                    over HTTP; Django is not reached;
   * any other page (not /api/, not the ACME HTTP-01 path), GET/HEAD: 301 to https://.
 
     python3 deploy/kbc_api_https_rules.py <vhost config file> <domain>    # writes the block in place

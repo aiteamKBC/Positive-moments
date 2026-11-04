@@ -10,9 +10,8 @@ urlpatterns = [
     path("api/social-media/", include("positive_mentions.social_urls")),
     path("api/operations/", include("operations.urls")),
     path("api/publisher/v1/", include("operations.lms_urls")),
-    # Documentation of the LMS API above, for Django staff only and off by default (operations/api_docs.py).
+    # Documentation of the LMS API above, for Dashboard users, off by default (operations/api_docs.py).
     path("api/docs/", api_docs.docs_view, name="api-docs"),
-    path("api/docs/login/", api_docs.login_view, name="api-docs-login"),
-    path("api/docs/logout/", api_docs.logout_view, name="api-docs-logout"),
+    path("api/docs/session/", api_docs.session_view, name="api-docs-session"),
     path("api/schema/", api_docs.schema_view, name="api-schema"),
 ]
