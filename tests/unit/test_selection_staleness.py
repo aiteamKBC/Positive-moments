@@ -70,7 +70,7 @@ def test_6_a_future_recurring_occurrence_does_not_make_an_earlier_one_stale():
     rows = complete_rows(
         selection_candidates=CANDIDATES + [NEXT_WEEK],
         # ...fetched long after this lecture's selection was made.
-        artifacts=[(3, 3, 0, NOW + timedelta(days=7))])
+        artifacts=[(3, 3, 0, NOW + timedelta(days=7), 1, 0)])
     stage = selection_state(rows)
     assert stage["state"] == COMPLETE
     assert stage["relevant_candidate_count"] == 2
@@ -78,13 +78,13 @@ def test_6_a_future_recurring_occurrence_does_not_make_an_earlier_one_stale():
 
 def test_6b_two_later_occurrences_still_leave_it_complete():
     rows = complete_rows(selection_candidates=CANDIDATES + [NEXT_WEEK, WEEK_AFTER],
-                         artifacts=[(4, 4, 0, NOW + timedelta(days=14))])
+                         artifacts=[(4, 4, 0, NOW + timedelta(days=14), 1, 0)])
     assert selection_state(rows)["state"] == COMPLETE
 
 
 def test_7_refetching_identical_content_is_not_new_evidence():
     """Same bytes, same ids, a newer content_fetched_at: nothing changed."""
-    rows = complete_rows(artifacts=[(2, 2, 0, NOW + timedelta(hours=6))])
+    rows = complete_rows(artifacts=[(2, 2, 0, NOW + timedelta(hours=6), 1, 0)])
     result = resolve(rows)
     assert result["stages"][SELECTION]["state"] == COMPLETE
     assert result["next_action"] != SELECT_TRANSCRIPT
@@ -176,7 +176,7 @@ def test_the_resolver_no_longer_compares_fetch_timestamps():
 def test_a_legacy_selection_with_unchanged_evidence_is_complete():
     rows = complete_rows(selection=[selection_row(fingerprint="")],
                          selection_candidates=CANDIDATES + [NEXT_WEEK],
-                         artifacts=[(3, 3, 0, NOW + timedelta(days=7))])
+                         artifacts=[(3, 3, 0, NOW + timedelta(days=7), 1, 0)])
     stage = selection_state(rows)
     assert stage["state"] == COMPLETE
     assert stage["freshness_basis"] == "LEGACY_SELECTION_EQUIVALENCE"

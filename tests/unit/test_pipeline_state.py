@@ -293,7 +293,7 @@ def complete_rows(**overrides) -> dict:
         "duplicate_group": [group_row()],
         "lecture_day": [(LECTURE_ID,)],
         "coverage": [(SNAPSHOT_ID, 12, 12, 12, ATTENDANCE_RESOLUTION_VERSION, 12)],
-        "artifacts": [(2, 2, 0, NOW - timedelta(hours=4))],
+        "artifacts": [(2, 2, 0, NOW - timedelta(hours=4), 2, 0)],
         "occurrence": [(SCHEDULED_START, SCHEDULED_END, SESSION_DATE, "meeting-1")],
         "selection_candidates": list(CANDIDATES),
         "selected_parts": [("transcript-1",), ("transcript-2",)],
@@ -382,7 +382,7 @@ def test_every_stage_reports_a_state_from_the_declared_vocabulary():
 # --- 2..7. the upstream stages ----------------------------------------------
 
 def test_a_missing_transcript_asks_for_the_transcript():
-    result = resolve(complete_rows(artifacts=[(0, 0, 0, None)], selection=[],
+    result = resolve(complete_rows(artifacts=[(0, 0, 0, None, 0, 0)], selection=[],
                                    documents=[], speakers=[(0,)]))
     assert result["stages"][TRANSCRIPT]["state"] == MISSING
     assert result["next_action"] == ACQUIRE_TRANSCRIPT
@@ -390,8 +390,22 @@ def test_a_missing_transcript_asks_for_the_transcript():
 
 
 def test_a_failed_transcript_fetch_is_not_the_same_as_a_missing_one():
-    result = resolve(complete_rows(artifacts=[(2, 0, 2, None)], selection=[],
+    result = resolve(complete_rows(artifacts=[(2, 0, 2, None, 0, 0)], selection=[],
                                    documents=[], speakers=[(0,)]))
+    assert result["stages"][TRANSCRIPT]["state"] == FAILED
+    assert result["next_action"] == ACQUIRE_TRANSCRIPT
+
+
+def test_a_failed_refresh_of_stored_content_is_not_a_failed_transcript():
+    """AI in Project Control 2026-11-06: every artifact CONTENT_FETCH_ERROR after a refresh, all with content."""
+    result = resolve(complete_rows(artifacts=[(9, 9, 0, NOW - timedelta(hours=4), 1, 0)]))
+    assert result["stages"][TRANSCRIPT]["state"] == COMPLETE
+
+
+def test_a_day_with_no_content_fails_although_other_weeks_are_stored():
+    """Ray MSP 2026-11-06: nine earlier weeks stored, the day's own transcript never fetched."""
+    result = resolve(complete_rows(artifacts=[(10, 9, 1, NOW - timedelta(hours=4), 0, 1)],
+                                   selection=[], documents=[], speakers=[(0,)]))
     assert result["stages"][TRANSCRIPT]["state"] == FAILED
     assert result["next_action"] == ACQUIRE_TRANSCRIPT
 
@@ -412,7 +426,7 @@ def test_transcript_content_arriving_after_the_selection_makes_it_stale():
     """
     late = candidate_row("transcript-3", SCHEDULED_START + timedelta(minutes=125),
                          SCHEDULED_END + timedelta(minutes=30), sha="3" * 64)
-    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1))],
+    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1), 3, 0)],
                          selection_candidates=CANDIDATES + [late])
     result = resolve(rows)
     assert result["stages"][SELECTION]["state"] == STALE
@@ -928,7 +942,7 @@ def test_the_earliest_incomplete_stage_wins_not_the_most_severe():
     A lecture with a missing transcript AND a missing render has one real
     problem, and it is not the render.
     """
-    rows = complete_rows(artifacts=[(0, 0, 0, None)], selection=[], documents=[],
+    rows = complete_rows(artifacts=[(0, 0, 0, None, 0, 0)], selection=[], documents=[],
                          speakers=[(0,)], rendered=[], qa_writes=[],
                          legacy_writes_state=[])
     result = resolve(rows)

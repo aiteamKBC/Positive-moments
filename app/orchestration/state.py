@@ -221,14 +221,28 @@ SELECT l.lecture_id
 # Artifacts are provider-scoped since migration 006: one Graph transcript can
 # legitimately belong to several lectures, so the lecture link lives in
 # lecture_transcript_candidates and the join goes through it.
+#
+# "Stored" is a held content version, not the status word: a failed refresh
+# (mark_content_failure) sets CONTENT_FETCH_ERROR on an artifact whose bytes
+# are still stored and still selected - the 2026-11 channel-meeting 400s turned
+# finished lectures FAILED that way. A fetch failure counts only while it has
+# no content, and it fails the stage only when the lecture's own Cairo day
+# holds no content at all (MSP 2026-11-06: nothing for the day, though every
+# earlier week of the series is stored).
 ARTIFACTS = """
 SELECT count(*)::int AS total,
-       count(*) FILTER (WHERE a.artifact_status = ANY(%s))::int AS stored,
-       count(*) FILTER (WHERE a.artifact_status = ANY(%s))::int AS failed,
-       max(a.content_fetched_at) AS newest_content_at
+       count(*) FILTER (WHERE a.artifact_status = ANY(%(stored)s)
+                           OR a.content_version > 0)::int AS stored,
+       count(*) FILTER (WHERE a.artifact_status = ANY(%(failed)s)
+                          AND a.content_version = 0)::int AS failed,
+       max(a.content_fetched_at) AS newest_content_at,
+       count(*) FILTER (WHERE (a.provider_created_at AT TIME ZONE 'Africa/Cairo')::date = %(day)s::date
+                          AND (a.artifact_status = ANY(%(stored)s) OR a.content_version > 0))::int AS day_stored,
+       count(*) FILTER (WHERE (a.provider_created_at AT TIME ZONE 'Africa/Cairo')::date = %(day)s::date
+                          AND a.artifact_status = ANY(%(failed)s) AND a.content_version = 0)::int AS day_failed
   FROM public.lecture_transcript_candidates c
   JOIN public.lecture_transcript_artifacts a ON a.artifact_id = c.artifact_id
- WHERE c.lecture_id = %s
+ WHERE c.lecture_id = %(lecture_id)s
 """
 
 # The newest clean transcript sweep of a day: every ready meeting was asked
@@ -675,13 +689,16 @@ class PipelineStateResolver:
 
     def _transcript(self, connection, lecture):
         row = _fetch(connection, ARTIFACTS,
-                     (list(CONTENT_STORED_STATUSES), list(TRANSCRIPT_FAILED_STATUSES),
-                      lecture["lecture_id"]))[0]
+                     {"stored": list(CONTENT_STORED_STATUSES), "failed": list(TRANSCRIPT_FAILED_STATUSES),
+                      "day": lecture["session_date"], "lecture_id": lecture["lecture_id"]})[0]
         artifacts = {"artifact_count": row[0], "stored_count": row[1],
                      "failed_count": row[2], "newest_content_at": row[3]}
         if lecture["is_cancelled"] and not row[0]:
             return _stage(NOT_APPLICABLE, reason="CANCELLED_SESSION",
                           **artifacts), artifacts
+        if row[5] and not row[4]:
+            # This day's transcript never arrived: other weeks of the series do not stand in for it.
+            return _stage(FAILED, action=ACQUIRE_TRANSCRIPT, **artifacts), artifacts
         if row[1]:
             return _stage(COMPLETE, **artifacts), artifacts
         if row[2]:

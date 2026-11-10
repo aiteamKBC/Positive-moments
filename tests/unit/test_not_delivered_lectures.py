@@ -163,7 +163,7 @@ def test_8_an_empty_transcript_before_the_grace_is_still_retried():
 
 def never_transcribed_rows(*, swept_at, now_after_grace=True):
     return complete_rows(
-        artifacts=[(0, 0, 0, None)],
+        artifacts=[(0, 0, 0, None, 0, 0)],
         selection=[selection_row(status="NO_CANDIDATES", duration_minutes=None,
                                  actual_start=None, actual_end=None,
                                  updated_at=SCHEDULED_END + timedelta(hours=1))],
@@ -202,7 +202,7 @@ def test_11_no_clean_sweep_at_all_does_not_close_it():
 def test_12_a_transcript_that_arrives_later_reopens_the_lecture():
     rows = never_transcribed_rows(
         swept_at=SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(minutes=1))
-    rows["artifacts"] = [(1, 1, 0, SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(hours=1))]
+    rows["artifacts"] = [(1, 1, 0, SCHEDULED_END + NO_TRANSCRIPT_GRACE + timedelta(hours=1), 1, 0)]
     result = resolve(rows)
     assert result["stages"][TRANSCRIPT]["state"] == COMPLETE
     assert result["stages"][TRANSCRIPT].get("reason") != NO_TRANSCRIPT_FOR_OCCURRENCE
