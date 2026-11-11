@@ -5,7 +5,8 @@
  *   Teams -> recording discovery -> LMS match -> Bunny import -> encoding verification
  *         -> automatic release -> LMS delivery API
  *
- * Every number is a count of LECTURES whose Africa/Cairo date is in the range; each KPI card is also
+ * Every number is a count of LECTURES whose Africa/Cairo date is the selected day (one business day,
+ * moved with the same day navigation as Operations, kept in `?date=`); each KPI card is also
  * the filter for the rows behind it (the backend uses one predicate for both). Health is read from
  * fresh heartbeats: an old record is shown as "Not running", never as healthy, and a health read that
  * fails is shown as unavailable - never green.
@@ -27,46 +28,36 @@ import PageHeader from '../components/PageHeader.vue'
 import SectionPanel from '../components/SectionPanel.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import TabNav from '../components/TabNav.vue'
+import DateNav from '../components/operations/DateNav.vue'
 import HistoricalBackfillPanel from '../components/publishing/HistoricalBackfillPanel.vue'
 import PublisherAlertsPanel from '../components/publishing/PublisherAlertsPanel.vue'
 import PublishingLectureDrawer from '../components/publishing/PublishingLectureDrawer.vue'
 import { getPublisherAlerts, getPublisherHealth, getPublishingLectures, getPublishingSummary } from '../services/publishing'
 import type { PublisherAlerts, PublisherHealth, PublishingFilters, PublishingPage, PublishingSummary } from '../types/publishing'
-import { businessDate, cairoDateTime, cairoTimeRange, shiftBusinessDate, sinceNow } from '../utils/datetime'
+import { businessDate, cairoDateTime, cairoTimeRange, sinceNow } from '../utils/datetime'
 import { errorMessage } from '../utils/format'
 import { age, CAPTIONS, label, MONITOR_STATE, newAlertCounts, TRANSCRIPT } from '../utils/publishing'
+import { cairoToday, dayFromQuery, dayNavigation, isBusinessDate } from '../utils/publishingDay'
 
 const REFRESH_MS = 60_000
 const PAGE_SIZE = 25
-const MAX_DAYS = 31
 
 const route = useRoute()
 const router = useRouter()
 const text = (name: string) => (typeof route.query[name] === 'string' ? (route.query[name] as string) : '')
 
-function cairoToday(): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo' }).format(new Date())
+/** Today in Africa/Cairo; re-read on every refresh so an open page follows midnight. */
+const today = ref(cairoToday())
+/** The day the user chose, or null for "today" (then the URL carries no date). */
+const chosenDay = ref<string | null>(null)
+{
+  const fromUrl = dayFromQuery(route.query, today.value)
+  chosenDay.value = fromUrl === today.value ? null : fromUrl
 }
-
-type Preset = 'today' | 'yesterday' | 'last7' | 'custom'
-const preset = ref<Preset>((['today', 'yesterday', 'last7', 'custom'] as const).find(p => p === text('range')) ?? 'today')
-const customFrom = ref(text('from') || cairoToday())
-const customTo = ref(text('to') || cairoToday())
-
-const range = computed(() => {
-  const today = cairoToday()
-  if (preset.value === 'yesterday') return { from: shiftBusinessDate(today, -1), to: shiftBusinessDate(today, -1) }
-  if (preset.value === 'last7') return { from: shiftBusinessDate(today, -6), to: today }
-  if (preset.value === 'custom') return { from: customFrom.value, to: customTo.value }
-  return { from: today, to: today }
-})
-const rangeProblem = computed(() => {
-  const { from, to } = range.value
-  if (!from || !to) return 'Choose both dates.'
-  if (to < from) return 'The end date is before the start date.'
-  if ((Date.parse(to) - Date.parse(from)) / 86_400_000 + 1 > MAX_DAYS) return `Choose at most ${MAX_DAYS} days.`
-  return ''
-})
+const selectedDay = computed(() => chosenDay.value ?? today.value)
+const navigation = computed(() => dayNavigation(selectedDay.value, today.value))
+/** The API takes a range; one business day is the range from that day to the same day. */
+const range = computed(() => ({ from: selectedDay.value, to: selectedDay.value }))
 
 const filters = ref<PublishingFilters>({
   q: text('q'), kpi: text('kpi'), state: text('state'), video: text('video'), playback: text('playback'),
@@ -118,8 +109,12 @@ async function loadHealth() {
   }
 }
 
+/** Only the newest request may fill the page: a slow answer for an earlier day never overwrites a later one. */
+let latestRequest = 0
+
 async function loadData(quiet: boolean) {
-  if (rangeProblem.value || tab.value !== 'monitor') return
+  if (tab.value !== 'monitor') return
+  const request = ++latestRequest
   if (!quiet) loading.value = true
   try {
     const { from, to } = range.value
@@ -127,35 +122,44 @@ async function loadData(quiet: boolean) {
       getPublishingSummary(from, to),
       getPublishingLectures(from, to, filters.value, page.value, PAGE_SIZE),
     ])
+    if (request !== latestRequest) return
     summary.value = nextSummary
     table.value = nextTable
     error.value = ''
   } catch (caught) {
+    if (request !== latestRequest) return
     error.value = errorMessage(caught, 'The publishing monitor could not be loaded.')
   } finally {
-    loading.value = false
+    if (request === latestRequest) loading.value = false
   }
 }
 
 async function refresh(quiet = true) {
+  today.value = cairoToday()
   refreshing.value = true
   await Promise.all([loadHealth(), loadAlerts(), loadData(quiet)])
   refreshedAt.value = new Date().toISOString()
   refreshing.value = false
 }
 
-function syncQuery() {
+/** A day change adds a history entry (Back returns to the previous day); filters and paging replace it. */
+function syncQuery(push = false) {
   if (tab.value !== 'monitor') return
   const f = filters.value
-  router.replace({ query: {
-    range: preset.value === 'today' ? undefined : preset.value,
-    from: preset.value === 'custom' ? customFrom.value : undefined,
-    to: preset.value === 'custom' ? customTo.value : undefined,
+  const query = {
+    date: chosenDay.value ?? undefined,
     q: f.q || undefined, kpi: f.kpi || undefined, state: f.state || undefined, video: f.video || undefined,
     playback: f.playback || undefined, captions: f.captions || undefined, transcript: f.transcript || undefined,
     attention: f.attention ? '1' : undefined, page: page.value > 1 ? String(page.value) : undefined,
     lecture: openLecture.value ?? undefined,
-  } })
+  }
+  if (push) router.push({ query })
+  else router.replace({ query })
+}
+
+function navigate(date: string) {
+  if (!isBusinessDate(date)) return
+  chosenDay.value = date === today.value ? null : date
 }
 
 function resetFilters() {
@@ -172,11 +176,23 @@ watch(search, (value) => {
   if (searchDelay) clearTimeout(searchDelay)
   searchDelay = setTimeout(() => { filters.value = { ...filters.value, q: value.trim() } }, 350)
 })
-watch([preset, customFrom, customTo], () => { page.value = 1; syncQuery(); loadData(false) })
+watch(selectedDay, (now, before) => {
+  if (now === before) return
+  page.value = 1
+  // A day the URL already names (Back / Forward) needs no new history entry.
+  if (dayFromQuery(route.query, today.value) !== now) syncQuery(true)
+  loadData(false)
+})
+// Browser Back / Forward between days. The Historical Backfill tab carries no date, so leaving it is not a day change.
+watch(() => route.query.date, () => {
+  if (tab.value !== 'monitor') return
+  const day = dayFromQuery(route.query, today.value)
+  chosenDay.value = day === today.value ? null : day
+})
 watch(filters, () => { page.value = 1; syncQuery(); loadData(true) }, { deep: true })
 watch(page, () => { syncQuery(); loadData(true) })
-watch(openLecture, syncQuery)
-watch(tab, (now) => { if (now === 'monitor') loadData(false) })
+watch(openLecture, () => syncQuery())
+watch(tab, (now) => { if (now === 'monitor') { syncQuery(); loadData(false) } })
 
 function onVisibility() {
   if (document.visibilityState === 'visible') refresh()
@@ -316,27 +332,9 @@ const KPI_TONE: Record<string, string> = {
     <HistoricalBackfillPanel v-if="tab === 'backfill'" />
 
     <template v-if="tab === 'monitor'">
-      <!-- Range -->
-      <section class="flex flex-wrap items-center gap-2" aria-label="Date range">
-        <div class="inline-flex rounded-lg border border-line bg-white p-0.5" role="group">
-          <button
-            v-for="option in ([['today', 'Today'], ['yesterday', 'Yesterday'], ['last7', 'Last 7 days'], ['custom', 'Custom']] as const)"
-            :key="option[0]" type="button"
-            class="rounded-md px-3 py-1.5 text-[0.8125rem] font-semibold transition"
-            :class="preset === option[0] ? 'bg-brand-700 text-white' : 'text-muted hover:text-brand-700'"
-            :aria-pressed="preset === option[0]" @click="preset = option[0]"
-          >
-            {{ option[1] }}
-          </button>
-        </div>
-        <template v-if="preset === 'custom'">
-          <label class="filter-field"><span class="filter-label">From</span><input v-model="customFrom" type="date" class="field field-sm"></label>
-          <label class="filter-field"><span class="filter-label">To</span><input v-model="customTo" type="date" class="field field-sm"></label>
-        </template>
-        <span class="text-sm text-muted">
-          {{ businessDate(range.from) }}<template v-if="range.to !== range.from"> – {{ businessDate(range.to) }}</template> · Cairo time
-        </span>
-        <p v-if="rangeProblem" class="notice-error w-full">{{ rangeProblem }}</p>
+      <!-- Day: the same navigation as Operations, one Africa/Cairo business day at a time -->
+      <section aria-label="Business day">
+        <DateNav :navigation="navigation" :loading="loading" @navigate="navigate" />
       </section>
 
       <LoadingSkeleton v-if="loading" variant="cards" :rows="8" />
@@ -359,7 +357,7 @@ const KPI_TONE: Record<string, string> = {
               <p class="tile-label !text-white/75">{{ kpi.label }}</p>
               <p class="tile-value !text-4xl !text-white">{{ kpi.count }}</p>
               <p class="tile-note !text-white/75">
-                of {{ summary.total }} lecture{{ summary.total === 1 ? '' : 's' }} in range · {{ releasedCount }} released
+                of {{ summary.total }} lecture{{ summary.total === 1 ? '' : 's' }} on this day · {{ releasedCount }} released
               </p>
             </template>
             <template v-else>
@@ -441,8 +439,8 @@ const KPI_TONE: Record<string, string> = {
         >
           <EmptyState
             v-if="!table?.results.length" compact tone="neutral" icon="inbox"
-            :title="summary.total ? 'No lecture matches these filters' : 'No lectures in this range'"
-            :message="summary.total ? 'Change or reset the filters.' : 'No lecture was discovered for these dates.'"
+            :title="summary.total ? 'No lecture matches these filters' : 'No lectures on this day'"
+            :message="summary.total ? 'Change or reset the filters.' : 'No lecture was discovered for this date.'"
           />
           <div v-else class="overflow-x-auto">
             <table class="data-table">
@@ -506,7 +504,7 @@ const KPI_TONE: Record<string, string> = {
         </SectionPanel>
 
         <p class="text-2xs text-faint">
-          Counts are lectures (never video parts or job attempts) dated in the range in Cairo time. Data generated {{ cairoDateTime(summary.generated_at) }} from the publisher database; nothing on this page calls Teams or Bunny.
+          Counts are lectures (never video parts or job attempts) dated on this day in Cairo time. Data generated {{ cairoDateTime(summary.generated_at) }} from the publisher database; nothing on this page calls Teams or Bunny.
         </p>
       </template>
     </template>
