@@ -77,6 +77,25 @@ def qa_source_fingerprint(*, package: dict, model: str,
         f"snapshot:{package['attendance_snapshot_id']}",
         f"engagement:{package['engagement_id']}:{package['engagement_source_fingerprint']}",
     ]
+    delivery = package.get("delivery")
+    if delivery is not None and delivery.departs_from_legacy:
+        # Appended ONLY when the versioned delivery policy decides differently
+        # from the legacy duration gate. Every evaluation the legacy gate would
+        # produce keeps its exact fingerprint, so nothing already paid for is
+        # orphaned into buying itself again - while a reclassified lecture gets
+        # NEW provenance beside its old answer instead of overwriting it.
+        # Keyed on the RULE that departed, so a v1 coverage review keeps the
+        # provenance it was written under after the speech guard (v2) arrived.
+        lines.append(f"delivery:{delivery.rule_version}"
+                     f":{delivery.classification}")
+    if package.get("attendance_source_authoritative") is False:
+        # Appended ONLY when the attendance source has not answered. Every
+        # evaluation built on authoritative attendance keeps its exact
+        # fingerprint; an answer built without attendance is a different
+        # evaluation - its engagement values are UNKNOWN, not zero - and gets
+        # its own provenance instead of reusing one that carried a fabricated
+        # zero.
+        lines.append(f"attendance:{ATTENDANCE_POLICY_VERSION}:{ATTENDANCE_PENDING}")
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
@@ -124,6 +143,27 @@ def qa_model_input_fingerprint(*, package: dict, model: str,
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
+# Attendance is enrichment, not a precondition of QA. When the attendance source
+# has not answered, QA runs from the transcript alone and every value that only
+# attendance can supply is left UNKNOWN (NULL) - never zero, because "nobody
+# was counted" and "nobody attended" are different facts. Item 7 stays the
+# model's own answer until authoritative attendance licenses the deterministic
+# override.
+ATTENDANCE_POLICY_VERSION = "attendance_optional_qa_v1"
+ATTENDANCE_PENDING = "PENDING_ATTENDANCE"
+ATTENDANCE_PENDING_LABEL = "Attendance pending"
+ATTENDANCE_DERIVED_FIELDS = ("attended_count", "spoke_count", "engagement_percentage",
+                             "engagement_score", "learner_engagement_status")
+
+
+def attendance_flag(authoritative) -> dict:
+    """The informational attendance flag. Never a QA outcome."""
+    pending = authoritative is False
+    return {"attendance_flag": ATTENDANCE_PENDING if pending else None,
+            "attendance_flag_label": ATTENDANCE_PENDING_LABEL if pending else None,
+            "attendance_policy_version": ATTENDANCE_POLICY_VERSION}
+
+
 def preview(package: dict) -> dict:
     """
     A safe, printable description of one QA input.
@@ -140,6 +180,8 @@ def preview(package: dict) -> dict:
         "meeting_id": package["meeting_id"],
         "duration_minutes": package["duration_minutes"],
         "delivery_status": package["delivery_status"],
+        "delivery_classification_reason": (package["delivery"].reason
+                                           if package.get("delivery") else None),
         "transcript_bytes": package["combined_content_bytes"],
         "transcript_cue_count": package["cue_count"],
         "start_difference_minutes": package["start_difference_minutes"],
@@ -152,6 +194,7 @@ def preview(package: dict) -> dict:
         "engagement_score": package["engagement_score"],
         "learner_engagement_status": package["learner_engagement_status"],
         "item7_override_applied": package["item7_override_applied"],
+        "attendance_flag": package.get("attendance_flag"),
         "engagement_calculation_status": package["engagement_calculation_status"],
         "attendance_roster_version": package["attendance_roster_version"],
         # Length only: the trainer's name is never printed.

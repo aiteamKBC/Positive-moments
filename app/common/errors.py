@@ -13,6 +13,7 @@ ONLINE_MEETING_QUERY_ERROR = "online_meeting_query_error"
 INVALID_CALENDAR_EVENT = "invalid_calendar_event"
 ACTIVE_GROUP_QUERY_ERROR = "active_group_query_error"
 NO_ACTIVE_APTEM_GROUPS = "no_active_aptem_groups"
+LMS_MODULE_QUERY_ERROR = "lms_module_query_error"
 GROUP_NOT_MATCHED = "group_not_matched"
 DATABASE_ERROR = "database_error"
 

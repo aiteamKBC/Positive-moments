@@ -1,0 +1,566 @@
+"""
+Several Teams recordings of one lecture: the LONGEST is imported and delivered (2026-10-28).
+
+The real daemon, recording worker, Bunny workers, delivery, reconciler and operator re-selection against
+the isolated test database, with fake Graph / LMS / Bunny. Covers the 2026-10-27 shapes (a ~3 min false
+start next to the ~2 h lecture), a lecture imported before the rule (the short video already in Bunny,
+deleted by hand afterwards), and idempotent re-runs: nothing re-uploaded, nothing deleted by the publisher.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+
+import psycopg
+
+from app.db.repositories.publisher_ops import PartDecisionRepository
+from app.publisher import delivery, reselection
+from app.publisher.operations import OperatorActionRefused
+from app.publisher.recordings import RecordingPolicy, RecordingWorker
+from tests.integration.test_publisher_delivery import act
+from tests.integration.test_publisher_runtime import (  # noqa: F401 - fixtures
+    END, START, World, _isolated, url,
+)
+from tests.unit.publisher_fakes import LIBRARY_ID
+
+ACTOR, REASON = "ops-test", "2026-10-27 false start imported instead of the lecture"
+
+
+def _connect(world):
+    return lambda: psycopg.connect(world.url, prepare_threshold=None)
+
+
+def _worker(world):
+    return RecordingWorker(connect=_connect(world), graph=world.rgraph, discovery_factory=world.rgraph.discovery,
+                           evidence_reader=world.rgraph.reader(), clock=world.clock,
+                           policy=RecordingPolicy(lock_timeout_ms=500))
+
+
+def _marketing(world):
+    """~3 min false start, then the ~2 h lecture (a new Teams call)."""
+    world.part(START, START + timedelta(minutes=3), call_id="call-a")
+    world.part(START + timedelta(minutes=5), END + timedelta(minutes=3), call_id="call-b")
+
+
+def _decide(world, **decisions):
+    with psycopg.connect(world.url, autocommit=True) as c:
+        for part, decision in decisions.items():
+            PartDecisionRepository().decide(c, world.lecture_id, int(part[1:]), decision=decision,
+                                            reason="seed", actor=ACTOR)
+
+
+def _before_the_rule(world):
+    """The shape of a lecture located before the rule: no selection on record, every part counted."""
+    with psycopg.connect(world.url, autocommit=True) as c:
+        c.execute("DELETE FROM public.bunny_publisher_part_decisions WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("""UPDATE public.bunny_recording_discoveries d
+                        SET metadata = d.metadata - 'recording_selection',
+                            expected_part_count = s.n, located_part_count = s.n, missing_part_count = 0
+                       FROM (SELECT count(*)::int AS n FROM public.bunny_recording_sources
+                              WHERE lecture_id = %s AND locate_status = 'LOCATED') s
+                      WHERE d.lecture_id = %s""", (world.lecture_id, world.lecture_id))
+
+
+def _view(world):
+    with psycopg.connect(world.url) as c:
+        c.read_only = True
+        return delivery.lecture_delivery(c, world.lecture_id, library_id=LIBRARY_ID)
+
+
+def _plan(world):
+    return reselection.plan_lecture(_connect(world), _worker(world), world.lecture_id, library_id=LIBRARY_ID)
+
+
+def _apply(world):
+    return reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                             library_id=LIBRARY_ID)
+
+
+def _video_id(world, part):
+    return next(str(v[3]) for v in world.videos(live=True) if v[0] == part)
+
+
+# =========================================================================== new lectures
+def test_the_2_hour_recording_is_imported_never_the_3_minute_false_start(url):
+    world = World(url)
+    _marketing(world)
+    world.run(rounds=12)
+    assert world.ready()
+    [video] = world.videos()
+    assert video[0] == 2 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1
+    view = _view(world)
+    assert [p["source_part_index"] for p in view["parts"]] == [2]
+    assert view["excluded_parts"] == [{"source_part_index": 1, "reason": "OPERATOR_EXCLUDED"}]
+    world.run(rounds=4)                                        # re-running the same lecture changes nothing
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1
+
+
+def test_reselecting_a_correct_lecture_changes_nothing_and_uploads_nothing(url):
+    world = World(url)
+    world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
+    world.run(rounds=10)
+    assert world.ready()
+    plan = _plan(world)
+    assert plan["action"] == reselection.NO_CHANGE and plan["stop_delivering"] == []
+    assert _apply(world)["applied"] is False
+    world.run(rounds=3)
+    assert len(world.bunny.fetch_calls) == 1 and "OPERATOR_RECORDING_RESELECTED" not in world.events()
+
+
+# =========================================================================== imported before the rule
+def test_both_imported_and_released_before_the_rule_reselection_keeps_the_long_video(url):
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE")                              # reproduce the pre-rule import of both
+    world.run(rounds=14)
+    assert sorted(v[0] for v in world.videos(live=True)) == [1, 2]
+    _before_the_rule(world)
+    assert act(world, "release")["changed"]
+    short_video, fetches = _video_id(world, 1), len(world.bunny.fetch_calls)
+
+    plan = _plan(world)                                        # read-only: nothing changed by the preview
+    assert (plan["action"], plan["selection"]["part_index"]) == (reselection.RESELECT_KEEP_VIDEO, 2)
+    assert [(p["part_index"], p["bunny_video_id"], p["visibility"]) for p in plan["stop_delivering"]] == [
+        (1, short_video, "READY_FOR_LMS")]
+    assert "OPERATOR_RECORDING_RESELECTED" not in world.events()
+
+    result = _apply(world)
+    assert result["applied"] and result["selected_part"] == 2
+    view = _view(world)
+    assert [p["source_part_index"] for p in view["parts"]] == [2] and view["release"] == "RELEASED"
+    assert len(world.bunny.fetch_calls) == fetches and not world.bunny.delete_calls   # no upload, no delete
+    assert short_video in world.bunny.videos                   # the publisher never deletes it
+
+    del world.bunny.videos[short_video]                        # the operator deletes it in Bunny
+    summary = world.reconciler.run("FULL")
+    assert summary["video_missing_in_bunny"] == 0 and summary["retired_deleted_unselected_videos"] == 1
+    [(reason, visibility)] = world.q("SELECT retire_reason, visibility_state FROM public.bunny_videos "
+                                     "WHERE bunny_video_id = %s", short_video)
+    assert (reason, visibility) == ("VIDEO_DELETED_IN_BUNNY_PART_NOT_DELIVERED", "WITHDRAWN")
+    assert "VIDEO_RETIRED_DELETED_IN_BUNNY" in world.events() and "OPERATOR_RECORDING_RESELECTED" in world.events()
+
+    world.run(rounds=4)                                        # idempotent: no re-import of either part
+    assert len(world.bunny.fetch_calls) == fetches and [v[0] for v in world.videos(live=True)] == [2]
+    assert _view(world)["release"] == "RELEASED" and _plan(world)["action"] == reselection.NO_CHANGE
+
+
+def test_only_the_short_one_imported_before_the_rule_the_long_one_is_imported_after_reselection(url):
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE", p2="EXCLUDE")                # reproduce: only the 3-minute video in Bunny
+    world.run(rounds=12)
+    assert [v[0] for v in world.videos(live=True)] == [1]
+    _before_the_rule(world)
+    short_video, fetches = _video_id(world, 1), len(world.bunny.fetch_calls)
+
+    assert _plan(world)["action"] == reselection.RESELECT_AND_IMPORT
+    _apply(world)
+    world.run(rounds=12)
+    assert len(world.bunny.fetch_calls) == fetches + 1         # exactly one import: the 2-hour recording
+    assert sorted(v[0] for v in world.videos(live=True)) == [1, 2]
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2] and _view(world)["verified_ready"]
+
+    del world.bunny.videos[short_video]
+    assert world.reconciler.run("FULL")["retired_deleted_unselected_videos"] == 1
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == fetches + 1 and [v[0] for v in world.videos(live=True)] == [2]
+
+
+def test_an_operator_decision_against_the_selection_blocks_reselection(url):
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE")
+    world.run(rounds=12)
+    plan = _plan(world)
+    assert plan["action"] == reselection.BLOCKED and plan["blocking"] == ["OPERATOR_PART_DECISION_OVERRIDES_SELECTION"]
+    try:
+        _apply(world)
+        raise AssertionError("re-selection must be refused")
+    except OperatorActionRefused as refusal:
+        assert refusal.code == "RESELECTION_BLOCKED"
+
+
+def test_a_delivered_parts_missing_video_stays_a_critical_alert(url):
+    world = World(url)
+    world.part(START + timedelta(minutes=1), END - timedelta(minutes=2))
+    world.run(rounds=10)
+    video = _video_id(world, 1)
+    del world.bunny.videos[video]
+    summary = world.reconciler.run("FULL")
+    assert summary["video_missing_in_bunny"] == 1 and summary["retired_deleted_unselected_videos"] == 0
+    assert world.q("SELECT retired_at IS NULL FROM public.bunny_videos WHERE bunny_video_id = %s", video) == [(True,)]
+
+
+def test_day_preview_reads_only_and_reports_every_lecture(url):
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE")
+    world.run(rounds=14)
+    _before_the_rule(world)
+    before = world.q("SELECT row_to_json(d)::text FROM public.bunny_recording_discoveries d WHERE lecture_id = %s",
+                     world.lecture_id)
+    preview = reselection.preview_day(_connect(world), _worker(world), START.date(), library_id=LIBRARY_ID)
+    assert preview["lectures"] == 1 and preview["actions"] == {reselection.RESELECT_KEEP_VIDEO: 1}
+    [plan] = preview["plans"]
+    assert plan["selection"]["part_index"] == 2 and [p["part_index"] for p in plan["stop_delivering"]] == [1]
+    assert world.q("SELECT row_to_json(d)::text FROM public.bunny_recording_discoveries d WHERE lecture_id = %s",
+                   world.lecture_id) == before
+    assert ".mp4" not in repr(preview) and "http" not in repr(preview)
+
+
+# =========================================================================== the 2026-10-27 production sequence
+def test_short_video_deleted_by_hand_before_reselection_is_seen_in_bunny_and_retired(url):
+    """Production order: the operator already deleted the 3-minute video; then the fix is deployed."""
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE")
+    world.run(rounds=14)
+    _before_the_rule(world)
+    assert act(world, "release")["changed"]
+    short_video, long_video, fetches = _video_id(world, 1), _video_id(world, 2), len(world.bunny.fetch_calls)
+    del world.bunny.videos[short_video]                        # deleted in Bunny before the fix is deployed
+    assert world.reconciler.run("FULL")["video_missing_in_bunny"] == 1      # the old rule: a CRITICAL alert
+
+    plan = reselection.plan_lecture(_connect(world), _worker(world), world.lecture_id, library_id=LIBRARY_ID,
+                                    bunny=world.bunny)
+    assert plan["action"] == reselection.RESELECT_KEEP_VIDEO
+    assert [(p["part_index"], p["bunny_present"]) for p in plan["stop_delivering"]] == [(1, False)]
+    assert plan["selected_video"]["bunny_video_id"] == long_video and plan["selected_video"]["bunny_present"]
+    _apply(world)
+    summary = world.reconciler.run("FULL")
+    assert summary["video_missing_in_bunny"] == 0 and summary["retired_deleted_unselected_videos"] == 1
+    assert world.q("SELECT status FROM public.bunny_publisher_alerts WHERE kind = 'VIDEO_MISSING_IN_BUNNY'") == [
+        ("RESOLVED",)]
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == fetches and not world.bunny.delete_calls
+    body = _view(world)
+    assert [p["bunny"]["video_id"] for p in body["parts"]] == [long_video] and body["release"] == "RELEASED"
+
+
+def test_an_old_import_job_waiting_for_review_is_named_and_an_operator_retry_imports(url):
+    from app.publisher import operations
+    from app.publisher.handlers import part_subject_key
+    from app.db.repositories.publisher_queue import PublisherQueueRepository
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE", p2="EXCLUDE")
+    world.run(rounds=12)
+    _before_the_rule(world)
+    with psycopg.connect(world.url, autocommit=True) as c:     # an earlier IMPORT_VIDEO of part 2 ended in review
+        job, _ = PublisherQueueRepository().enqueue(c, job_kind="IMPORT_VIDEO", lecture_id=world.lecture_id,
+                                                    subject_key=part_subject_key(world.lecture_id, 2))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'PART_EXCLUDED_BY_OPERATOR' WHERE job_id = %s", (job["job_id"],))
+    fetches = len(world.bunny.fetch_calls)
+    _apply(world)
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == fetches             # the planner leaves it to the operator, as before
+    [stalled] = _plan(world)["operator_retry_needed"]
+    assert (stalled["job_id"], stalled["job_kind"]) == (str(job["job_id"]), "IMPORT_VIDEO")
+    with psycopg.connect(world.url, autocommit=True) as c:
+        operations.operator_retry(c, stalled["job_id"], actor=ACTOR, reason="import the selected recording")
+    world.run(rounds=12)
+    assert len(world.bunny.fetch_calls) == fetches + 1 and _view(world)["verified_ready"]
+
+
+# =========================================================================== re-selection older than the lookback
+def _past_lookback(world):
+    world.clock.advance(timedelta(days=world.config.lookback_days + 2))     # the tick no longer plans it
+
+
+def test_reselected_lecture_older_than_the_lookback_is_queued_and_imported_once(url):
+    """Production 2026-10-27 Marketing: only the 3-min video imported, released, deleted by hand, then re-selected
+    days later. Before the fix the 2-hour part was INCLUDE but no IMPORT_VIDEO job was ever created."""
+    world = World(url)
+    _marketing(world)
+    _decide(world, p1="INCLUDE", p2="EXCLUDE")
+    world.run(rounds=12)
+    assert act(world, "release")["changed"]                   # the 3-minute video was what learners got
+    _before_the_rule(world)
+    short_video, fetches = _video_id(world, 1), len(world.bunny.fetch_calls)
+    del world.bunny.videos[short_video]
+    _past_lookback(world)
+
+    reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                      library_id=LIBRARY_ID)                   # without a planner: the pre-fix behaviour
+    world.run(rounds=6)
+    assert not [j for j in world.jobs("IMPORT_VIDEO") if j[1].endswith(":part:2")]          # the root cause
+    assert len(world.bunny.fetch_calls) == fetches
+
+    # The fix: re-running reselect-recording (now with the planner) queues the selected part at once.
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["planned_action"] == reselection.IMPORT_PENDING
+    assert result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    world.run(rounds=14)
+    assert len(world.bunny.fetch_calls) == fetches + 1        # exactly one upload: the 2-hour recording
+    assert [v[0] for v in world.videos(live=True)] == [2] and _view(world)["verified_ready"]
+    # the daemon's own 05:00 FULL reconciliation already retired the hand-deleted 3-minute video's row
+    assert world.q("SELECT retire_reason FROM public.bunny_videos WHERE bunny_video_id = %s", short_video) == [
+        ("VIDEO_DELETED_IN_BUNNY_PART_NOT_DELIVERED",)]
+    again = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                              library_id=LIBRARY_ID, planner=world.planner)
+    assert again["applied"] is False                          # NO_CHANGE: nothing queued, nothing re-uploaded
+    act(world, "release")
+    body = _view(world)
+    assert [p["source_part_index"] for p in body["parts"]] == [2] and body["release"] == "RELEASED"
+    assert world.reconciler.run("FULL")["video_missing_in_bunny"] == 0
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == fetches + 1 and not world.bunny.delete_calls
+
+
+def test_an_uncertain_import_in_review_is_never_requeued_and_keeps_its_operator_retry(url):
+    """Production 2026-10-27 AI In Marketing: the selected part's import is REVIEW_REQUIRED with
+    UNCERTAIN_SUBMISSION_UNRESOLVED; re-selection must not create a second upload."""
+    from app.publisher import operations
+    start = START + timedelta(minutes=30)
+    world = World(url, start=start, end=start + timedelta(hours=2))
+    world.part(start + timedelta(minutes=1), start + timedelta(minutes=1, seconds=62), call_id="call-1")
+    world.part(start + timedelta(minutes=6), start + timedelta(minutes=6, seconds=6118), call_id="call-3")
+    world.bunny.fetch_plan.append("uncertain_absent")
+    world.run(rounds=6)
+    world.clock.advance(timedelta(hours=3))
+    world.run(rounds=4)
+    [(_, status, *_)] = world.videos(live=True)
+    assert status == "REVIEW_REQUIRED" and len(world.bunny.fetch_calls) == 1
+    _past_lookback(world)
+    plan = _plan(world)
+    assert plan["import_waits_for"] == "OPERATOR_RETRY"
+    [stalled] = plan["operator_retry_needed"]
+    assert (stalled["job_kind"], stalled["last_error_code"]) == ("IMPORT_VIDEO", "UNCERTAIN_SUBMISSION_UNRESOLVED")
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["queued"]["jobs_created"] == {} and result["operator_retry_needed"] == [stalled]
+    world.run(rounds=4)
+    assert len(world.bunny.fetch_calls) == 1                   # never resubmitted on its own
+    with psycopg.connect(world.url, autocommit=True) as c:
+        operations.operator_retry(c, stalled["job_id"], actor=ACTOR, reason="confirmed nothing reached Bunny")
+    world.run(rounds=12)
+    assert len(world.bunny.fetch_calls) == 2 and _view(world)["verified_ready"]
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+
+
+# =========================================================================== a recording set that changes later
+# 2026-10-30 Managing Successful Programmes: a ~58 s false start at 13:55, then the lecture 13:57-16:19 (slot 14-16).
+MSP_SHORT = (START - timedelta(minutes=5), START - timedelta(minutes=4, seconds=2))
+MSP_LONG = (START - timedelta(minutes=3), END + timedelta(minutes=19))
+
+
+def _until(world, moment):
+    world.clock.now = max(world.clock.now, moment)
+
+
+def _window_closed(world):
+    _until(world, END + timedelta(hours=3, minutes=5))       # the occurrence's recordings are final
+
+
+def _recheck(world):
+    _until(world, END + timedelta(hours=24, minutes=5))      # the bounded re-check of a located lecture
+
+
+def _recording_reviews(world):
+    return [j for j in world.jobs("RESOLVE_RECORDING") if j[2] == "REVIEW_REQUIRED"]
+
+
+def _recording_state(world):
+    return world.q("SELECT status, (metadata -> 'recording_selection' ->> 'part_index')::int "
+                   "FROM public.bunny_recording_discoveries WHERE lecture_id = %s", world.lecture_id)[0]
+
+
+def test_a_false_start_located_alone_then_the_lecture_appears_it_is_imported_without_an_operator(url):
+    world = World(url)
+    world.part(*MSP_SHORT, transcript=False, call_id="call-a")
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=4)
+    assert _recording_state(world) == ("LOCATED", 1) and world.videos() == []   # a lone fragment is not imported
+    world.part(*MSP_LONG, call_id="call-b")                    # Teams lists the lecture's recording later
+    _recheck(world)
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _recording_state(world) == ("LOCATED", 2)
+    [video] = world.videos()
+    assert video[0] == 2 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+    world.reconciler.run("FULL")                               # retries and reconciliation create nothing twice
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1
+    assert _plan(world)["action"] == reselection.NO_CHANGE
+
+
+def test_the_full_recording_already_imported_a_late_false_start_goes_to_review_and_nothing_is_reimported(url):
+    world = World(url)
+    long = world.part(*MSP_LONG, call_id="call-b")
+    world.run(rounds=12)
+    assert world.ready()
+    world.part(*MSP_SHORT, transcript=False, call_id="call-a")   # an earlier recording listed late
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world)                           # part 1 has a video: never renumbered silently
+    assert [v[0] for v in world.videos(live=True)] == [1] and len(world.bunny.fetch_calls) == 1
+    assert world.q("SELECT recording_part_index, graph_recording_id FROM public.bunny_recording_sources "
+                   "WHERE lecture_id = %s", world.lecture_id) == [(1, long["id"])]
+
+
+def test_a_released_false_start_is_never_replaced_automatically_the_audited_reselection_imports_the_lecture(url):
+    world = World(url)
+    world.part(START - timedelta(minutes=5), START - timedelta(minutes=2), call_id="call-a")   # transcribed: imported
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=12)
+    assert [v[0] for v in world.videos(live=True)] == [1]
+    assert act(world, "release")["changed"]
+    fetches = len(world.bunny.fetch_calls)
+    world.part(START - timedelta(minutes=1), END + timedelta(minutes=19), call_id="call-b")
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world)
+    assert len(world.bunny.fetch_calls) == fetches and _view(world)["release"] == "RELEASED"
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [1]
+    plan = _plan(world)
+    assert (plan["action"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, 2)
+    reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                      library_id=LIBRARY_ID, planner=world.planner)
+    world.run(rounds=14)
+    assert len(world.bunny.fetch_calls) == fetches + 1         # exactly one upload: the lecture
+    assert sorted(v[0] for v in world.videos(live=True)) == [1, 2]
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+
+
+# =========================================================================== 2026-10-30 MSP, as it happened
+# A 59 s false start (call A), then the 8,533 s lecture on call B 21 min 36 s later: the unchanged 20 min grouping
+# rule keeps only the lecture, so the verified false start is RELEASED from the lecture.
+MSP_FALSE_START = (START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27))
+MSP_LECTURE = (START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22))
+
+
+def _sources(world):
+    return world.q("SELECT recording_part_index, graph_recording_id, locate_status FROM public.bunny_recording_sources "
+                   "WHERE lecture_id = %s ORDER BY recording_part_index", world.lecture_id)
+
+
+def test_msp_daily_the_false_start_is_released_and_the_lecture_imported_once(url):
+    world = World(url)
+    short = world.part(*MSP_FALSE_START, transcript=False, call_id="call-a")
+    world.run(rounds=3)
+    assert _sources(world) == [(1, short["id"], "LOCATED")] and world.videos() == []
+    long = world.part(*MSP_LECTURE, call_id="call-b")
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _recording_state(world) == ("LOCATED", 1)
+    assert _sources(world) == [(1, long["id"], "LOCATED")]
+    [video] = world.videos()
+    assert video[0] == 1 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    located = world.q("SELECT detail FROM public.bunny_publisher_events WHERE lecture_id = %s AND event = "
+                      "'RECORDING_LOCATED' AND detail ? 'recording_parts_released'", world.lecture_id)
+    assert located[0][0]["recording_parts_released"][0]["graph_recording_id"] == short["id"]   # durable audit
+    world.reconciler.run("FULL")
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1 and len(world.captions()) == 1
+
+
+def test_msp_review_state_is_recovered_by_the_audited_reselection_once(url):
+    world = World(url)
+    short = world.part(*MSP_FALSE_START, transcript=False, call_id="call-a")
+    world.run(rounds=3)
+    with psycopg.connect(world.url, autocommit=True) as c:                   # the production state on 2026-11-01
+        c.execute("UPDATE public.bunny_recording_discoveries SET status = 'REVIEW_REQUIRED', reason_code = "
+                  "'RECORDING_SET_CHANGED', review_reason = 'RECORDING_SET_CHANGED', next_check_after = NULL "
+                  "WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'RECORDING_SET_CHANGED' WHERE lecture_id = %s AND job_kind = 'RESOLVE_RECORDING' "
+                  "AND status IN ('QUEUED', 'RETRY_WAIT')", (world.lecture_id,))
+    long = world.part(*MSP_LECTURE, call_id="call-b")
+    _past_lookback(world)
+    world.run(rounds=3)
+    assert world.videos() == [] and _sources(world) == [(1, short["id"], "LOCATED")]   # nothing on its own
+    plan = _plan(world)                                                          # recording-preview, read-only
+    assert (plan["action"], plan["blocking"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, [], 1)
+    assert round(plan["selection"]["candidates"][0]["duration_seconds"]) == 8533
+    assert plan["released_parts"][0]["graph_recording_id"] == short["id"]
+    assert _sources(world) == [(1, short["id"], "LOCATED")]                       # the preview wrote nothing
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["applied"] and result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    [event] = world.q("SELECT detail FROM public.bunny_publisher_events WHERE lecture_id = %s AND event = "
+                      "'OPERATOR_RECORDING_RESELECTED'", world.lecture_id)
+    assert event[0]["released_parts"][0]["graph_recording_id"] == short["id"]
+    world.run(rounds=14)
+    assert _sources(world) == [(1, long["id"], "LOCATED")] and len(world.bunny.fetch_calls) == 1
+    assert [v[0] for v in world.videos(live=True)] == [1] and _view(world)["verified_ready"]
+    again = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                              library_id=LIBRARY_ID, planner=world.planner)
+    assert again["applied"] is False and len(world.bunny.fetch_calls) == 1          # NO_CHANGE, nothing re-uploaded
+
+
+def test_msp_an_imported_false_start_is_never_released_automatically(url):
+    world = World(url)
+    world.part(START - timedelta(minutes=6), START - timedelta(minutes=3), call_id="call-a")   # transcribed: imported
+    world.run(rounds=4)
+    _window_closed(world)
+    world.run(rounds=12)
+    assert [v[0] for v in world.videos(live=True)] == [1]
+    fetches = len(world.bunny.fetch_calls)
+    world.part(*MSP_LECTURE, call_id="call-b")
+    _recheck(world)
+    world.run(rounds=8)
+    assert _recording_reviews(world) and len(world.bunny.fetch_calls) == fetches
+    assert [v[0] for v in world.videos(live=True)] == [1]
+
+
+# =========================================================================== MSP files exactly as in production
+# The lecture's MP4 is named at the CALL start, 1,303.9 s before the Graph recording; only its Teams source facet
+# (externalId = callId, threadId = the meeting) proves it. The false start's MP4 is named a normal 71.7 s early.
+def _msp_production_files(world, *, false_start=True):
+    if false_start:
+        short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+        world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    correlation = f"corr-msp-{world.lecture_id[:8]}"
+    long = world.rgraph.recording(*MSP_LECTURE, call_id="call-b", correlation=correlation)
+    world.rgraph.recorded_file(long, lead=1303.9, thread=world.thread)
+    world.transcript(*MSP_LECTURE, correlation, call_id="call-b")
+    return long
+
+
+def test_msp_production_files_daily_the_lecture_is_proven_imported_once_and_never_again(url):
+    world = World(url)
+    short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+    world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    world.run(rounds=3)
+    assert _sources(world) == [(1, short["id"], "LOCATED")]
+    long = _msp_production_files(world, false_start=False)
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _sources(world) == [(1, long["id"], "LOCATED")]
+    [video] = world.videos()
+    assert video[0] == 1 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    for _ in range(2):                                                         # retries, reconciliation, re-runs
+        world.reconciler.run("FULL")
+        world.run(rounds=4)
+        assert reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                                 library_id=LIBRARY_ID, planner=world.planner)["applied"] is False
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1 and len(world.captions()) == 1
+
+
+def test_msp_production_files_review_state_recovered_by_the_audited_reselection(url):
+    world = World(url)
+    short = world.rgraph.recording(*MSP_FALSE_START, call_id="call-a")
+    world.rgraph.recorded_file(short, lead=71.7, thread=world.thread)
+    world.run(rounds=3)
+    with psycopg.connect(world.url, autocommit=True) as c:                   # production on 2026-11-01
+        c.execute("UPDATE public.bunny_recording_discoveries SET status = 'REVIEW_REQUIRED', reason_code = "
+                  "'RECORDING_SET_CHANGED', review_reason = 'RECORDING_SET_CHANGED', next_check_after = NULL "
+                  "WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'RECORDING_SET_CHANGED' WHERE lecture_id = %s AND job_kind = 'RESOLVE_RECORDING' "
+                  "AND status IN ('QUEUED', 'RETRY_WAIT')", (world.lecture_id,))
+    long = _msp_production_files(world, false_start=False)
+    _past_lookback(world)
+    plan = _plan(world)
+    assert (plan["action"], plan["blocking"], plan["selection"]["part_index"]) == (reselection.RESELECT_AND_IMPORT, [], 1)
+    chosen = plan["selection"]["candidates"][0]
+    assert (round(chosen["duration_seconds"]), chosen["duration_source"], chosen["locate_status"]) == (
+        8533, "video_facet", "LOCATED")
+    assert [p["graph_recording_id"] for p in plan["released_parts"]] == [short["id"]]
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    world.run(rounds=14)
+    assert _sources(world) == [(1, long["id"], "LOCATED")] and len(world.bunny.fetch_calls) == 1
+    assert _view(world)["verified_ready"]

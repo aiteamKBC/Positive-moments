@@ -1,0 +1,1302 @@
+{
+  "name": "QA Master Daily — Safe Exact Recording v9",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 21,23 * * *"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -96,
+        96
+      ],
+      "id": "27cfb62e-69a7-4f41-8212-7200c6ee8d87",
+      "name": "Schedule Trigger",
+      "disabled": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        832
+      ],
+      "id": "d62e242e-ddf0-4377-a17a-8ecfaf08af13",
+      "name": "When clicking Execute workflow"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Day window for Africa/Cairo with correct offset in the output.\n// Same shape as Create Date Range2 in the per-lecture workflows.\nconst TZ = 'Africa/Cairo';\n\nfunction partsInTz(d, tz=TZ){\n  const fmt = new Intl.DateTimeFormat('en-GB',{\n    timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit',\n    hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false\n  });\n  const obj = Object.fromEntries(fmt.formatToParts(d).map(p=>[p.type,p.value]));\n  return { yyyy: obj.year, mm: obj.month, dd: obj.day };\n}\n\nfunction tzOffsetHHMM(date, tz=TZ){\n  const utc = new Date(Date.UTC(\n    date.getFullYear(), date.getMonth(), date.getDate(),\n    date.getHours(), date.getMinutes(), date.getSeconds(), date.getMilliseconds()\n  ));\n  const inTz = new Date(utc.toLocaleString('en-US',{ timeZone: tz }));\n  const offMin = Math.round((inTz - utc)/60000);\n  const sign = offMin >= 0 ? '+' : '-';\n  const a = Math.abs(offMin);\n  const H = String(Math.floor(a/60)).padStart(2,'0');\n  const M = String(a%60).padStart(2,'0');\n  return `${sign}${H}:${M}`;\n}\n\nconst now = new Date();\nconst { yyyy, mm, dd } = partsInTz(now, TZ);\n\n\nconst startLocal = new Date(`${yyyy}-${mm}-${dd}T00:00:00`);\nconst off = tzOffsetHHMM(startLocal, TZ);\n\nreturn [{\n  json: {\n    targetDate:   `${yyyy}-${mm}-${dd}`,\n    today:        `${yyyy}-${mm}-${dd}T00:00:00${off}`,\n    todayPlusOne: `${yyyy}-${mm}-${dd}T23:59:59${off}`\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        128
+      ],
+      "id": "7082d6f7-19fc-497e-b9c1-7346d6e6fbd6",
+      "name": "Create Date Range"
+    },
+    {
+      "parameters": {
+        "url": "={{ `https://graph.microsoft.com/v1.0/me/calendarView?$top=100&startDateTime=${encodeURIComponent($items('Create Date Range')[0].json.today)}&endDateTime=${encodeURIComponent($items('Create Date Range')[0].json.todayPlusOne)}` }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "outlook.timezone=\"Africa/Cairo\""
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        576,
+        128
+      ],
+      "id": "2085ed77-c388-4f75-a2d6-873ba2d5c9ca",
+      "name": "Get Today's Calendar Events",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "executeOnce": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "if (!items[0].json.value || !Array.isArray(items[0].json.value)) {\n  return [];\n}\n\nreturn items[0].json.value.map(e => ({\n  json: {\n    attendees: e.attendees || null,\n    subject: e.subject || null,\n    meetingStart: e.start?.dateTime || null,\n    meetingEnd: e.end?.dateTime || null,\n    joinUrl: e.onlineMeeting?.joinUrl || null,\n    bodyPreview: e.bodyPreview || null,\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        128
+      ],
+      "id": "bbe94992-196a-4a5b-8afe-03bc2da4b825",
+      "name": "Extract Calendar Fields"
+    },
+    {
+      "parameters": {
+        "url": "=https://graph.microsoft.com/v1.0/me/onlineMeetings?$filter=JoinWebUrl eq '{{ $json.joinUrl }}'",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1024,
+        128
+      ],
+      "id": "9c2fbcd3-8917-459b-8fcb-bf7bc071fc4e",
+      "name": "Find Online Meeting by JoinWebUrl",
+      "alwaysOutputData": true,
+      "retryOnFail": true,
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const SRC_NODE = \"Extract Calendar Fields\";\n\nreturn items.map((it, idx) => {\n  const meeting = (it.json.value || [])[0] || {};\n\n  const pIndex = it.pairedItem?.item ?? idx;\n  const src = $items(SRC_NODE)[pIndex]?.json || {};\n\n  return {\n    json: {\n      subject: src.subject || meeting.subject || null,\n      meetingStart: src.meetingStart || null,\n      meetingEnd: src.meetingEnd || null,\n      joinUrl: src.joinUrl || null,\n      meetingId: meeting.id || \"\"\n    },\n    pairedItem: { item: pIndex }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        128
+      ],
+      "id": "f843f76e-e303-4c48-888f-28104cca3105",
+      "name": "Pick Meeting Id"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT \"Group\" AS group_name\nFROM public.aptem_auto_extracting\nWHERE \"Group\" IS NOT NULL\n  AND btrim(\"Group\") <> ''\n  AND lower(coalesce(\"Program-Status\", '')) = 'active'\nORDER BY \"Group\";",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        352,
+        128
+      ],
+      "id": "5f772066-627d-42e7-9b8c-54b6a6be5adb",
+      "name": "Get Active Groups",
+      "credentials": {
+        "postgres": {
+          "id": "uGzHdDkRpcgWXOlK",
+          "name": "Aptem auto extracting ( ل عيون ال خلود )"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Match each Teams calendar event to one active Aptem group.\nfunction normalizeGroup(value) {\n  return String(value || '')\n    .toLowerCase()\n    .replace(/&amp;/g, '&')\n    .replace(/\\s+/g, ' ')\n    .trim();\n}\n\nconst groupItems = $items(\"Get Active Groups\") || [];\nconst groupLookup = new Map();\nfor (const item of groupItems) {\n  const original = item?.json?.group_name;\n  const normalized = normalizeGroup(original);\n  if (original && normalized) groupLookup.set(normalized, original);\n}\n\nconst evaluated = items.map(item => {\n  const event = item.json || {};\n  const normalizedSubject = normalizeGroup(event.subject);\n  const module = groupLookup.get(normalizedSubject) || null;\n  const matched = Boolean(module && event.meetingId);\n  return {\n    ...event,\n    matched,\n    module,\n    targetDate: String(event.meetingStart || '').slice(0, 10),\n    scheduledStart: event.meetingStart || '',\n    scheduledEnd: event.meetingEnd || '',\n    matchReason: matched\n      ? 'normalized subject equals active Aptem group'\n      : !event.meetingId ? 'missing meetingId' : 'no active group match'\n  };\n});\n\nconst matchedCount = evaluated.filter(row => row.matched).length;\nconst summary = {\n  total_calendar_events: evaluated.length,\n  total_active_groups: groupLookup.size,\n  matched_count: matchedCount,\n  unmatched_count: evaluated.length - matchedCount\n};\n\nreturn evaluated.map(row => ({ json: { ...row, _summary: summary } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1472,
+        128
+      ],
+      "id": "3164dd5c-9ec0-4a84-a1d3-2d49e0e39cb5",
+      "name": "Match Calendar to Groups"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "09fad83d-e9df-435b-ad9e-7c45dcb6a457",
+              "leftValue": "={{ $json.matched }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1696,
+        128
+      ],
+      "id": "47374031-1362-425d-afe8-c9608f1d3973",
+      "name": "Matched Lecture?"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "LW0lYn7XXJ9JTaYB",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/LW0lYn7XXJ9JTaYB",
+          "cachedResultName": "QA One Lecture - Safe Exact Recording v8"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1936,
+        112
+      ],
+      "id": "1befbaff-fdf2-46c2-8bdb-612015b024c8",
+      "name": "Execute QA One Lecture",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e0272294-9929-511b-b4e6-06e631c3c79e",
+              "name": "dry_run",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "ea8f788a-8e5b-5a36-87b3-2b1bb4e0ef7f",
+              "name": "date_from",
+              "value": "2026-09-01",
+              "type": "string"
+            },
+            {
+              "id": "fadbf80f-77cc-51a8-818d-215e45b726df",
+              "name": "date_to",
+              "value": "2026-09-30",
+              "type": "string"
+            },
+            {
+              "id": "26f402f0-3456-59b6-aba0-478e045ed7ea",
+              "name": "max_lectures",
+              "value": 100,
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        144,
+        784
+      ],
+      "id": "b965756f-7e98-5643-afa4-5aba33f3ac32",
+      "name": "Run Settings - EDIT HERE"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Recording v9: lectures in [$2, $3] that still have no recording_url.\n-- $1 max_lectures, $2 date_from, $3 date_to (YYYY-MM-DD).\n-- The organizer mailbox comes from the coded registry. A meeting that maps to\n-- more than one lookup user is reported, never guessed (organizer_count > 1).\nWITH organizer AS (\n  SELECT ls.meeting_id::text AS meeting_id,\n         COUNT(DISTINCT BTRIM(ls.meeting_lookup_user_id)) AS organizer_count,\n         MIN(BTRIM(ls.meeting_lookup_user_id)) AS meeting_lookup_user_id\n    FROM public.lecture_sessions ls\n   WHERE NULLIF(BTRIM(ls.meeting_lookup_user_id), '') IS NOT NULL\n     AND NULLIF(BTRIM(ls.meeting_id::text), '') IS NOT NULL\n   GROUP BY ls.meeting_id::text\n),\ntarget AS (\n  SELECT DISTINCT ON (s.session_id)\n         p.lecture_key,\n         to_char(s.date::date, 'YYYY-MM-DD') AS lecture_date,\n         to_char(s.date::date, 'YYYY-MM-DD') AS date,\n         to_char(s.date::date, 'YYYY-MM-DD') AS session_date,\n         s.subject,\n         s.trainer,\n         p.module,\n         p.engagement,\n         p.attended_count,\n         p.met_count,\n         s.meeting_id,\n         s.session_id,\n         s.recording_url,\n         s.recording_link_status,\n         s.cancelled_session,\n         o.meeting_lookup_user_id,\n         COALESCE(o.organizer_count, 0) AS organizer_count\n    FROM public.qa_doctors_sessions s\n    LEFT JOIN public.qa_perfect_lectures p\n      ON p.session_id = s.session_id\n    LEFT JOIN organizer o\n      ON o.meeting_id = s.meeting_id::text\n   WHERE NULLIF(BTRIM(s.recording_url), '') IS NULL\n     AND NULLIF(BTRIM(s.meeting_id), '') IS NOT NULL\n     AND NULLIF(BTRIM(s.session_id), '') IS NOT NULL\n     AND s.date::date BETWEEN $2::date AND $3::date\n   ORDER BY s.session_id, p.lecture_key NULLS LAST\n)\nSELECT *\n  FROM target\n ORDER BY lecture_date, session_id\n LIMIT $1::integer;\n",
+        "options": {
+          "queryReplacement": "={{ [ $json.max_lectures, $json.date_from, $json.date_to ] }}"
+        }
+      },
+      "id": "093f05d9-61e5-4237-adb5-f05bc681408c",
+      "name": "Get Target Lectures",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        368,
+        784
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: derive each lecture's exact Teams call id, and decide whether it\n// can be looked up at all.\n//\n// qa_doctors_sessions.session_id is the raw Graph transcript id. It is NOT\n// plain base64 text: it is base64url(MessagePack-CSharp LZ4 envelope). v8\n// decoded it as UTF-8 and regex-searched for a GUID, which fails whenever the\n// LZ4 block uses a back-reference inside the GUID. This is a strict port of\n// the QA Core RC4 decoder (app/transcripts/identity.py): an id that does not\n// decode completely and exactly yields NO call id - never a guess.\n\nconst MAX_ENCODED_BYTES = 4096;\nconst MAX_DECODED_BYTES = 16384;\nconst LZ4_BLOCK_EXT_TYPE = 98;\nconst SUPPORTED_FORMAT_VERSION = 4;\nconst TRANSCRIPT_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-\\d+-TranscriptV2$/i;\n\nclass IdentityDecodeError extends Error {}\nclass MpExt { constructor(type, data) { this.type = type; this.data = data; } }\nclass MpFloat { constructor(value) { this.value = value; } }\n\nfunction fail(message) { throw new IdentityDecodeError(message); }\n\nfunction base64url(text) {\n  if (text.length > MAX_ENCODED_BYTES * 2) fail('id is implausibly long');\n  const body = text.replace(/-/g, '+').replace(/_/g, '/').replace(/=+$/, '');\n  if (!/^[A-Za-z0-9+/]*$/.test(body) || body.length % 4 === 1) fail('not base64url');\n  const data = Buffer.from(body + '='.repeat((4 - (body.length % 4)) % 4), 'base64');\n  if (!data.length || data.length > MAX_ENCODED_BYTES) fail('decoded length out of range');\n  return data;\n}\n\nfunction lz4Length(src, i, value) {\n  for (;;) {\n    if (i >= src.length) fail('LZ4 length truncated');\n    const byte = src[i++];\n    value += byte;\n    if (byte !== 255) return [value, i];\n  }\n}\n\nfunction lz4BlockDecompress(src, expectedSize) {\n  if (expectedSize > MAX_DECODED_BYTES) fail('block too large');\n  const dst = [];\n  let i = 0;\n  const n = src.length;\n  for (;;) {\n    if (i >= n) fail('LZ4 block truncated before a token');\n    const token = src[i++];\n    let literal = token >> 4;\n    if (literal === 15) [literal, i] = lz4Length(src, i, literal);\n    if (i + literal > n) fail('LZ4 literal run past end of block');\n    for (let k = 0; k < literal; k++) dst.push(src[i + k]);\n    i += literal;\n    if (dst.length > expectedSize) fail('LZ4 output exceeds declared size');\n    if (i === n) break;\n    if (i + 2 > n) fail('LZ4 match offset truncated');\n    const offset = src[i] | (src[i + 1] << 8);\n    i += 2;\n    if (offset === 0 || offset > dst.length) fail('LZ4 match offset out of range');\n    let match = token & 0x0f;\n    if (match === 15) [match, i] = lz4Length(src, i, match);\n    match += 4;\n    if (dst.length + match > expectedSize) fail('LZ4 output exceeds declared size');\n    const start = dst.length - offset;\n    for (let k = 0; k < match; k++) dst.push(dst[start + k]);\n  }\n  if (dst.length !== expectedSize) fail('LZ4 produced the wrong number of bytes');\n  return Buffer.from(dst);\n}\n\nfunction take(data, i, count) {\n  if (count < 0 || i + count > data.length) fail('MessagePack value truncated');\n  return [data.subarray(i, i + count), i + count];\n}\n\nfunction uint(data, i, size) {\n  const [raw, next] = take(data, i, size);\n  let value = 0;\n  for (const byte of raw) value = value * 256 + byte;\n  return [value, next];\n}\n\nfunction str(data, i, size) {\n  const [raw, next] = take(data, i, size);\n  const text = raw.toString('utf8');\n  if (!Buffer.from(text, 'utf8').equals(raw)) fail('invalid UTF-8 in string');\n  return [text, next];\n}\n\nfunction ext(data, i, size) {\n  const [raw, afterType] = take(data, i, 1);\n  const type = raw[0] > 127 ? raw[0] - 256 : raw[0];\n  const [payload, next] = take(data, afterType, size);\n  return [new MpExt(type, payload), next];\n}\n\nfunction array(data, i, size, depth) {\n  if (size > data.length) fail('array length exceeds input');\n  const values = [];\n  for (let k = 0; k < size; k++) {\n    let value;\n    [value, i] = read(data, i, depth + 1);\n    values.push(value);\n  }\n  return [values, i];\n}\n\nfunction map(data, i, size, depth) {\n  if (size > data.length) fail('map length exceeds input');\n  const pairs = [];\n  for (let k = 0; k < size; k++) {\n    let key, value;\n    [key, i] = read(data, i, depth + 1);\n    [value, i] = read(data, i, depth + 1);\n    pairs.push([key, value]);\n  }\n  return [pairs, i];\n}\n\nfunction read(data, i, depth) {\n  if (depth > 16) fail('MessagePack nesting too deep');\n  const [raw, next] = take(data, i, 1);\n  const b = raw[0];\n  i = next;\n  if (b <= 0x7f) return [b, i];\n  if (b >= 0xe0) return [b - 0x100, i];\n  if (b >= 0xa0 && b <= 0xbf) return str(data, i, b & 0x1f);\n  if (b >= 0x90 && b <= 0x9f) return array(data, i, b & 0x0f, depth);\n  if (b >= 0x80 && b <= 0x8f) return map(data, i, b & 0x0f, depth);\n  if (b === 0xc0) return [null, i];\n  if (b === 0xc2) return [false, i];\n  if (b === 0xc3) return [true, i];\n  if (b >= 0xc4 && b <= 0xc6) {\n    const [size, at] = uint(data, i, { 0xc4: 1, 0xc5: 2, 0xc6: 4 }[b]);\n    return take(data, at, size);\n  }\n  if (b >= 0xc7 && b <= 0xc9) {\n    const [size, at] = uint(data, i, { 0xc7: 1, 0xc8: 2, 0xc9: 4 }[b]);\n    return ext(data, at, size);\n  }\n  if (b === 0xca || b === 0xcb) {\n    const [bytes, at] = take(data, i, b === 0xca ? 4 : 8);\n    return [new MpFloat(b === 0xca ? bytes.readFloatBE(0) : bytes.readDoubleBE(0)), at];\n  }\n  if (b >= 0xcc && b <= 0xcf) return uint(data, i, 1 << (b - 0xcc));\n  if (b >= 0xd0 && b <= 0xd3) {\n    const size = 1 << (b - 0xd0);\n    const [bytes, at] = take(data, i, size);\n    let value = 0n;\n    for (const byte of bytes) value = (value << 8n) | BigInt(byte);\n    if (bytes[0] & 0x80) value -= 1n << BigInt(size * 8);\n    return [Number(value), at];\n  }\n  if (b >= 0xd4 && b <= 0xd8) return ext(data, i, 1 << (b - 0xd4));\n  if (b >= 0xd9 && b <= 0xdb) {\n    const [size, at] = uint(data, i, { 0xd9: 1, 0xda: 2, 0xdb: 4 }[b]);\n    return str(data, at, size);\n  }\n  if (b === 0xdc || b === 0xdd) {\n    const [size, at] = uint(data, i, b === 0xdc ? 2 : 4);\n    return array(data, at, size, depth);\n  }\n  if (b === 0xde || b === 0xdf) {\n    const [size, at] = uint(data, i, b === 0xde ? 2 : 4);\n    return map(data, at, size, depth);\n  }\n  fail('reserved MessagePack byte');\n}\n\nfunction unpackExactly(data) {\n  const [value, end] = read(data, 0, 0);\n  if (end !== data.length) fail('trailing bytes after MessagePack value');\n  return value;\n}\n\nfunction unpackSequence(data) {\n  const values = [];\n  let i = 0;\n  while (i < data.length) {\n    let value;\n    [value, i] = read(data, i, 0);\n    values.push(value);\n  }\n  return values;\n}\n\nconst isInt = value => typeof value === 'number' && Number.isInteger(value);\n\nfunction unwrapEnvelope(outer) {\n  if (!Array.isArray(outer) || outer.length < 2) fail('not an LZ4 envelope');\n  const header = outer[0];\n  if (!(header instanceof MpExt) || header.type !== LZ4_BLOCK_EXT_TYPE) {\n    fail('missing LZ4 extension header');\n  }\n  const lengths = unpackSequence(header.data);\n  const blocks = outer.slice(1);\n  if (lengths.length !== blocks.length || !blocks.every(Buffer.isBuffer)) {\n    fail('LZ4 header does not match its blocks');\n  }\n  if (!lengths.every(n => isInt(n) && n >= 0) ||\n      lengths.reduce((a, b) => a + b, 0) > MAX_DECODED_BYTES) {\n    fail('invalid uncompressed length');\n  }\n  return Buffer.concat(blocks.map((block, k) => lz4BlockDecompress(block, lengths[k])));\n}\n\nfunction fields(values) {\n  if (!Array.isArray(values)) fail('payload is not an array');\n  const trimmed = values.slice();\n  while (trimmed.length && trimmed[trimmed.length - 1] === null) trimmed.pop();\n  if (trimmed.length !== 4) fail('expected 4 fields');\n  const [version, threadId, meetingTimestamp, transcriptId] = trimmed;\n  const numeric = version instanceof MpFloat ? version.value : version;\n  if (typeof numeric !== 'number' || numeric !== SUPPORTED_FORMAT_VERSION) {\n    fail('unsupported format version');\n  }\n  for (const value of [threadId, meetingTimestamp, transcriptId]) {\n    if (typeof value !== 'string' || !value.trim()) fail('identity field missing');\n  }\n  if (!threadId.includes('@thread')) fail('thread id is not a Teams thread');\n  if (!/^\\p{Nd}+$/u.test(meetingTimestamp)) fail('meeting timestamp is not numeric');\n  return { thread_id: threadId, meeting_timestamp: meetingTimestamp, transcript_id: transcriptId };\n}\n\nfunction transcriptIdentity(rawId) {\n  const text = rawId === null || rawId === undefined ? '' : String(rawId).trim();\n  if (!text) return { source: 'RAW' };\n  try {\n    return { source: 'DECODED', ...fields(unpackExactly(unwrapEnvelope(unpackExactly(base64url(text))))) };\n  } catch (error) {\n    if (error instanceof IdentityDecodeError) return { source: 'RAW', decode_error: error.message };\n    throw error;\n  }\n}\n\nconst settings = $items('Validate Run Settings')[0].json;\nconst blank = value => !String(value ?? '').trim();\n\nreturn items.map((item, index) => {\n  const lecture = item.json || {};\n  const identity = transcriptIdentity(lecture.session_id);\n  const callMatch = identity.source === 'DECODED'\n    ? TRANSCRIPT_ID.exec(identity.transcript_id) : null;\n  const expectedCallId = callMatch ? callMatch[1].toLowerCase() : null;\n\n  const organizerCount = Number(lecture.organizer_count || 0);\n  const organizerId = String(lecture.meeting_lookup_user_id || '').trim() || null;\n  const cancelled = String(lecture.cancelled_session ?? '').trim().toLowerCase() === 'true';\n\n  // Order matters: the first failing precondition is the reported reason.\n  let precheck = null;\n  if (cancelled) precheck = 'NO_RECORDING_EXPECTED_CANCELLED';\n  else if (blank(lecture.meeting_id) || blank(lecture.session_id)) precheck = 'SESSION_IDENTITY_MISSING';\n  else if (organizerCount > 1) precheck = 'ORGANIZER_LOOKUP_ID_AMBIGUOUS';\n  else if (!organizerId) precheck = 'ORGANIZER_LOOKUP_ID_MISSING';\n  else if (!expectedCallId) precheck = 'SESSION_CALL_ID_MISSING';\n\n  return {\n    json: {\n      ...lecture,\n      expected_call_id: expectedCallId,\n      call_id_source: expectedCallId ? 'rc4_transcript_identity_v1' : null,\n      transcript_identity_source: identity.source,\n      meeting_lookup_user_id: organizerId,\n      organizer_count: organizerCount,\n      cancelled,\n      precheck_status: precheck,\n      graph_lookup_url: precheck ? null\n        : 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(organizerId) +\n          '/onlineMeetings/' + encodeURIComponent(String(lecture.meeting_id).trim()) +\n          '/recordings?$top=100',\n      dry_run: settings.dry_run !== false,\n      allow_overwrite_existing: false\n    },\n    pairedItem: { item: index }\n  };\n});\n"
+      },
+      "id": "f59bbdf5-1a55-4cd5-8a90-d2fcabe55b54",
+      "name": "Extract Exact Call IDs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        592,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: classify each organizer-aware Graph recordings lookup.\n//\n// The HTTP node runs once per lecture that passed the precheck, in order, and\n// continues on error, so response k belongs to lookup item k. A failed HTTP\n// call (401/403/404/429/5xx/network) is GRAPH_LOOKUP_FAILED - it proves\n// nothing about whether a recording exists. RECORDING_NOT_FOUND is reserved\n// for a successful, complete Graph response with no recording for the call id.\nconst lectures = $items('Graph Lookup Possible?', 0, 0);\n\nfunction httpStatus(error) {\n  const direct = Number(error?.httpCode ?? error?.status ?? error?.statusCode);\n  if (Number.isInteger(direct) && direct >= 100) return direct;\n  const match = /^\\s*(\\d{3})\\b/.exec(String(error?.message || ''));\n  return match ? Number(match[1]) : null;\n}\n\nif (items.length !== lectures.length) {\n  throw new Error(`Graph lookup returned ${items.length} responses for ${lectures.length} lectures`);\n}\n\nconst result = items.map((item, index) => {\n  const lecture = lectures[index]?.json || {};\n  const response = item.json || {};\n  const expected = String(lecture.expected_call_id || '').toLowerCase();\n  const base = {\n    ...lecture,\n    graph_http_status: null,\n    graph_recording_id: null,\n    graph_created_at: null,\n    graph_content_correlation_id: null,\n    graph_recordings_returned: null\n  };\n\n  if (response.error) {\n    return { ...base, graph_http_status: httpStatus(response.error), graph_status: 'GRAPH_LOOKUP_FAILED' };\n  }\n  if (!Array.isArray(response.value)) {\n    return { ...base, graph_status: 'GRAPH_LOOKUP_FAILED', graph_failure: 'response_has_no_value_array' };\n  }\n  const recordings = response.value;\n  if (response['@odata.nextLink']) {\n    // A later page could hold a second recording for the same call.\n    return { ...base, graph_recordings_returned: recordings.length, graph_status: 'GRAPH_RESULTS_INCOMPLETE' };\n  }\n  const matches = recordings.filter(recording =>\n    String(recording?.callId || '').toLowerCase() === expected);\n\n  let status = 'EXACT_GRAPH_RECORDING_FOUND';\n  if (!expected) status = 'SESSION_CALL_ID_MISSING';\n  else if (matches.length === 0) status = 'RECORDING_NOT_FOUND';\n  else if (matches.length > 1) status = 'AMBIGUOUS_GRAPH_RECORDINGS';\n  else if (!Number.isFinite(Date.parse(matches[0].createdDateTime || ''))) {\n    status = 'GRAPH_RECORDING_TIMESTAMP_INVALID';\n  }\n\n  const exact = status === 'EXACT_GRAPH_RECORDING_FOUND' ? matches[0] : null;\n  return {\n    ...base,\n    graph_recordings_returned: recordings.length,\n    graph_recording_id: exact?.id || null,\n    graph_created_at: exact?.createdDateTime || null,\n    graph_content_correlation_id: exact?.contentCorrelationId || null,\n    graph_status: status\n  };\n});\n\nreturn [{ json: { lectures: result, lecture_count: result.length } }];\n"
+      },
+      "id": "08e3c50f-98ff-45f5-adac-e8887a1c5d69",
+      "name": "Collect Lectures and Exact Graph Times",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lectures = Array.isArray($json.lectures) ? $json.lectures : [];\nconst dates = [...new Set(\n  lectures\n    .map(lecture => String(lecture.date || '').slice(0, 10))\n    .filter(Boolean)\n)].sort();\n\nreturn dates.map((date, index) => {\n  const compactDate = date.replace(/-/g, '');\n  return {\n    json: {\n      date,\n      compact_date: compactDate,\n      search_body: {\n        requests: [{\n          entityTypes: ['driveItem'],\n          query: {\n            queryString: compactDate + ' \"Meeting Recording\" filetype:mp4'\n          },\n          from: 0,\n          size: 500,\n          fields: [\n            'id',\n            'name',\n            'webUrl',\n            'createdDateTime',\n            'lastModifiedDateTime',\n            'parentReference',\n            'file'\n          ]\n        }]\n      }\n    },\n    pairedItem: { item: index }\n  };\n});"
+      },
+      "id": "50801902-35af-4c62-a757-2b8b283b4e4b",
+      "name": "Build One Search per Lecture Date",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.microsoft.com/v1.0/search/query",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.search_body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 3,
+              "batchInterval": 300
+            }
+          }
+        }
+      },
+      "id": "a1c14dee-4d11-4674-9b57-87d7e98f1482",
+      "name": "Search All Accessible SharePoint and OneDrive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1488,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const searchDates = $items('Build One Search per Lecture Date');\nconst files = [];\n\nitems.forEach((item, index) => {\n  const response = item.json || {};\n  const searchDate = searchDates[index]?.json?.date || null;\n  const hits = (response.value || [])\n    .flatMap(value => value?.hitsContainers || [])\n    .flatMap(container => container?.hits || []);\n\n  for (const hit of hits) {\n    const resource = hit?.resource;\n    if (!resource?.id || !resource?.name) continue;\n    const driveId = resource?.parentReference?.driveId || null;\n    if (!driveId) continue;\n    files.push({\n      id: resource.id,\n      driveId,\n      name: resource.name,\n      webUrl: resource.webUrl || null,\n      createdDateTime: resource.createdDateTime || null,\n      lastModifiedDateTime: resource.lastModifiedDateTime || null,\n      source: 'tenant_graph_search',\n      search_date: searchDate\n    });\n  }\n});\n\nreturn [{ json: { tenant_search_files: files } }];"
+      },
+      "id": "9ffead36-8d8d-4e64-953d-8263ebdd3d31",
+      "name": "Collect Tenant Search Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/joinedTeams",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "3ce63d50-738c-432f-a66e-4e763b640251",
+      "name": "Get All Joined Teams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1936,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = Array.isArray($json.value) ? $json.value : [];\nif (!teams.length) {\n  throw new Error(\n    'No Teams returned. Reconnect the Microsoft credential with Team.ReadBasic.All.'\n  );\n}\n\nreturn teams.map((team, index) => ({\n  json: {\n    team_id: team.id,\n    team_name: team.displayName || null\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "135d1668-0bc9-49bc-bc51-a073a8854411",
+      "name": "Expand Teams",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels?$select=id,displayName,membershipType' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "c0c7c74a-145f-47c3-b657-07da816a8b70",
+      "name": "Get Every Team Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2384,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const teams = $items('Expand Teams');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const team = teams[index]?.json || {};\n  const channels = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const channel of channels) {\n    if (!channel?.id) continue;\n    output.push({\n      json: {\n        ...team,\n        channel_id: channel.id,\n        channel_name: channel.displayName || null,\n        channel_type: channel.membershipType || null\n      }\n    });\n  }\n});\n\nif (!output.length) {\n  throw new Error(\n    'No Teams channels returned. Reconnect the credential with Channel.ReadBasic.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "92c4d920-41fd-443b-ae39-3ffbb6eff59d",
+      "name": "Expand All Channels",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2608,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/teams/' + encodeURIComponent($json.team_id) + '/channels/' + encodeURIComponent($json.channel_id) + '/filesFolder' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "c1e199c7-747a-4590-8def-615e76adecb1",
+      "name": "Get Every Channel Files Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2832,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const channels = $items('Expand All Channels');\nconst output = [];\n\nitems.forEach((item, index) => {\n  const folder = item.json || {};\n  const channel = channels[index]?.json || {};\n  const driveId =\n    folder?.parentReference?.driveId ||\n    folder?.remoteItem?.parentReference?.driveId ||\n    null;\n  const folderId = folder?.id || folder?.remoteItem?.id || null;\n  if (!driveId || !folderId) return;\n\n  output.push({\n    json: {\n      ...channel,\n      drive_id: driveId,\n      channel_folder_id: folderId\n    }\n  });\n});\n\nif (!output.length) {\n  throw new Error(\n    'No channel file folders are accessible. The credential needs Files.Read.All.'\n  );\n}\nreturn output;"
+      },
+      "id": "6fb1148b-be14-437e-ab0f-010ec695e6ff",
+      "name": "Prepare Channel Recording Folders",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3056,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.drive_id) + '/items/' + encodeURIComponent($json.channel_folder_id) + ':/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "22a3d6df-f048-4a74-bb38-908b8bd4472a",
+      "name": "List Every Channel Recordings Folder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3280,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const folders = $items('Prepare Channel Recording Folders');\nconst files = [];\n\nitems.forEach((item, index) => {\n  const folder = folders[index]?.json || {};\n  const children = Array.isArray(item.json?.value) ? item.json.value : [];\n  for (const file of children) {\n    if (!file?.id || !file?.file || !/\\.mp4$/i.test(String(file.name || ''))) {\n      continue;\n    }\n    files.push({\n      id: file.id,\n      driveId: file?.parentReference?.driveId || folder.drive_id || null,\n      name: file.name,\n      webUrl: file.webUrl || null,\n      createdDateTime: file.createdDateTime || null,\n      lastModifiedDateTime: file.lastModifiedDateTime || null,\n      source: 'teams_channel_recordings_folder',\n      team_id: folder.team_id || null,\n      team_name: folder.team_name || null,\n      channel_id: folder.channel_id || null,\n      channel_name: folder.channel_name || null\n    });\n  }\n});\n\nreturn [{ json: { channel_recording_files: files } }];"
+      },
+      "id": "930eb521-61ee-4a31-9ed2-2dfa300c1d78",
+      "name": "Collect All Channel Recording Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3504,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.microsoft.com/v1.0/me/drive/root:/Recordings:/children?$top=999&$select=id,name,webUrl,parentReference,createdDateTime,lastModifiedDateTime,size,file",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {}
+      },
+      "id": "6f2682cc-dbcb-42e5-9090-266ea48866ef",
+      "name": "List Current User OneDrive Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3728,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: match every lecture to AT MOST one recording file.\n//\n// Unchanged from v8: exact Graph call-id linkage, exact normalized subject,\n// exactly one candidate, ambiguous => no update.\n// Added: the file must be named for the lecture's own date.\n// Changed: the timestamp rule. A Teams file name carries the moment recording\n// started on the client, which the audit measured 17-73 s BEFORE Graph's\n// createdDateTime (and never after it). So the file may lead Graph by up to\n// 120 s and may never trail it. The window is a constant, not a setting.\nconst MAX_FILE_LEAD_SECONDS = 120;\nconst MATCH_METHOD = 'exact_call_id_subject_timestamp_v9';\n\nconst lectures =\n  $items('Collect Lectures and Exact Graph Times')[0]?.json?.lectures || [];\nconst tenantFiles =\n  $items('Collect Tenant Search Candidates')[0]?.json?.tenant_search_files || [];\nconst channelFiles =\n  $items('Collect All Channel Recording Files')[0]?.json?.channel_recording_files || [];\nconst oneDriveResponse = items[0]?.json || {};\nconst oneDriveFiles = (Array.isArray(oneDriveResponse.value) ? oneDriveResponse.value : [])\n  .filter(file => file?.id && file?.file && /\\.mp4$/i.test(String(file.name || '')))\n  .map(file => ({\n    id: file.id,\n    driveId: file?.parentReference?.driveId || null,\n    name: file.name,\n    webUrl: file.webUrl || null,\n    createdDateTime: file.createdDateTime || null,\n    lastModifiedDateTime: file.lastModifiedDateTime || null,\n    source: 'current_user_onedrive_recordings'\n  }));\n\nconst deduped = new Map();\nfor (const file of [...tenantFiles, ...channelFiles, ...oneDriveFiles]) {\n  if (!file?.id || !file?.driveId) continue;\n  const key = String(file.driveId) + ':' + String(file.id);\n  deduped.set(key, { ...(deduped.get(key) || {}), ...file });\n}\nconst files = [...deduped.values()];\n\n// Same subject normalization as v8 and QA One Lecture v8.\nconst normalizeSubject = value => String(value || '')\n  .toLowerCase()\n  .replace(/&amp;/g, '&')\n  .replace(/[^a-z0-9]+/g, ' ')\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .replace(/^(dr|doctor|prof|professor|mr|mrs|ms)\\s+/, '')\n  .replace(/[^a-z0-9]+/g, '');\n\nfunction parseTeamsFilename(name) {\n  const match = String(name || '').match(\n    /^(.*)-(\\d{8})_(\\d{6})(?:UTC)?-Meeting Recording\\.mp4$/i\n  );\n  if (!match) return null;\n  const date = match[2];\n  const time = match[3];\n  const isoDate = date.slice(0, 4) + '-' + date.slice(4, 6) + '-' + date.slice(6, 8);\n  const timestamp = Date.parse(isoDate + 'T' + time.slice(0, 2) + ':' +\n    time.slice(2, 4) + ':' + time.slice(4, 6) + 'Z');\n  if (!Number.isFinite(timestamp)) return null;\n  return { subject: match[1], isoDate, timestamp };\n}\n\nconst parsedFiles = files\n  .map(file => ({ file, parsed: parseTeamsFilename(file.name) }))\n  .filter(candidate => candidate.parsed);\n\nreturn lectures.map((lecture, index) => {\n  const lectureDate = String(lecture.lecture_date || lecture.date || '').slice(0, 10);\n  const expectedSubject = normalizeSubject(lecture.subject);\n  const graphTimestamp = Date.parse(lecture.graph_created_at || '');\n  const graphExact = lecture.graph_status === 'EXACT_GRAPH_RECORDING_FOUND' &&\n    Number.isFinite(graphTimestamp) && Boolean(expectedSubject) && Boolean(lectureDate);\n\n  const assessed = graphExact ? parsedFiles.map(candidate => {\n    const leadSeconds = (graphTimestamp - candidate.parsed.timestamp) / 1000;\n    return {\n      ...candidate,\n      subject_exact: normalizeSubject(candidate.parsed.subject) === expectedSubject,\n      same_date: candidate.parsed.isoDate === lectureDate,\n      lead_seconds: leadSeconds,\n      timestamp_ok: leadSeconds >= 0 && leadSeconds <= MAX_FILE_LEAD_SECONDS\n    };\n  }) : [];\n\n  const exact = assessed\n    .filter(c => c.subject_exact && c.same_date && c.timestamp_ok)\n    .sort((a, b) => a.lead_seconds - b.lead_seconds);\n\n  let status;\n  if (!graphExact) status = lecture.graph_status || 'GRAPH_LOOKUP_FAILED';\n  else if (exact.length > 1) status = 'AMBIGUOUS_RECORDING_FILES';\n  else if (exact.length === 1) status = 'EXACT_RECORDING_FILE_MATCHED';\n  else if (assessed.some(c => c.subject_exact && c.same_date)) status = 'TIMESTAMP_MISMATCH';\n  else if (assessed.some(c => c.same_date && c.timestamp_ok)) status = 'SUBJECT_MISMATCH';\n  else status = 'RECORDING_FILE_NOT_FOUND';\n\n  const best = status === 'EXACT_RECORDING_FILE_MATCHED' ? exact[0] : null;\n  const file = best?.file || null;\n  const nearestSubjectLead = assessed\n    .filter(c => c.subject_exact && c.same_date)\n    .map(c => c.lead_seconds)\n    .sort((a, b) => Math.abs(a) - Math.abs(b))[0];\n\n  return {\n    json: {\n      ...lecture,\n      recording_item_id: file?.id || null,\n      recording_drive_id: file?.driveId || null,\n      recording_filename: file?.name || null,\n      recording_web_url: file?.webUrl || null,\n      recording_source: file?.source || null,\n      recording_team_name: file?.team_name || null,\n      recording_channel_name: file?.channel_name || null,\n      timestamp_difference_seconds: best ? best.lead_seconds : null,\n      nearest_same_subject_lead_seconds: nearestSubjectLead ?? null,\n      max_file_lead_seconds: MAX_FILE_LEAD_SECONDS,\n      exact_file_matches: exact.length,\n      candidate_files_seen: files.length,\n      recording_match_method: best ? MATCH_METHOD : null,\n      ambiguous_candidate_filenames: exact.length > 1\n        ? exact.map(candidate => candidate.file?.name || null) : [],\n      recording_link_status: status\n    },\n    pairedItem: { item: index }\n  };\n});\n"
+      },
+      "id": "ddac09ab-ac0c-4dc3-bb9b-3849a023e424",
+      "name": "Match Every Lecture Safely",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3952,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: dry-run report. Nothing downstream of this node writes.\nreturn items.map((item, index) => ({\n  json: {\n    ...item.json,\n    execution_result:\n      item.json.recording_link_status === 'EXACT_RECORDING_FILE_MATCHED'\n        ? 'DRY_RUN_EXACT_MATCH_NO_DATABASE_UPDATE'\n        : 'DRY_RUN_UNMATCHED_NO_DATABASE_UPDATE'\n  },\n  pairedItem: { item: index }\n}));\n"
+      },
+      "id": "50d2eae1-3119-4686-94ea-f1129db004e4",
+      "name": "Dry Run Results - REVIEW THIS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0072ec0-ef0f-405d-a310-a6eb65387d2c",
+              "leftValue": "={{ $json.recording_link_status }}",
+              "rightValue": "EXACT_RECORDING_FILE_MATCHED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "e00e3a68-0365-4635-a2ab-447dcb1c0e51",
+              "leftValue": "={{ $json.recording_item_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "094f2b51-ac15-406c-a12b-6d1270d69f17",
+              "leftValue": "={{ $json.recording_drive_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "e97d948d-4005-5dbb-9d5a-f3b1971e3e6c",
+              "leftValue": "={{ $json.recording_match_method }}",
+              "rightValue": "exact_call_id_subject_timestamp_v9",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f2992702-35ac-4d0b-ae8a-68369377a35c",
+      "name": "Exactly One Safe File?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4400,
+        880
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://graph.microsoft.com/v1.0/drives/' + encodeURIComponent($json.recording_drive_id) + '/items/' + encodeURIComponent($json.recording_item_id) + '/createLink' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ type: 'view', scope: 'organization' }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "ccb5d249-eb66-47bf-bddf-70b9b0a16b43",
+      "name": "Create Organization View Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4624,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "oeiPr7TgQfLR7sPE",
+          "name": "Attendance(khaled)"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: choose the URL to persist for an exact match.\n// Prefer the organization view link; fall back to the exact DriveItem webUrl,\n// but never to a SharePoint list-form URL.\nconst matchedItems = $items('Exactly One Safe File?', 0, 0);\n\nfunction pairedIndex(item, fallback) {\n  const paired = item?.pairedItem;\n  if (Array.isArray(paired)) {\n    const value = Number(paired[0]?.item);\n    if (Number.isInteger(value)) return value;\n  }\n  const value = Number(paired?.item);\n  return Number.isInteger(value) ? value : fallback;\n}\n\nconst usable = value => {\n  const text = String(value || '').trim();\n  return text && !/\\/Forms\\/DispForm\\.aspx/i.test(text) ? text : null;\n};\n\nreturn items.map((item, index) => {\n  const matchedIndex = pairedIndex(item, index);\n  const lecture = matchedItems[matchedIndex]?.json || {};\n  const response = item.json || {};\n  const organizationUrl = usable(response.link?.webUrl);\n  const itemUrl = usable(lecture.recording_web_url);\n  const finalUrl = organizationUrl || itemUrl;\n\n  return {\n    json: {\n      ...lecture,\n      recording_url: finalUrl,\n      recording_link_status: organizationUrl\n        ? 'organization_view_link_created_exact_match'\n        : (itemUrl\n            ? 'drive_item_web_url_used_exact_match'\n            : 'create_link_failed_no_update'),\n      create_link_error: response.error?.message || null\n    },\n    pairedItem: { item: matchedIndex }\n  };\n});\n"
+      },
+      "id": "fb64be21-736a-4ab3-8481-68db4ba8a6aa",
+      "name": "Finalize Recording URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4848,
+        784
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Recording v9: persist ONE exact recording match.\n-- $1 session_id, $2 recording_url, $3 recording_item_id, $4 recording_drive_id,\n-- $5 recording_filename, $6 recording_link_status, $7 lecture_key,\n-- $8 meeting_id, $9 recording_match_method, $10 dry_run ('true'/'false').\n--\n-- Every guard is repeated here, in the database, so a mis-wired node cannot\n-- write: dry_run must be exactly false, the match must be the v9 exact method,\n-- and an existing recording_url is never replaced. Only recording-owned\n-- columns are written. QA columns are not referenced.\nWITH input AS (\n  SELECT\n    NULLIF($1, '')::text AS session_id,\n    NULLIF($2, '')::text AS recording_url,\n    NULLIF($3, '')::text AS recording_item_id,\n    NULLIF($4, '')::text AS recording_drive_id,\n    NULLIF($5, '')::text AS recording_filename,\n    NULLIF($6, '')::text AS recording_link_status,\n    NULLIF($7, '')::text AS lecture_key,\n    NULLIF($8, '')::text AS meeting_id,\n    NULLIF($9, '')::text AS recording_match_method,\n    NULLIF($10, '')::boolean AS dry_run\n),\neligible AS (\n  SELECT i.*\n    FROM input i\n   WHERE i.dry_run IS FALSE\n     AND i.recording_match_method = 'exact_call_id_subject_timestamp_v9'\n     AND i.recording_link_status IN ('organization_view_link_created_exact_match',\n                                     'drive_item_web_url_used_exact_match')\n     AND i.session_id IS NOT NULL\n     AND i.meeting_id IS NOT NULL\n     AND i.recording_url IS NOT NULL\n     AND i.recording_item_id IS NOT NULL\n     AND i.recording_drive_id IS NOT NULL\n),\nsession_update AS (\n  UPDATE public.qa_doctors_sessions s\n  SET\n    recording_url = i.recording_url,\n    recording_item_id = i.recording_item_id,\n    recording_drive_id = i.recording_drive_id,\n    recording_filename = i.recording_filename,\n    recording_link_status = i.recording_link_status,\n    recording_link_updated_at = NOW()\n  FROM eligible i\n  WHERE s.session_id = i.session_id\n    AND s.meeting_id = i.meeting_id\n    AND NULLIF(BTRIM(s.recording_url), '') IS NULL\n  RETURNING s.session_id\n),\nperfect_update AS (\n  UPDATE public.qa_perfect_lectures p\n  SET\n    recording_url = i.recording_url,\n    meeting_id = COALESCE(p.meeting_id, i.meeting_id),\n    session_id = COALESCE(p.session_id, i.session_id)\n  FROM eligible i\n  WHERE p.lecture_key = i.lecture_key\n    AND (p.session_id IS NULL OR p.session_id = i.session_id)\n    AND NULLIF(BTRIM(p.recording_url), '') IS NULL\n    AND EXISTS (SELECT 1 FROM session_update)\n  RETURNING p.lecture_key\n)\nSELECT\n  i.session_id,\n  i.lecture_key,\n  i.recording_url,\n  i.recording_filename,\n  i.recording_link_status,\n  i.dry_run,\n  EXISTS (SELECT 1 FROM eligible) AS write_eligible,\n  EXISTS (SELECT 1 FROM session_update) AS session_updated,\n  EXISTS (SELECT 1 FROM perfect_update) AS perfect_updated\nFROM input i;\n",
+        "options": {
+          "queryReplacement": "={{ [\n  $json.session_id,\n  $json.recording_url,\n  $json.recording_item_id,\n  $json.recording_drive_id,\n  $json.recording_filename,\n  $json.recording_link_status,\n  $json.lecture_key,\n  $json.meeting_id,\n  $json.recording_match_method,\n  String($items('Validate Run Settings')[0].json.dry_run !== false)\n] }}"
+        }
+      },
+      "id": "ba5ab956-5dd5-496d-af4f-b03d61832de6",
+      "name": "Update Both Recording Tables",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        5072,
+        784
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "78CL3aODCxEyJY9f",
+          "name": "KBC Neon DB (Fouda wa7ed bs 🥇)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item, index) => ({\n  json: {\n    ...item.json,\n    execution_result: 'NO_DATABASE_UPDATE_UNSAFE_OR_MISSING_MATCH'\n  },\n  pairedItem: { item: index }\n}));"
+      },
+      "id": "331e55b4-812b-4241-980c-2e97d43fe183",
+      "name": "Unmatched - Never Update DB",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4624,
+        976
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.graph_lookup_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 250
+            }
+          }
+        }
+      },
+      "id": "a2d4a0ff-1eef-53b2-a33c-6beeb36a732a",
+      "name": "Get Organizer Meeting Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        816,
+        784
+      ],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "SET_APP_ONLY_GRAPH_CREDENTIAL_BEFORE_USE",
+          "name": "Microsoft Graph APP-ONLY (client credentials) - OnlineMeetingRecording.Read.All"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "272fe93d-5038-5120-87c8-3c0d9750cedb",
+              "leftValue": "={{ $json.precheck_status === null && typeof $json.graph_lookup_url === 'string' && $json.graph_lookup_url.startsWith('https://graph.microsoft.com/v1.0/users/') }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        816,
+        604
+      ],
+      "id": "4de6eec9-48bd-537b-868b-49bc765f3667",
+      "name": "Graph Lookup Possible?"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: lectures that failed the precheck. No Graph call, no update.\nreturn items.map((item, index) => ({\n  json: {\n    ...item.json,\n    recording_link_status: item.json.precheck_status,\n    execution_result: 'NO_DATABASE_UPDATE_NOT_EVALUATED'\n  },\n  pairedItem: { item: index }\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1036,
+        424
+      ],
+      "id": "7b71cb4b-2530-578b-955b-eb4d95be444a",
+      "name": "Not Evaluated - Never Update DB"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recording v9: validate the operator's run settings. Fail closed.\n//\n// dry_run is disarmed ONLY by the literal boolean false. A missing value, the\n// string \"false\", 0, null - anything else - keeps the run a dry run.\nconst raw = items[0]?.json || {};\n\nconst DATE = /^\\d{4}-\\d{2}-\\d{2}$/;\nfunction isoDate(name) {\n  const value = String(raw[name] ?? '').trim();\n  if (!DATE.test(value)) {\n    throw new Error(`Run Settings: ${name} must be YYYY-MM-DD (got \"${value}\")`);\n  }\n  const parsed = new Date(value + 'T00:00:00Z');\n  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {\n    throw new Error(`Run Settings: ${name} is not a real calendar date (${value})`);\n  }\n  return value;\n}\n\nconst dateFrom = isoDate('date_from');\nconst dateTo = isoDate('date_to');\nif (dateFrom > dateTo) {\n  throw new Error(`Run Settings: date_from ${dateFrom} is after date_to ${dateTo}`);\n}\nconst spanDays = (Date.parse(dateTo) - Date.parse(dateFrom)) / 86400000;\nif (spanDays > 366) {\n  throw new Error(`Run Settings: date range of ${spanDays} days exceeds 366`);\n}\n\nconst maxLectures = raw.max_lectures === undefined || raw.max_lectures === null ||\n  raw.max_lectures === '' ? 100 : Number(raw.max_lectures);\nif (!Number.isInteger(maxLectures) || maxLectures < 1 || maxLectures > 500) {\n  throw new Error(`Run Settings: max_lectures must be an integer 1..500 (got \"${raw.max_lectures}\")`);\n}\n\nreturn [{\n  json: {\n    settings_version: 'recording_links_v9',\n    dry_run: raw.dry_run !== false,\n    date_from: dateFrom,\n    date_to: dateTo,\n    max_lectures: maxLectures\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        254,
+        944
+      ],
+      "id": "39d1e5d5-27f7-5cca-848d-d00a1ddc4bef",
+      "name": "Validate Run Settings"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e37a6375-4191-51cb-82e8-64cba63c07ff",
+              "leftValue": "={{ $json.dry_run === false && $items('Validate Run Settings')[0].json.dry_run === false }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        4176,
+        784
+      ],
+      "id": "7b57008c-fbfa-5116-b477-3f520ade2412",
+      "name": "Write Mode Armed?"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Create Date Range",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run Settings - EDIT HERE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When clicking Execute workflow": {
+      "main": [
+        [
+          {
+            "node": "Create Date Range",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run Settings - EDIT HERE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Date Range": {
+      "main": [
+        [
+          {
+            "node": "Get Active Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Today's Calendar Events": {
+      "main": [
+        [
+          {
+            "node": "Extract Calendar Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Calendar Fields": {
+      "main": [
+        [
+          {
+            "node": "Find Online Meeting by JoinWebUrl",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Online Meeting by JoinWebUrl": {
+      "main": [
+        [
+          {
+            "node": "Pick Meeting Id",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Meeting Id": {
+      "main": [
+        [
+          {
+            "node": "Match Calendar to Groups",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Groups": {
+      "main": [
+        [
+          {
+            "node": "Get Today's Calendar Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Calendar to Groups": {
+      "main": [
+        [
+          {
+            "node": "Matched Lecture?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matched Lecture?": {
+      "main": [
+        [
+          {
+            "node": "Execute QA One Lecture",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Settings - EDIT HERE": {
+      "main": [
+        [
+          {
+            "node": "Validate Run Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Target Lectures": {
+      "main": [
+        [
+          {
+            "node": "Extract Exact Call IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Exact Call IDs": {
+      "main": [
+        [
+          {
+            "node": "Graph Lookup Possible?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Lectures and Exact Graph Times": {
+      "main": [
+        [
+          {
+            "node": "Build One Search per Lecture Date",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build One Search per Lecture Date": {
+      "main": [
+        [
+          {
+            "node": "Search All Accessible SharePoint and OneDrive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search All Accessible SharePoint and OneDrive": {
+      "main": [
+        [
+          {
+            "node": "Collect Tenant Search Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Tenant Search Candidates": {
+      "main": [
+        [
+          {
+            "node": "Get All Joined Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Joined Teams": {
+      "main": [
+        [
+          {
+            "node": "Expand Teams",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand Teams": {
+      "main": [
+        [
+          {
+            "node": "Get Every Team Channel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Team Channel": {
+      "main": [
+        [
+          {
+            "node": "Expand All Channels",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expand All Channels": {
+      "main": [
+        [
+          {
+            "node": "Get Every Channel Files Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Every Channel Files Folder": {
+      "main": [
+        [
+          {
+            "node": "Prepare Channel Recording Folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Channel Recording Folders": {
+      "main": [
+        [
+          {
+            "node": "List Every Channel Recordings Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Every Channel Recordings Folder": {
+      "main": [
+        [
+          {
+            "node": "Collect All Channel Recording Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect All Channel Recording Files": {
+      "main": [
+        [
+          {
+            "node": "List Current User OneDrive Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Current User OneDrive Recordings": {
+      "main": [
+        [
+          {
+            "node": "Match Every Lecture Safely",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Every Lecture Safely": {
+      "main": [
+        [
+          {
+            "node": "Write Mode Armed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exactly One Safe File?": {
+      "main": [
+        [
+          {
+            "node": "Create Organization View Link",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Unmatched - Never Update DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Organization View Link": {
+      "main": [
+        [
+          {
+            "node": "Finalize Recording URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize Recording URL": {
+      "main": [
+        [
+          {
+            "node": "Update Both Recording Tables",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Run Settings": {
+      "main": [
+        [
+          {
+            "node": "Get Target Lectures",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Graph Lookup Possible?": {
+      "main": [
+        [
+          {
+            "node": "Get Organizer Meeting Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not Evaluated - Never Update DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Organizer Meeting Recordings": {
+      "main": [
+        [
+          {
+            "node": "Collect Lectures and Exact Graph Times",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Mode Armed?": {
+      "main": [
+        [
+          {
+            "node": "Exactly One Safe File?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry Run Results - REVIEW THIS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "1df6b8eb7cad6964c4019ffc034ca93b67e15d54f1ef0b486646f0918cb85bc3"
+  },
+  "tags": []
+}

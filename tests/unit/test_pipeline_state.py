@@ -89,7 +89,12 @@ from app.qa.perfect import (
     PENDING_ATTENDANCE_DATA,
 )
 from app.rendering.evidence import RENDERER_VERSION
-from app.transcripts.selection import SELECTION_VERSION
+from app.transcripts.selection import (
+    SELECTION_VERSION,
+    CandidateArtifact,
+    combined_source_fingerprint,
+    relevant_candidates,
+)
 from app.transcripts.speakers import SPEAKER_INVENTORY_VERSION
 from app.transcripts.webvtt import PARSER_VERSION
 from app.writer.mapping import WRITER_VERSION
@@ -112,8 +117,59 @@ NOW = datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc)
 SESSION_DATE = date(2026, 9, 17)
 
 
+# The occurrence the selector judges: 2026-09-17 08:00-10:00 UTC, i.e.
+# 11:00-13:00 Cairo, on the fixture's meeting.
+SCHEDULED_START = datetime(2026, 9, 17, 8, 0, tzinfo=timezone.utc)
+SCHEDULED_END = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
+
+
+def candidate_row(transcript_id, start, end, *, sha, call_id="call-1",
+                  meeting_id="meeting-1", artifact_id=None, first_seen=None):
+    """One row of the selector's own candidate query, in column order."""
+    return (artifact_id or f"artifact-{transcript_id}", transcript_id, start, end,
+            call_id, meeting_id, sha, 1000, first_seen or NOW - timedelta(days=1))
+
+
+# Two parts of one call, both inside the occurrence window.
+CANDIDATES = [
+    candidate_row("transcript-1", SCHEDULED_START, SCHEDULED_START + timedelta(hours=1),
+                  sha="1" * 64),
+    candidate_row("transcript-2", SCHEDULED_START + timedelta(minutes=65),
+                  SCHEDULED_END, sha="2" * 64),
+]
+
+
+def input_fingerprint(rows) -> str:
+    """What the selector would have stamped on a selection made from `rows`."""
+    candidates = [CandidateArtifact(
+        artifact_id=row[0], provider_transcript_id=row[1],
+        provider_created_at=row[2], provider_end_at=row[3],
+        provider_call_id=row[4], meeting_id=row[5],
+        content_sha256=row[6], content_bytes=row[7]) for row in rows]
+    return relevant_candidates(candidates, scheduled_start=SCHEDULED_START,
+                               scheduled_end=SCHEDULED_END,
+                               target_date=SESSION_DATE,
+                               meeting_id="meeting-1").fingerprint
+
+
+COMBINED_FINGERPRINT = combined_source_fingerprint(SELECTION_VERSION, ["1" * 64, "2" * 64])
+
+
+def selection_row(*, fingerprint=None, combined=COMBINED_FINGERPRINT, status="SELECTED",
+                  duration_minutes=120, actual_start=SCHEDULED_START,
+                  actual_end=SCHEDULED_END, updated_at=None):
+    """The resolver's selection row. `fingerprint=None` means 'as selected'."""
+    return (SELECTION_ID, status, 2, "b" * 64, updated_at or NOW - timedelta(hours=3),
+            input_fingerprint(CANDIDATES) if fingerprint is None else fingerprint,
+            actual_start, actual_end, combined, duration_minutes,
+            None if duration_minutes is None else duration_minutes * 60.0)
+
+
 # Fragments unique to each statement, most specific first.
 ROUTES = (
+    ("occurrence", "SELECT l.scheduled_start, l.scheduled_end"),
+    ("selection_candidates", "a.first_seen_at"),
+    ("selected_parts", "FROM public.lecture_transcript_selection_parts p"),
     ("keys", "SELECT r.legacy_lecture_key"),
     ("perfect_results", "SELECT r.eligibility_version"),
     ("perfect_writes_state", "p.result_id"),
@@ -130,6 +186,7 @@ ROUTES = (
     ("evaluations", "FROM public.lecture_qa_evaluations e"),
     ("attempts", "lecture_qa_generation_attempts"),
     ("rendered", "lecture_qa_rendered_sessions"),
+    ("acquisition", "lecture_transcript_acquisition_runs"),
     ("artifacts", "lecture_transcript_candidates"),
     ("selection", "lecture_transcript_selections"),
     ("documents", "lecture_transcript_documents"),
@@ -236,9 +293,13 @@ def complete_rows(**overrides) -> dict:
         "duplicate_group": [group_row()],
         "lecture_day": [(LECTURE_ID,)],
         "coverage": [(SNAPSHOT_ID, 12, 12, 12, ATTENDANCE_RESOLUTION_VERSION, 12)],
-        "artifacts": [(2, 2, 0, NOW - timedelta(hours=4))],
-        "selection": [(SELECTION_ID, "SELECTED", 2, "b" * 64, NOW - timedelta(hours=3))],
-        "documents": [(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW)],
+        "artifacts": [(2, 2, 0, NOW - timedelta(hours=4), 2, 0)],
+        "occurrence": [(SCHEDULED_START, SCHEDULED_END, SESSION_DATE, "meeting-1")],
+        "selection_candidates": list(CANDIDATES),
+        "selected_parts": [("transcript-1",), ("transcript-2",)],
+        "selection": [selection_row()],
+        "documents": [(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW,
+                       "b" * 64)],
         "speakers": [(9,)],
         "engagement_lineage": [(ENGAGEMENT_ID, DOCUMENT_ID, SNAPSHOT_ID,
                                 "CALCULATED", 12, 9, True, 4, "CALCULATED",
@@ -250,8 +311,8 @@ def complete_rows(**overrides) -> dict:
                          11, 0, 0, "strict_json_schema_v1",
                          "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
                          SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
-                         DEFAULT_EVIDENCE_POLICY)],
-        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [])],
+                         DEFAULT_EVIDENCE_POLICY, True)],
+        "attempts": [(FINGERPRINT, 1, 1, NOW, NOW, ["SUCCESS"], [""], [""], [""], None, [""], [""], [""], [""])],
         "rendered": [(RENDER_ID, "RENDERED", RENDERER_VERSION, FINGERPRINT,
                       11, 0, 0, EVALUATION_ID, LEGACY_SESSION_ID)],
         "qa_writes": [(WRITE_ID, "WRITTEN", WRITER_VERSION, LEGACY_SESSION_ID)],
@@ -267,6 +328,22 @@ def complete_rows(**overrides) -> dict:
                                   DEFAULT_PERFECT_ELIGIBILITY_VERSION,
                                   LEGACY_LECTURE_KEY, "result-1")],
     }
+    rows.update(overrides)
+    return rows
+
+
+def pending_attendance_rows(**overrides) -> dict:
+    """
+    A finished lecture whose attendance source never answered: an empty
+    SOURCE_MISSING snapshot, and an evaluation built under the
+    attendance-optional policy - so it states NO attendance-derived numbers.
+    """
+    rows = complete_rows(
+        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)],
+        evaluations=[(EVALUATION_ID, FINGERPRINT, "COMPLETED", None, 1, True,
+                      11, 0, 0, "strict_json_schema_v1", "canonical_cue_bounds_v1",
+                      NOW, ENGAGEMENT_ID, SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
+                      DEFAULT_EVIDENCE_POLICY, False)])
     rows.update(overrides)
     return rows
 
@@ -305,7 +382,7 @@ def test_every_stage_reports_a_state_from_the_declared_vocabulary():
 # --- 2..7. the upstream stages ----------------------------------------------
 
 def test_a_missing_transcript_asks_for_the_transcript():
-    result = resolve(complete_rows(artifacts=[(0, 0, 0, None)], selection=[],
+    result = resolve(complete_rows(artifacts=[(0, 0, 0, None, 0, 0)], selection=[],
                                    documents=[], speakers=[(0,)]))
     assert result["stages"][TRANSCRIPT]["state"] == MISSING
     assert result["next_action"] == ACQUIRE_TRANSCRIPT
@@ -313,8 +390,22 @@ def test_a_missing_transcript_asks_for_the_transcript():
 
 
 def test_a_failed_transcript_fetch_is_not_the_same_as_a_missing_one():
-    result = resolve(complete_rows(artifacts=[(2, 0, 2, None)], selection=[],
+    result = resolve(complete_rows(artifacts=[(2, 0, 2, None, 0, 0)], selection=[],
                                    documents=[], speakers=[(0,)]))
+    assert result["stages"][TRANSCRIPT]["state"] == FAILED
+    assert result["next_action"] == ACQUIRE_TRANSCRIPT
+
+
+def test_a_failed_refresh_of_stored_content_is_not_a_failed_transcript():
+    """AI in Project Control 2026-11-06: every artifact CONTENT_FETCH_ERROR after a refresh, all with content."""
+    result = resolve(complete_rows(artifacts=[(9, 9, 0, NOW - timedelta(hours=4), 1, 0)]))
+    assert result["stages"][TRANSCRIPT]["state"] == COMPLETE
+
+
+def test_a_day_with_no_content_fails_although_other_weeks_are_stored():
+    """Ray MSP 2026-11-06: nine earlier weeks stored, the day's own transcript never fetched."""
+    result = resolve(complete_rows(artifacts=[(10, 9, 1, NOW - timedelta(hours=4), 0, 1)],
+                                   selection=[], documents=[], speakers=[(0,)]))
     assert result["stages"][TRANSCRIPT]["state"] == FAILED
     assert result["next_action"] == ACQUIRE_TRANSCRIPT
 
@@ -326,12 +417,20 @@ def test_a_missing_selection_asks_for_the_selection():
 
 
 def test_transcript_content_arriving_after_the_selection_makes_it_stale():
-    """A choice is not wrong because evidence arrived late - it is UNINFORMED."""
-    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1))])
+    """
+    A choice is not wrong because evidence arrived late - it is UNINFORMED.
+
+    Since selection_input_fingerprint_v1 "arrived" means a relevant transcript
+    the selector has not seen, not a fetch timestamp: a newer fetch of the
+    same bytes is the false staleness this used to report.
+    """
+    late = candidate_row("transcript-3", SCHEDULED_START + timedelta(minutes=125),
+                         SCHEDULED_END + timedelta(minutes=30), sha="3" * 64)
+    rows = complete_rows(artifacts=[(3, 3, 0, NOW + timedelta(hours=1), 3, 0)],
+                         selection_candidates=CANDIDATES + [late])
     result = resolve(rows)
     assert result["stages"][SELECTION]["state"] == STALE
-    assert result["stages"][SELECTION]["reason"] == \
-        "TRANSCRIPT_CONTENT_NEWER_THAN_SELECTION"
+    assert result["stages"][SELECTION]["reason"] == "SELECTION_INPUTS_CHANGED"
     assert result["next_action"] == SELECT_TRANSCRIPT
 
 
@@ -343,7 +442,7 @@ def test_missing_canonical_cues_ask_for_the_parse():
 
 def test_a_document_parsed_from_a_different_selection_is_a_lineage_break():
     rows = complete_rows(documents=[(DOCUMENT_ID, PARSER_VERSION, "PARSED", 400,
-                                     "other-selection", NOW)])
+                                     "other-selection", NOW, "b" * 64)])
     result = resolve(rows)
     assert result["stages"][CANONICAL_CUES]["state"] == STALE
     assert result["next_action"] == BUILD_CANONICAL_CUES
@@ -583,8 +682,8 @@ def test_two_engagement_rows_on_one_snapshot_do_not_make_a_lecture_stale():
 def test_the_evaluation_decides_which_canonical_document_is_current():
     rows = complete_rows(documents=[
         ("newer-v2-document", "webvtt_canonical_v2_seam_dedup", "PARSED", 410,
-         SELECTION_ID, NOW + timedelta(hours=1)),
-        (DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW)])
+         SELECTION_ID, NOW + timedelta(hours=1), "b" * 64),
+        (DOCUMENT_ID, PARSER_VERSION, "PARSED", 400, SELECTION_ID, NOW, "b" * 64)])
     result = resolve(rows)
     assert result["stages"][CANONICAL_CUES]["document_id"] == DOCUMENT_ID
     assert result["next_action"] == NOTHING_TO_DO
@@ -606,7 +705,7 @@ def test_an_evaluation_built_on_a_superseded_engagement_refreshes_deterministica
         EVALUATION_ID, FINGERPRINT, "COMPLETED", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
         "superseded-engagement", SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID,
-        DEFAULT_EVIDENCE_POLICY)])
+        DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == STALE
     assert result["next_action"] == REFRESH_DETERMINISTIC_QA
@@ -645,7 +744,7 @@ def test_review_required_with_budget_left_is_retryable_qa():
         EVALUATION_ID, FINGERPRINT, "REVIEW_REQUIRED", "INVALID_KSB_TYPE", 1,
         True, 0, 0, 0, "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
         ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-        DEFAULT_EVIDENCE_POLICY)])
+        DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == REVIEW_REQUIRED
     assert result["stages"][QA_EVALUATION]["attempts_remaining"] > 0
@@ -663,9 +762,10 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
                       "INVALID_KSB_TYPE", 3, True, 0, 0, 0,
                       "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-                      DEFAULT_EVIDENCE_POLICY)],
+                      DEFAULT_EVIDENCE_POLICY, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
-                   ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3)])
+                   ["FAILED", "FAILED", "FAILED"], ["INVALID_KSB_TYPE"] * 3,
+                   [""] * 3, [""] * 3, None, [""] * 3, [""] * 3, [""] * 3, [""] * 3)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["attempts_remaining"] == 0
     assert result["stages"][QA_EVALUATION]["reason"] == \
@@ -676,13 +776,18 @@ def test_review_required_with_an_exhausted_budget_is_a_human_decision():
 # --- 8..9. attendance --------------------------------------------------------
 
 def test_a_missing_attendance_source_waits_rather_than_failing():
-    rows = complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)])
-    result = resolve(rows)
+    """
+    Attendance-optional QA: once everything the transcript can support is
+    done, the only thing left is the external source - a wait and a flag,
+    never a failure or a review.
+    """
+    result = resolve(pending_attendance_rows())
     assert result["stages"][ATTENDANCE]["state"] == WAITING
+    assert result["stages"][ATTENDANCE]["blocks_qa"] is False
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
     assert result["is_waiting"] is True
     assert result["requires_review"] is False
+    assert result["attendance_flag"] == "PENDING_ATTENDANCE"
 
 
 def test_recorded_absences_also_wait_and_never_confirm_a_zero():
@@ -714,8 +819,7 @@ def test_no_snapshot_at_all_means_resolve_attendance_not_wait():
 
 
 def test_the_resolver_asks_the_attendance_source_nothing_by_default():
-    connection = StubConnection(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
+    connection = StubConnection(pending_attendance_rows())
     resolver = PipelineStateResolver(legacy_observations=StubObservations())
     result = resolver.for_lecture(connection, LECTURE_ID)
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
@@ -787,8 +891,7 @@ def test_a_missing_perfect_answer_asks_for_the_evaluation():
 
 
 def test_perfect_pending_attendance_waits_and_does_not_look_eligible():
-    rows = complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)],
+    rows = pending_attendance_rows(
         perfect_results=[(DEFAULT_PERFECT_ELIGIBILITY_VERSION, False,
                           PENDING_ATTENDANCE_DATA, "SOURCE_MISSING",
                           ELIGIBLE, NOW)],
@@ -796,7 +899,9 @@ def test_perfect_pending_attendance_waits_and_does_not_look_eligible():
         perfect_writes=[], perfect_writes_state=[])
     result = resolve(rows)
     assert result["stages"][PERFECT_ELIGIBILITY]["state"] == WAITING
-    # Attendance blocks first, which is the earlier and truer cause.
+    # The legacy QA sync is not held back by the pending Perfect answer.
+    assert result["stages"][LEGACY_QA_SYNC]["state"] == COMPLETE
+    # Both waits are attendance; the earlier one is reported.
     assert result["next_action"] == WAIT_FOR_ATTENDANCE_SOURCE
 
 
@@ -821,7 +926,13 @@ def test_a_pending_excel_sync_is_reported_and_owned_by_the_legacy_workflow():
 
 
 def test_the_observed_stages_are_exactly_the_two_legacy_workflows_own():
-    assert OBSERVED_ONLY_STAGES == {RECORDING_LINK, EXCEL_SYNC}
+    # Statically only Excel Sync. RECORDING_LINK is observed-only until
+    # RECORDING_LINK_MODE=write arms the coded stage - the default resolver
+    # still treats it exactly as Phase 4A did.
+    assert OBSERVED_ONLY_STAGES == {EXCEL_SYNC}
+    assert PipelineStateResolver().observed_only_stages == {RECORDING_LINK, EXCEL_SYNC}
+    assert PipelineStateResolver(
+        recording_link_mode="write").observed_only_stages == {EXCEL_SYNC}
 
 
 # --- the resume rule itself --------------------------------------------------
@@ -831,7 +942,7 @@ def test_the_earliest_incomplete_stage_wins_not_the_most_severe():
     A lecture with a missing transcript AND a missing render has one real
     problem, and it is not the render.
     """
-    rows = complete_rows(artifacts=[(0, 0, 0, None)], selection=[], documents=[],
+    rows = complete_rows(artifacts=[(0, 0, 0, None, 0, 0)], selection=[], documents=[],
                          speakers=[(0,)], rendered=[], qa_writes=[],
                          legacy_writes_state=[])
     result = resolve(rows)
@@ -877,21 +988,29 @@ def _states(*results):
 
 
 def test_day_counts_are_a_partition_of_the_lectures():
+    """
+    Attendance-optional QA: a lecture whose QA is published and whose
+    attendance is still pending is COMPLETE (the pending source is a flag,
+    counted separately); one whose QA is still owed is IN PROGRESS.
+    """
     complete = resolve()
-    waiting = resolve(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
+    published_pending = resolve(pending_attendance_rows())
+    qa_owed = resolve(pending_attendance_rows(evaluations=[], attempts=[], rendered=[],
+                                              qa_writes=[], legacy_writes_state=[]))
     review = resolve(complete_rows(lecture_state=[(
         LECTURE_ID, "Example", "example", "Module", SESSION_DATE, NOW, False,
         "REVIEW", "RESOLVED", "MATCHED", "meeting-1", True, None)]))
     report = DayReconciliation(resolver=None).from_states(
-        SESSION_DATE, _states(complete, waiting, review))
+        SESSION_DATE, _states(complete, published_pending, qa_owed, review))
     total = (report["complete_count"] + report["waiting_count"]
              + report["review_count"] + report["failed_count"]
              + report["in_progress_count"])
-    assert total == report["canonical_lecture_count"] == 3
-    assert report["complete_count"] == 1
-    assert report["waiting_count"] == 1
+    assert total == report["canonical_lecture_count"] == 4
+    assert report["complete_count"] == 2
+    assert report["in_progress_count"] == 1
+    assert report["waiting_count"] == 0
     assert report["review_count"] == 1
+    assert report["attendance_waiting_count"] == 2
 
 
 def test_pending_attendance_is_reported_distinctly_from_review():
@@ -930,7 +1049,8 @@ def test_the_report_counts_recording_and_excel_without_blocking_on_them():
 
 def test_bucket_is_severity_first_while_the_resume_rule_is_earliest_first():
     failed = resolve(complete_rows(documents=[(
-        DOCUMENT_ID, PARSER_VERSION, "INVALID_WEBVTT", 0, SELECTION_ID, NOW)]))
+        DOCUMENT_ID, PARSER_VERSION, "INVALID_WEBVTT", 0, SELECTION_ID, NOW,
+        "b" * 64)]))
     assert bucket_for(failed) == "failed"
     assert failed["blocking_stage"] == CANONICAL_CUES
 
@@ -972,17 +1092,19 @@ def test_a_legacy_sync_is_now_the_scheduler_own_next_action():
     assert result["operator_actions"] == []
 
 
-def test_waiting_and_review_still_stop_the_executable_search():
+def test_waiting_is_stepped_over_but_review_still_stops_the_executable_search():
     """
-    The limit of the rule. A WAITING attendance source and an unreviewed
-    discovery both make everything below them provisional, so the executable
-    search stops there - unlike a pending legacy write, which invalidates
-    nothing.
+    The limit of the rule. An unreviewed discovery makes everything below it
+    provisional, so the executable search stops there. A WAITING attendance
+    source does not: attendance is enrichment, and QA still runs from the
+    transcript (attendance-optional QA).
     """
-    waiting = resolve(complete_rows(
-        coverage=[(SNAPSHOT_ID, 0, 0, 0, ATTENDANCE_RESOLUTION_VERSION, 0)]))
-    assert waiting["next_executable_action"] == WAIT_FOR_ATTENDANCE_SOURCE
-    assert waiting["executable_stage"] == ATTENDANCE
+    waiting = resolve(pending_attendance_rows(evaluations=[], attempts=[],
+                                              rendered=[], qa_writes=[],
+                                              legacy_writes_state=[]))
+    assert waiting["stages"][ATTENDANCE]["state"] == WAITING
+    assert waiting["next_executable_action"] == RUN_QA
+    assert waiting["executable_stage"] == QA_EVALUATION
 
     review = resolve(complete_rows(lecture_state=[(
         LECTURE_ID, "Example", "example", "Module", SESSION_DATE, NOW, False,
@@ -1035,7 +1157,7 @@ def test_an_answer_rejected_by_an_older_evidence_rule_is_re_judged_not_re_bought
     rows = complete_rows(evaluations=[(
         EVALUATION_ID, FINGERPRINT, "INVALID_EVIDENCE", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
-        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, EVIDENCE_POLICY_V1)])
+        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, EVIDENCE_POLICY_V1, True)])
     result = resolve(rows)
     assert result["stages"][QA_EVALUATION]["state"] == STALE
     assert result["stages"][QA_EVALUATION]["reason"] == "EVIDENCE_POLICY_SUPERSEDED"
@@ -1047,7 +1169,7 @@ def test_an_answer_already_judged_by_the_current_rule_is_not_re_judged():
     rows = complete_rows(evaluations=[(
         EVALUATION_ID, FINGERPRINT, "INVALID_EVIDENCE", None, 1, True, 11, 0, 0,
         "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW, ENGAGEMENT_ID,
-        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, DEFAULT_EVIDENCE_POLICY)])
+        SNAPSHOT_ID, "c" * 64, None, DOCUMENT_ID, DEFAULT_EVIDENCE_POLICY, True)])
     result = resolve(rows)
     assert result["next_action"] == RUN_QA
 
@@ -1063,9 +1185,10 @@ def test_an_exhausted_budget_still_wins_over_a_superseded_policy():
                       "MAX_GENERATIONS_EXHAUSTED", 3, True, 0, 0, 0,
                       "strict_json_schema_v1", "canonical_cue_bounds_v1", NOW,
                       ENGAGEMENT_ID, SNAPSHOT_ID, None, None, DOCUMENT_ID,
-                      EVIDENCE_POLICY_V1)],
+                      EVIDENCE_POLICY_V1, True)],
         attempts=[(FINGERPRINT, 3, 3, NOW, NOW,
-                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3)])
+                   ["FAILED", "FAILED", "FAILED"], ["X"] * 3, [""] * 3, [""] * 3, None,
+                   [""] * 3, [""] * 3, [""] * 3, [""] * 3)])
     result = resolve(rows)
     assert result["next_action"] == MANUAL_REVIEW_REQUIRED
 

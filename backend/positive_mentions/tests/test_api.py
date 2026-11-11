@@ -248,7 +248,7 @@ class PositiveMentionsApiTests(TransactionTestCase):
 
     def test_the_list_reports_the_categories_recorded_in_the_analysis(self):
         """
-        Most common first, at most three, counted from the stored JSON.
+        Most common first, every category, counted from the stored JSON.
 
         It reports what the analysis wrote. It must not reclassify anything,
         and a lecture with no categories must come back with an empty list
@@ -275,6 +275,73 @@ class PositiveMentionsApiTests(TransactionTestCase):
         self.assertEqual(rows["categorised"]["moment_count"], 3)
         self.assertEqual(rows["uncategorised"]["top_categories"], [])
         self.assertEqual(rows["uncategorised"]["moment_count"], 1)
+
+    def test_the_list_counts_moments_exactly_as_the_full_record_does(self):
+        """
+        The list reads a slimmed copy of `positive_clips` (category only). For
+        every shape the column can hold, its moment count and categories must
+        equal what the detail page derives from the full value.
+        """
+        shapes = {
+            "array": [{"start": "00:00:02", "category": " trainer ", "dialogue": ["x"]},
+                      "not-a-moment", {"start": "00:00:01"}, {"category": ""}],
+            "wrapped-clips": {"clips": [{"category": "content"}, {"category": "content"}]},
+            "wrapped-positive": {"positive_clips": [{"category": "learning_experience"}]},
+            "clips-wins": {"clips": [{"category": "content"}],
+                           "positive_clips": [{"category": "trainer"}, {}]},
+            "clips-null": {"clips": None, "positive_clips": [{"category": "trainer"}]},
+            "not-a-list": {"clips": "broken"},
+            "scalar": "text",
+            "empty": [],
+        }
+        for key, value in shapes.items():
+            self.make_lecture(key, positive_clips=value)
+        self.make_lecture("null", positive_clips=None)
+
+        listed = {row["session_id"]: row for row in self.client.get(
+            "/api/positive-mentions/lectures/", {"page_size": 100}).data["results"]}
+        for key in [*shapes, "null"]:
+            with self.subTest(shape=key):
+                detail = self.client.get(
+                    f"/api/positive-mentions/lectures/{encode_session_id(key)}/").data
+                self.assertEqual(listed[key]["moment_count"], detail["moment_count"])
+                self.assertEqual(listed[key]["top_categories"], detail["top_categories"])
+                self.assertEqual(detail["moment_count"], len(detail["clips"]))
+        self.assertEqual(listed["array"]["moment_count"], 3)
+        self.assertEqual(listed["clips-wins"]["moment_count"], 1)
+
+    def test_a_category_filter_keeps_only_lectures_with_that_kind_of_moment(self):
+        self.make_lecture("mixed", positive_clips=[
+            {"start": "00:00:01", "category": "content"},
+            {"start": "00:00:02", "category": "Learning_Experience "},
+            {"start": "00:00:03", "category": "content"},
+            {"start": "00:00:04", "category": "content"},
+            {"start": "00:00:05", "category": "trainer"},
+        ])
+        self.make_lecture("experience-only", positive_clips=[
+            {"start": "00:00:01", "category": "learning_experience"},
+            {"start": "00:00:02", "category": "learning_experience"},
+        ])
+        self.make_lecture("content-only", positive_clips=[{"start": "00:00:01", "category": "content"}])
+        self.make_lecture("none", positive_clips=[])
+        self.make_lecture("not-a-list", positive_clips={"clips": "broken"})
+
+        listed = self.client.get("/api/positive-mentions/lectures/",
+                                 {"category": "learning_experience"}).data
+        self.assertEqual({row["session_id"] for row in listed["results"]},
+                         {"mixed", "experience-only"})
+        # The fourth category of a row is still shown, so the filter's chip is there.
+        mixed = next(row for row in listed["results"] if row["session_id"] == "mixed")
+        self.assertIn({"category": "trainer", "count": 1}, mixed["top_categories"])
+
+        summary = self.client.get("/api/positive-mentions/summary/",
+                                  {"category": "learning_experience"}).data
+        self.assertEqual(summary["processed_lectures"], 2)
+        self.assertEqual(summary["lectures_with_positive_clips"], 2)
+        self.assertEqual(summary["total_positive_clips"], 3)   # that category only
+
+        everything = self.client.get("/api/positive-mentions/summary/").data
+        self.assertEqual(everything["total_positive_clips"], 8)
 
     def test_summary_uses_the_same_filters_as_the_unpaginated_list_scope(self):
         self.make_lecture(
@@ -436,3 +503,90 @@ class PositiveMentionsApiTests(TransactionTestCase):
             f"/api/positive-mentions/lectures/{encode_session_id('unknown')}/"
         )
         self.assertEqual(invalid_lecture.status_code, 404)
+
+    # --- "Clip" on a positive moment -> n8n clip-on-demand --------------------
+
+    def clip_lecture(self):
+        self.make_lecture("clip-demand", positive_clips=[
+            {"start": "00:05:50.000", "end": "00:06:00.000", "start_cue": 350, "end_cue": 360,
+             "positive_quote": "Clip A"},
+            {"start": "00:09:00.000", "end": "00:09:20.000", "start_cue": 540, "end_cue": 547,
+             "positive_quote": "Clip B"},
+        ])
+        return encode_session_id("clip-demand")
+
+    def request_clip(self, key, start_cue, end_cue, *, reply_status=200, error=None):
+        from unittest import mock
+        from positive_mentions import views
+
+        sent = []
+
+        def urlopen(req, timeout):
+            sent.append((req.full_url, req.get_method(), req.headers, json.loads(req.data)))
+            if error:
+                raise error
+            response = mock.MagicMock(status=reply_status)
+            response.__enter__.return_value = response
+            return response
+
+        with mock.patch.object(views.urllib.request, "urlopen", side_effect=urlopen):
+            response = self.client.post(
+                f"/api/positive-mentions/lectures/{key}/clip-requests/",
+                {"start_cue": start_cue, "end_cue": end_cue}, format="json")
+        return response, sent
+
+    @override_settings(CLIP_ON_DEMAND_WEBHOOK_URL="https://n8n.example/webhook/qa-clip-on-demand")
+    def test_clip_a_sends_only_its_own_identity_to_n8n(self):
+        response, sent = self.request_clip(self.clip_lecture(), 350, 360)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.data, {"status": "requested"})
+        ((url, method, headers, body),) = sent
+        self.assertEqual((url, method), ("https://n8n.example/webhook/qa-clip-on-demand", "POST"))
+        self.assertEqual(headers["Content-type"], "application/json")
+        self.assertEqual(body, {"session_id": "clip-demand", "start_cue": 350, "end_cue": 360})
+
+    def test_clip_b_sends_clip_b_cues_not_clip_a(self):
+        _, sent = self.request_clip(self.clip_lecture(), 540, 547)
+        self.assertEqual(sent[0][3], {"session_id": "clip-demand", "start_cue": 540, "end_cue": 547})
+
+    def test_a_cue_pair_that_is_not_in_this_lecture_is_refused_without_calling_n8n(self):
+        key = self.clip_lecture()
+        for start_cue, end_cue in ((350, 547), (999, 1000), ("350", "360"), (True, 360), (None, 360)):
+            response, sent = self.request_clip(key, start_cue, end_cue)
+            self.assertIn(response.status_code, (400, 404), (start_cue, end_cue))
+            self.assertEqual(sent, [])
+
+    def test_an_n8n_failure_is_a_clear_error(self):
+        import urllib.error
+        key = self.clip_lecture()
+        refused, _ = self.request_clip(key, 350, 360, error=urllib.error.HTTPError(
+            "https://n8n.example", 500, "err", {}, None))
+        self.assertEqual((refused.status_code, refused.data["code"]), (502, "clip_request_failed"))
+        unreachable, _ = self.request_clip(key, 350, 360, error=urllib.error.URLError("down"))
+        self.assertEqual(unreachable.status_code, 502)
+
+    def test_an_already_produced_clip_is_not_requested_again(self):
+        key = self.clip_lecture()
+        self.make_asset("clip-demand:350:360", "clip-demand", clip_index=1,
+                        source_start="00:05:50.000", source_end="00:06:00.000",
+                        clip_url="https://tenant.sharepoint.com/clip-a.mp4")
+        response, sent = self.request_clip(key, 350, 360)
+        self.assertEqual((response.status_code, response.data["code"]), (409, "clip_already_produced"))
+        self.assertEqual(response.data["clip_asset"]["url"], "https://tenant.sharepoint.com/clip-a.mp4")
+        self.assertEqual(sent, [])
+
+    def test_requesting_a_clip_needs_a_signed_in_user(self):
+        response = APIClient().post(
+            f"/api/positive-mentions/lectures/{self.clip_lecture()}/clip-requests/",
+            {"start_cue": 350, "end_cue": 360}, format="json")
+        self.assertEqual(response.status_code, 401)
+
+    def test_any_2xx_from_n8n_counts_as_accepted(self):
+        # The webhook answers "onReceived" with its default 200, not 202.
+        key = self.clip_lecture()
+        for reply in (200, 201, 204, 299):
+            response, sent = self.request_clip(key, 350, 360, reply_status=reply)
+            self.assertEqual((response.status_code, len(sent)), (202, 1), reply)
+        for reply in (199, 304):
+            response, _ = self.request_clip(key, 350, 360, reply_status=reply)
+            self.assertEqual(response.status_code, 502, reply)

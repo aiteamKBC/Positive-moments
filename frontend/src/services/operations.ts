@@ -13,6 +13,7 @@ import type {
   BackfillCreatedResponse,
   BackfillDetailResponse,
   BackfillListResponse,
+  BackfillRecordingLinksResponse,
   CalendarResponse,
   DayReport,
   DirectoryResponse,
@@ -162,4 +163,13 @@ export async function getBackfill(runId: string) {
 export async function cancelBackfill(runId: string) {
   return (await api.post<BackfillCreatedResponse>(
     `${BASE}/backfills/${runId}/cancel/`, {})).data
+}
+
+/**
+ * Lecture-level Recording Links outcomes for one run. Read-only; the counts
+ * arrive already made by the platform.
+ */
+export async function getBackfillRecordingLinks(runId: string) {
+  return (await api.get<BackfillRecordingLinksResponse>(
+    `${BASE}/backfills/${runId}/recording-links/`)).data
 }

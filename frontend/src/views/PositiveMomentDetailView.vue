@@ -1,21 +1,27 @@
 <script setup lang="ts">
 /**
- * The moments found in one analysed lecture.
+ * The evidence found in one analysed lecture.
+ *
+ * Each card answers four questions: what was the valuable moment, who said
+ * it, why does it matter, and can I watch it. Accepted evidence - Positive
+ * Moments and OFSTED Case Studies - is the page; candidates the verifier
+ * rejected stay reachable behind an explicit filter, never mixed in.
  *
  * This is a FEATURE page, not a second lecture detail: it is reached from
- * Positive Moments, it is keyed by the legacy analysis identifier, and it says
- * nothing about the processing pipeline. The canonical operational view of a
- * lecture lives at /lectures/:lectureId and is the only place that describes
- * stages, retries and sync.
+ * Positive Moments, keyed by the legacy analysis identifier, and says nothing
+ * about the processing pipeline (that lives at /lectures/:lectureId).
  *
- * Nothing here fabricates media. A moment with no produced clip says so, and
- * the only playable links are the durable stored SharePoint URLs the platform
- * already holds.
+ * Nothing here fabricates media or words. The only playable links are the
+ * stored recording and produced clips; a moment with no stored quotation says
+ * so. Every classification arrives from the API; the AI's own diagnostics
+ * stay available in a collapsed section on each card.
  */
-import { computed, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
+import ClipEvidenceDetails from '../components/ClipEvidenceDetails.vue'
+import ClipRequestButton from '../components/ClipRequestButton.vue'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorState from '../components/ErrorState.vue'
 import LoadingSkeleton from '../components/LoadingSkeleton.vue'
@@ -24,10 +30,11 @@ import StatusBadge from '../components/StatusBadge.vue'
 import { getLecture, getWatchUrl } from '../services/api'
 import type { DialogueLine, LectureDetail, PositiveClip } from '../types'
 import { businessDate, cairoDateTime } from '../utils/datetime'
-import { humanise } from '../utils/labels'
+import { MOMENT_CATEGORIES, evidenceType, humanise } from '../utils/labels'
 import { errorMessage, formatConfidence, openSafely } from '../utils/format'
 
 const route = useRoute()
+const router = useRouter()
 const lecture = ref<LectureDetail | null>(null)
 const loading = ref(true)
 const error = ref('')
@@ -67,14 +74,12 @@ function line(item: DialogueLine | string) {
   return { speaker: item.speaker ?? '', text: item.text ?? item.quote ?? '', start: item.start ?? '' }
 }
 
+/** The stored dialogue, else the stored quotation. Never a made-up line. */
 function transcript(clip: PositiveClip) {
   const lines = clip.dialogue.map(line).filter((entry) => entry.text.trim())
   if (lines.length) return lines
-  return [{
-    speaker: clip.speaker ?? '',
-    text: clip.positive_quote || clip.quote || 'Positive learner feedback',
-    start: clip.start ?? '',
-  }]
+  const stored = clip.positive_quote || clip.quote
+  return stored ? [{ speaker: clip.speaker ?? '', text: stored, start: clip.start ?? '' }] : []
 }
 
 /** Transcript offsets are cue timestamps, not wall-clock times. */
@@ -88,21 +93,75 @@ function clipDuration(value: number) {
   return `${Math.floor(value / 60)}m ${String(Math.round(value % 60)).padStart(2, '0')}s`
 }
 
-/**
- * The verifier's own vocabulary. Only its explicit approvals read as green;
- * anything else stays neutral rather than being guessed at by substring.
- */
-const APPROVED = new Set(['accept', 'accepted', 'confirmed', 'confirm', 'pass', 'passed'])
-function verificationTone(verdict?: string) {
-  return APPROVED.has((verdict ?? '').trim().toLowerCase()) ? 'ok' as const : 'neutral' as const
+// --- evidence ---------------------------------------------------------------
+// Rejected = the verifier refused it as evidence, by type or by verdict. Both
+// are read from the API; nothing is reclassified here.
+const isRejected = (clip: PositiveClip) =>
+  clip.final_evidence_type === 'REJECT' || clip.semantic_status === 'rejected'
+const isCaseStudy = (clip: PositiveClip) => clip.final_evidence_type === 'OFSTED_CASE_STUDY'
+
+/** The selection rationale without the workflow's "TYPE:" prefix. */
+function rationale(clip: PositiveClip) {
+  return (clip.reason ?? '').replace(/^\s*(POSITIVE_MOMENT|OFSTED_CASE_STUDY|REJECT)\s*:\s*/i, '').trim()
 }
 
-const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.clip_asset).length ?? 0)
+const indexed = computed(() => (lecture.value?.clips ?? []).map((clip, index) => ({ clip, index })))
+const accepted = computed(() => indexed.value.filter(({ clip }) => !isRejected(clip)))
+const rejectedClips = computed(() => indexed.value.filter(({ clip }) => isRejected(clip)))
+
+function fromQuery(name: string) {
+  return typeof route.query[name] === 'string' ? String(route.query[name]) : ''
+}
+const evidence = ref(fromQuery('evidence'))
+const category = ref(fromQuery('category'))
+watch([evidence, category], ([evidenceValue, categoryValue]) => {
+  void router.replace({ query: {
+    ...route.query, evidence: evidenceValue || undefined, category: categoryValue || undefined,
+  } })
+})
+
+const EVIDENCE_FILTERS = [
+  { value: '', label: 'All accepted evidence' },
+  { value: 'POSITIVE_MOMENT', label: 'Positive Moments' },
+  { value: 'OFSTED_CASE_STUDY', label: 'OFSTED Case Studies' },
+]
+const showingRejected = computed(() => evidence.value === 'rejected')
+
+/** The evidence in view before the category filter. */
+const scoped = computed(() => {
+  if (showingRejected.value) return rejectedClips.value
+  if (!evidence.value) return accepted.value
+  return accepted.value.filter(({ clip }) => clip.final_evidence_type === evidence.value)
+})
+const evidenceCount = (value: string) => (value
+  ? accepted.value.filter(({ clip }) => clip.final_evidence_type === value).length
+  : accepted.value.length)
+
+const categoryOf = (clip: PositiveClip) => (clip.category ?? '').trim().toLowerCase()
+const categoryLabel = (value: string) => MOMENT_CATEGORIES[value] ?? humanise(value)
+const categoryCounts = computed(() => {
+  const counts = new Map<string, number>()
+  for (const { clip } of scoped.value) {
+    const key = categoryOf(clip)
+    if (key) counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+})
+
+const visibleClips = computed(() => scoped.value
+  .filter(({ clip }) => !category.value || categoryOf(clip) === category.value))
+
+const readyClips = computed(() => accepted.value.filter(({ clip }) => clip.clip_asset).length)
+
+function clearFilters() {
+  evidence.value = ''
+  category.value = ''
+}
 </script>
 
 <template>
   <div class="page stack">
-    <RouterLink class="btn-quiet" :to="{ name: 'positive-moments' }">
+    <RouterLink class="btn-quiet" :to="{ name: 'positive-moments', query: category ? { category } : {} }">
       <AppIcon name="chevronLeft" :size="14" /> Positive Moments
     </RouterLink>
 
@@ -123,10 +182,10 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
               <AppIcon name="sparkle" :size="15" />Analysed {{ cairoDateTime(lecture.clips_analyzed_at) }}
             </span>
           </div>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <StatusBadge :label="`${lecture.clips.length} positive moment${lecture.clips.length === 1 ? '' : 's'}`" tone="brand" />
+          <div class="mt-3 flex flex-wrap gap-2" data-test="header-badges">
+            <StatusBadge :label="`${accepted.length} accepted moment${accepted.length === 1 ? '' : 's'}`" tone="brand" />
             <StatusBadge
-              :label="readyClips ? `${readyClips} of ${lecture.clips.length} clips produced` : 'No clips produced yet'"
+              :label="readyClips ? `${readyClips} of ${accepted.length} clips produced` : 'No clips produced yet'"
               :tone="readyClips ? 'ok' : 'waiting'"
             />
             <StatusBadge
@@ -162,16 +221,77 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
       />
 
       <div v-else class="stack">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by evidence type">
+            <span class="filter-label">Evidence</span>
+            <button
+              v-for="option in EVIDENCE_FILTERS" :key="option.value" type="button" class="chip cursor-pointer transition"
+              :data-test="`evidence-filter-${option.value || 'all'}`"
+              :class="{ '!bg-brand-600 !text-white': evidence === option.value }" :aria-pressed="evidence === option.value"
+              @click="evidence = option.value; category = ''"
+            >
+              {{ option.label }}<span class="ml-1" :class="evidence === option.value ? 'text-white/80' : 'text-brand-500'">{{ evidenceCount(option.value) }}</span>
+            </button>
+          </div>
+          <button
+            v-if="rejectedClips.length" type="button" data-test="evidence-filter-rejected"
+            class="btn-quiet btn-sm self-start sm:self-auto" :aria-pressed="showingRejected"
+            @click="evidence = showingRejected ? '' : 'rejected'; category = ''"
+          >
+            {{ showingRejected ? 'Back to accepted evidence' : `Show rejected candidates (${rejectedClips.length})` }}
+          </button>
+        </div>
+
+        <p v-if="showingRejected" class="notice-warn" role="note" data-test="rejected-notice">
+          <AppIcon name="info" :size="16" class="mt-0.5" />
+          <span>These candidates were <strong>rejected as evidence</strong> by the AI verifier. They are kept for reference and are not Positive Moments or OFSTED Case Studies.</span>
+        </p>
+
+        <div v-if="categoryCounts.length > 1" class="flex flex-wrap items-center gap-2" role="group" aria-label="Filter moments by category">
+          <span class="filter-label">Category</span>
+          <button
+            type="button" class="chip cursor-pointer transition"
+            :class="{ '!bg-brand-600 !text-white': !category }" :aria-pressed="!category"
+            @click="category = ''"
+          >
+            All<span class="ml-1" :class="!category ? 'text-white/80' : 'text-brand-500'">{{ scoped.length }}</span>
+          </button>
+          <button
+            v-for="[value, count] in categoryCounts" :key="value" type="button" class="chip cursor-pointer transition"
+            :class="{ '!bg-brand-600 !text-white': category === value }" :aria-pressed="category === value"
+            @click="category = category === value ? '' : value"
+          >
+            {{ categoryLabel(value) }}<span class="ml-1" :class="category === value ? 'text-white/80' : 'text-brand-500'">{{ count }}</span>
+          </button>
+        </div>
+
+        <EmptyState
+          v-if="!visibleClips.length"
+          class="surface"
+          tone="neutral"
+          icon="quote"
+          :title="showingRejected ? 'No rejected candidates' : 'No accepted evidence matches these filters'"
+          :message="accepted.length ? 'This lecture\'s evidence is of other kinds.' : 'Every candidate in this lecture was rejected as evidence.'"
+        >
+          <template #action><button v-if="evidence || category" type="button" class="btn-secondary" @click="clearFilters">Show all accepted evidence</button></template>
+        </EmptyState>
+
         <article
-          v-for="(clip, index) in lecture.clips"
+          v-for="{ clip, index } in visibleClips"
           :key="`${clip.start}-${index}`"
           class="panel"
+          data-test="evidence-card"
         >
           <div class="panel-head">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
-              <span class="badge-neutral font-mono">{{ offset(clip.start ?? '') }} – {{ offset(clip.end ?? '') }}</span>
-              <span v-if="clip.category" class="chip">{{ humanise(clip.category) }}</span>
-              <span v-if="clip.feedback_target" class="badge-info">About: {{ humanise(clip.feedback_target) }}</span>
+              <StatusBadge
+                :label="isRejected(clip) ? 'Rejected as evidence' : evidenceType(clip.final_evidence_type).label"
+                :tone="isRejected(clip) ? 'review' : evidenceType(clip.final_evidence_type).tone"
+                data-test="evidence-type"
+              />
+              <span class="badge-neutral font-mono" data-test="timestamps">{{ offset(clip.start ?? '') }} – {{ offset(clip.end ?? '') }}</span>
+              <span v-if="typeof clip.duration_seconds === 'number'" class="text-xs text-muted">{{ clipDuration(clip.duration_seconds) }}</span>
+              <span v-if="clip.category" class="chip">{{ categoryLabel(categoryOf(clip)) }}</span>
             </div>
             <StatusBadge
               :label="clip.clip_asset ? `Clip ready · ${clipDuration(clip.clip_asset.duration_seconds)}` : 'Clip not produced'"
@@ -180,14 +300,23 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
           </div>
 
           <div class="panel-body">
-            <blockquote class="max-w-4xl border-l-[3px] border-brand-300 pl-4">
-              <p class="font-display text-lg leading-relaxed text-ink">
-                “{{ clip.positive_quote || clip.quote || 'Positive learner feedback' }}”
+            <p v-if="isCaseStudy(clip)" class="eyebrow mb-1.5" data-test="quote-label">Case study explanation, as said in the lecture</p>
+            <blockquote v-if="clip.positive_quote || clip.quote" class="max-w-4xl border-l-[3px] border-brand-300 pl-4">
+              <p class="font-display text-lg leading-relaxed text-ink" data-test="quotation">
+                “{{ clip.positive_quote || clip.quote }}”
               </p>
-              <footer v-if="clip.speaker" class="mt-1.5 text-xs font-semibold uppercase tracking-kicker text-muted">
+              <footer v-if="clip.speaker" class="mt-1.5 text-xs font-semibold uppercase tracking-kicker text-muted" data-test="speaker">
                 {{ clip.speaker }}
               </footer>
             </blockquote>
+            <p v-else class="text-sm text-muted" data-test="no-quotation">No quotation stored for this candidate.</p>
+
+            <p v-if="isRejected(clip) && clip.semantic_reason" class="mt-3 max-w-4xl text-sm leading-6 text-muted" data-test="rejection-reason">
+              <span class="font-semibold text-body">Why it was rejected:</span> {{ clip.semantic_reason }}
+            </p>
+            <p v-else-if="rationale(clip)" class="mt-3 max-w-4xl text-sm leading-6 text-muted" data-test="rationale">
+              <span class="font-semibold text-body">Why it matters:</span> {{ rationale(clip) }}
+            </p>
 
             <div class="mt-4 flex flex-wrap gap-2">
               <button
@@ -206,7 +335,13 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
                 :href="clip.clip_asset.url"
                 target="_blank"
                 rel="noopener noreferrer"
-              ><AppIcon name="external" :size="14" /> Open the produced clip</a>
+              ><AppIcon name="external" :size="14" /> View clip</a>
+              <ClipRequestButton
+                v-else-if="typeof clip.start_cue === 'number' && typeof clip.end_cue === 'number'"
+                :session-key="lecture.session_key"
+                :start-cue="clip.start_cue"
+                :end-cue="clip.end_cue"
+              />
             </div>
 
             <details class="group mt-4 rounded-lg border border-line bg-[#fbfafc]">
@@ -226,36 +361,22 @@ const readyClips = computed(() => lecture.value?.clips.filter((clip) => clip.cli
                     <p class="text-sm leading-6 text-body">{{ entry.text }}</p>
                   </div>
                 </div>
+                <p v-if="!transcript(clip).length" class="text-sm text-muted">No transcript lines stored for this candidate.</p>
               </div>
             </details>
 
-            <dl
-              v-if="clip.reason || typeof clip.confidence === 'number' || clip.semantic_verification.verdict"
-              class="mt-4 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-3"
-            >
-              <div v-if="typeof clip.confidence === 'number'">
-                <dt class="eyebrow">Confidence</dt>
-                <dd class="mt-0.5 font-semibold text-ink">{{ formatConfidence(clip.confidence) }}</dd>
+            <details class="group mt-2 rounded-lg border border-line" data-test="ai-details">
+              <summary class="flex cursor-pointer list-none items-center gap-2 px-3.5 py-2.5 text-xs font-semibold text-muted hover:text-brand-700">
+                <AppIcon name="chevronRight" :size="14" class="transition group-open:rotate-90" />
+                AI analysis details
+              </summary>
+              <div class="border-t border-line px-3.5 pb-3">
+                <p v-if="typeof clip.confidence === 'number'" class="mt-3 text-sm text-muted">
+                  <span class="font-semibold text-body">Selector confidence:</span> {{ formatConfidence(clip.confidence) }}
+                </p>
+                <ClipEvidenceDetails :clip="clip" />
               </div>
-              <div v-if="clip.semantic_verification.verdict">
-                <dt class="eyebrow">Semantic check</dt>
-                <dd class="mt-0.5">
-                  <StatusBadge
-                    :label="humanise(clip.semantic_verification.verdict)"
-                    :tone="verificationTone(clip.semantic_verification.verdict)"
-                  />
-                </dd>
-              </div>
-              <div v-if="typeof clip.semantic_verification.confidence === 'number'">
-                <dt class="eyebrow">Verification confidence</dt>
-                <dd class="mt-0.5 font-semibold text-ink">{{ formatConfidence(clip.semantic_verification.confidence) }}</dd>
-              </div>
-            </dl>
-
-            <div v-if="clip.reason || clip.semantic_verification.reason" class="mt-3 space-y-1.5 text-sm leading-6 text-muted">
-              <p v-if="clip.reason"><span class="font-semibold text-body">Why it qualified:</span> {{ clip.reason }}</p>
-              <p v-if="clip.semantic_verification.reason"><span class="font-semibold text-body">Verification:</span> {{ clip.semantic_verification.reason }}</p>
-            </div>
+            </details>
           </div>
         </article>
       </div>

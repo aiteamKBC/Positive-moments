@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from . import evidence
 from .models import DoctorSession
 from .services import ready_clip_assets
 from .utils import encode_session_id, normalize_clips
@@ -93,6 +94,15 @@ def attach_ready_clip_assets(session_id, clips):
     return clips
 
 
+_NOT_SLIMMED = object()
+
+
+def _clips_for_summary(obj):
+    """The slim moments the list fetched, or the full column (detail page)."""
+    slim = getattr(obj, "positive_clips_slim", _NOT_SLIMMED)
+    return obj.positive_clips if slim is _NOT_SLIMMED else slim
+
+
 class LectureListSerializer(serializers.ModelSerializer):
     session_key = serializers.SerializerMethodField()
     recording_available = serializers.SerializerMethodField()
@@ -113,22 +123,23 @@ class LectureListSerializer(serializers.ModelSerializer):
 
     def get_top_categories(self, obj):
         """
-        The categories present in this lecture's moments, most common first.
+        Every category present in this lecture's moments, most common first,
+        so a category filter always finds its chip on the row.
 
         Read from the `positive_clips` JSON the row already carries, so this
         costs no extra query. It counts what the analysis recorded; it does not
         reclassify anything.
         """
         counts = {}
-        for clip in normalize_clips(obj.positive_clips):
+        for clip in normalize_clips(_clips_for_summary(obj)):
             category = (clip.get("category") or "").strip()
             if category:
                 counts[category] = counts.get(category, 0) + 1
         ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-        return [{"category": name, "count": total} for name, total in ranked[:3]]
+        return [{"category": name, "count": total} for name, total in ranked]
 
     def get_moment_count(self, obj):
-        return len(normalize_clips(obj.positive_clips))
+        return len(normalize_clips(_clips_for_summary(obj)))
 
     def get_session_key(self, obj):
         return encode_session_id(obj.session_id)
@@ -139,15 +150,25 @@ class LectureListSerializer(serializers.ModelSerializer):
 
 class LectureDetailSerializer(LectureListSerializer):
     clips = serializers.SerializerMethodField()
+    evidence_summary = serializers.SerializerMethodField()
 
     class Meta(LectureListSerializer.Meta):
         fields = LectureListSerializer.Meta.fields + (
             "meeting_id", "clips_analyzed_at", "clips_analysis_completeness",
             "clips_error", "recording_filename", "recording_link_updated_at", "clips",
+            "evidence_summary",
         )
 
+    def _clips(self, obj):
+        # Built once per lecture: two fields read the same list.
+        cache = self.context.setdefault("_clips", {})
+        if obj.session_id not in cache:
+            cache[obj.session_id] = attach_ready_clip_assets(
+                obj.session_id, normalize_clips(obj.positive_clips))
+        return cache[obj.session_id]
+
     def get_clips(self, obj):
-        return attach_ready_clip_assets(
-            obj.session_id,
-            normalize_clips(obj.positive_clips),
-        )
+        return self._clips(obj)
+
+    def get_evidence_summary(self, obj):
+        return evidence.summarise(self._clips(obj))

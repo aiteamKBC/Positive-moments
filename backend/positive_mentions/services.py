@@ -1,5 +1,5 @@
 from django.db import connection
-from django.db.models import Count, Exists, IntegerField, OuterRef, Q, QuerySet, Subquery, Value
+from django.db.models import Count, Exists, IntegerField, JSONField, OuterRef, Q, QuerySet, Subquery, Value
 from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce
 
@@ -13,7 +13,31 @@ def v5_lectures() -> QuerySet:
     return DoctorSession.objects.filter(clips_analysis_completeness=V5_FINAL)
 
 
-def with_positive_clips_length(queryset: QuerySet) -> QuerySet:
+def clip_category(params) -> str:
+    """The requested moment category, as the analysis spells it."""
+    return (params.get("category") or "").strip().lower()
+
+
+def _moments_in_category_sql():
+    """How many of a row's moments carry one category (one parameter)."""
+    if connection.vendor == "postgresql":
+        return (
+            "CASE WHEN jsonb_typeof(positive_clips) = 'array' THEN ("
+            "SELECT count(*) FROM jsonb_array_elements(positive_clips) AS clip "
+            "WHERE lower(btrim(clip ->> 'category')) = %s) ELSE 0 END"
+        )
+    return (
+        "CASE WHEN JSON_TYPE(positive_clips) = 'array' THEN ("
+        "SELECT count(*) FROM json_each(positive_clips) "
+        "WHERE lower(trim(json_extract(value, '$.category'))) = %s) ELSE 0 END"
+    )
+
+
+def with_positive_clips_length(queryset: QuerySet, category: str = "") -> QuerySet:
+    """Moments per lecture - only those of `category` when one is chosen."""
+    if category:
+        return queryset.annotate(positive_clips_length=RawSQL(
+            _moments_in_category_sql(), (category,), output_field=IntegerField()))
     if connection.vendor == "postgresql":
         sql = (
             "CASE WHEN jsonb_typeof(positive_clips) = 'array' "
@@ -27,6 +51,35 @@ def with_positive_clips_length(queryset: QuerySet) -> QuerySet:
     return queryset.annotate(
         positive_clips_length=RawSQL(sql, (), output_field=IntegerField())
     )
+
+
+# The lecture LIST needs two things from `positive_clips`: how many moments
+# there are and which categories they carry. The column also holds every
+# moment's quotes, dialogue and verification, ~37 KB per lecture, so the list
+# asks PostgreSQL for the same structure with only `category` left in each
+# moment. `normalize_clips` reads it exactly as it reads the full value.
+_SLIM_ELEMENTS = (
+    "(SELECT COALESCE(jsonb_agg(CASE WHEN jsonb_typeof(e) = 'object' "
+    "THEN jsonb_build_object('category', e -> 'category') ELSE 'null'::jsonb END "
+    "ORDER BY i), '[]'::jsonb) FROM jsonb_array_elements({0}) WITH ORDINALITY AS t(e, i))"
+)
+_SLIM_CLIPS_SQL = (
+    "CASE jsonb_typeof(positive_clips) "
+    "WHEN 'array' THEN " + _SLIM_ELEMENTS.format("positive_clips") + " "
+    "WHEN 'object' THEN (SELECT CASE WHEN jsonb_typeof(c) = 'array' THEN "
+    + _SLIM_ELEMENTS.format("c") + " ELSE 'null'::jsonb END FROM (SELECT CASE "
+    "WHEN positive_clips ? 'clips' THEN positive_clips -> 'clips' "
+    "ELSE COALESCE(positive_clips -> 'positive_clips', '[]'::jsonb) END AS c) AS picked) "
+    "ELSE 'null'::jsonb END"
+)
+
+
+def with_slim_positive_clips(queryset: QuerySet) -> QuerySet:
+    """List rows without the bulky moment detail; other databases keep the column."""
+    if connection.vendor != "postgresql":
+        return queryset
+    return queryset.defer("positive_clips").annotate(
+        positive_clips_slim=RawSQL(_SLIM_CLIPS_SQL, (), output_field=JSONField()))
 
 
 def ready_clip_assets() -> QuerySet:
@@ -70,6 +123,12 @@ def filtered_lectures(params) -> QuerySet:
         queryset = with_positive_clips_length(queryset)
         lookup = "positive_clips_length__gt" if positive == "true" else "positive_clips_length"
         queryset = queryset.filter(**{lookup: 0})
+    category = clip_category(params)
+    if category:
+        # Only lectures holding at least one moment of this category.
+        queryset = queryset.annotate(category_moments=RawSQL(
+            _moments_in_category_sql(), (category,), output_field=IntegerField(),
+        )).filter(category_moments__gt=0)
     production = params.get("clip_production_status", "all")
     if production == "ready":
         queryset = queryset.filter(has_ready_clips=True)

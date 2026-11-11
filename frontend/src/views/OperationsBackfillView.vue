@@ -11,6 +11,13 @@
  * Both steps queue a durable run. A September preview costs minutes of
  * Microsoft Graph reads, so neither step is something the browser waits on;
  * the page polls, and closing the tab changes nothing about the work.
+ *
+ * Recording Links ride along. A preview asks the backfill runner for a LIVE,
+ * read-only recording verdict per lecture (the same service as the
+ * `recording-links-preview` command); a backfill reports what the shared
+ * pipeline's RECORDING_LINK stage actually did. Every count on this page is
+ * made by the platform (app/recordings/coverage.py) - the page only lays
+ * them out.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
@@ -26,13 +33,19 @@ import TechnicalDetails from '../components/TechnicalDetails.vue'
 import {
   cancelBackfill,
   getBackfill,
+  getBackfillRecordingLinks,
   getBackfills,
   previewBackfill,
   startBackfill,
 } from '../services/operations'
-import { businessDate, businessDateLong, elapsed, sinceNow } from '../utils/datetime'
-import { backfillDayStatus, backfillStatus } from '../utils/labels'
-import type { BackfillDay, BackfillRun } from '../types/operations'
+import { businessDate, businessDateLong, cairoDateTime, elapsed, sinceNow } from '../utils/datetime'
+import {
+  actionLabel, backfillDayStatus, backfillStatus, humanise, recordingOutcome,
+  recordingSource, stageLabel, stageState,
+} from '../utils/labels'
+import type {
+  BackfillDay, BackfillRun, RecordingLinkItem, RecordingLinksSummary,
+} from '../types/operations'
 
 /** The mandatory first use case: September 2026 from the 1st. */
 const DEFAULT_FROM = '2026-09-01'
@@ -48,6 +61,11 @@ const runs = ref<BackfillRun[]>([])
 const active = ref<BackfillRun | null>(null)
 const selected = ref<BackfillRun | null>(null)
 const days = ref<BackfillDay[]>([])
+
+const recordingSummary = ref<RecordingLinksSummary | null>(null)
+const recordingItems = ref<RecordingLinkItem[]>([])
+const recordingItemsFor = ref('')
+const outcomeFilter = ref('')
 
 const loading = ref(true)
 const busy = ref(false)
@@ -105,6 +123,89 @@ const totals = computed(() => {
   ].filter(tile => !tile.hide)
 })
 
+const coverage = computed(() => recordingSummary.value?.coverage ?? null)
+const isPreview = computed(() => selected.value?.mode === 'PREVIEW')
+
+/** True when the runner that produced these rows would not write recordings. */
+const recordingWritesOff = computed(() =>
+  (coverage.value?.recording_link_modes ?? []).some(mode => mode !== 'write'))
+
+function percent(value: number | null | undefined) {
+  return value === null || value === undefined ? '—' : `${value}%`
+}
+
+/**
+ * The same backend counts, in the order an operator reads them: what was
+ * already there, what is missing, what the stage can and cannot do about it.
+ */
+const recordingTiles = computed(() => {
+  const c = coverage.value
+  if (!c || !c.total) return []
+  const tiles = [
+    { label: 'Lectures expecting a recording', value: c.eligible, tone: 'neutral' },
+    { label: 'Already linked', value: c.already_linked, tone: 'ok' },
+    { label: 'Missing before', value: c.missing_before, tone: 'neutral' },
+  ]
+  if (isPreview.value) {
+    tiles.push({ label: 'Exact match — would link', value: c.would_write, tone: 'ok' })
+  } else {
+    tiles.push({ label: 'Linked by this run', value: c.written, tone: 'ok' })
+  }
+  tiles.push(
+    { label: 'Ambiguous — not linked', value: c.ambiguous, tone: 'review' },
+    { label: 'Waiting on an earlier step', value: c.blocked_by_earlier_stage, tone: 'waiting' },
+    {
+      label: isPreview.value ? 'Still missing if linked' : 'Still missing',
+      value: isPreview.value ? c.projected_missing_after_write : c.still_missing_after,
+      tone: 'neutral',
+    },
+  )
+  return tiles as { label: string; value: number; tone: 'neutral' | 'ok' | 'waiting' | 'review' | 'error' }[]
+})
+
+/** The remaining outcome counts, shown as a quiet line under the tiles. */
+const recordingDetail = computed(() => {
+  const c = coverage.value
+  if (!c) return []
+  return [
+    { label: 'Exact matches found (live)', value: c.exact_matched },
+    { label: 'No recording file found', value: c.not_found },
+    { label: 'Needs review', value: c.review_required },
+    { label: 'Microsoft lookup failed', value: c.graph_lookup_failed },
+    { label: 'File search failed', value: c.discovery_failed },
+    { label: 'Not in the lecture registry', value: c.no_coded_lecture },
+    { label: 'No QA record to link', value: c.no_legacy_target },
+    { label: 'Retry scheduled', value: c.waiting },
+    { label: 'Not evaluated (observe mode)', value: c.not_evaluated },
+    { label: 'Cancelled — no recording expected', value: c.not_applicable },
+    { label: isPreview.value ? 'Perfect rows that would update' : 'Perfect rows updated',
+      value: isPreview.value ? c.perfect_rows_would_update : c.perfect_rows_updated },
+  ].filter(entry => entry.value)
+})
+
+/** Filter choices come from the backend's own outcome counts. */
+const outcomeOptions = computed(() =>
+  Object.entries(coverage.value?.by_outcome ?? {}).map(([value, count]) => ({
+    value, count: count ?? 0, label: recordingOutcome(value).label,
+  })))
+
+const visibleRecordingItems = computed(() =>
+  outcomeFilter.value
+    ? recordingItems.value.filter(row => row.outcome === outcomeFilter.value)
+    : recordingItems.value)
+
+function explanation(row: RecordingLinkItem): string {
+  if (row.outcome === 'BLOCKED_BY_EARLIER_STAGE' && row.earlier_stage) {
+    return `${stageLabel(row.earlier_stage)} must finish first (${actionLabel(row.earlier_action).toLowerCase()}).`
+  }
+  return row.reason ?? ''
+}
+
+function lead(row: RecordingLinkItem): string {
+  if (row.timestamp_difference_seconds === null) return ''
+  return `file ${row.timestamp_difference_seconds.toFixed(1)} s before Teams`
+}
+
 async function loadList() {
   try {
     const response = await getBackfills(25)
@@ -122,11 +223,37 @@ async function loadList() {
 async function select(runId: string) {
   try {
     const response = await getBackfill(runId)
+    if (selected.value?.backfill_run_id !== runId) outcomeFilter.value = ''
     selected.value = response.backfill_run
     days.value = response.days
+    recordingSummary.value = response.recording_links ?? null
     error.value = ''
+    await loadRecordingItems(response.backfill_run)
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'That backfill run could not be loaded.'
+  }
+}
+
+/**
+ * Lecture-level rows, fetched once a run has finished. While a run is in
+ * flight the tiles (from the detail response) are enough, and re-downloading
+ * a growing table every five seconds would be work for nobody.
+ */
+async function loadRecordingItems(run: BackfillRun) {
+  if (!run.is_finished) {
+    recordingItems.value = []
+    recordingItemsFor.value = ''
+    return
+  }
+  if (recordingItemsFor.value === run.backfill_run_id) return
+  try {
+    const response = await getBackfillRecordingLinks(run.backfill_run_id)
+    recordingItems.value = response.items
+    recordingSummary.value = response.recording_links
+    recordingItemsFor.value = run.backfill_run_id
+  } catch {
+    recordingItems.value = []
+    recordingItemsFor.value = ''
   }
 }
 
@@ -339,6 +466,157 @@ onBeforeUnmount(() => { if (poll) clearInterval(poll) })
               Keep running
             </button>
           </template>
+        </div>
+      </SectionPanel>
+
+      <!-- ---------------------------------------------------------------- -->
+      <SectionPanel
+        v-if="selected && coverage"
+        title="Recording links"
+        :note="isPreview
+          ? 'Live check against Microsoft Teams recordings. Read-only: nothing was written.'
+          : 'What the pipeline\'s recording step did for this range.'"
+      >
+        <template #actions>
+          <StatusBadge
+            v-if="coverage.total"
+            :label="isPreview
+              ? `Coverage ${percent(coverage.coverage_percent_before)} → ${percent(coverage.projected_coverage_percent)}`
+              : `Coverage ${percent(coverage.coverage_percent_before)} → ${percent(coverage.coverage_percent_after)}`"
+            tone="brand"
+          />
+        </template>
+
+        <p v-if="!coverage.total && selected.is_finished" class="text-sm text-muted">
+          No lecture in this range carried a recording to check.
+        </p>
+        <p v-else-if="!coverage.total" class="text-sm text-muted">
+          Recording results appear here day by day as the run progresses.
+        </p>
+
+        <template v-else>
+          <p v-if="isPreview && recordingWritesOff" class="notice-warn mb-4" role="note">
+            <AppIcon name="info" :size="16" class="mt-0.5" />
+            <span>
+              Automatic recording links are switched off on this server, so
+              <strong class="font-semibold">Start backfill will not link recordings</strong>.
+              The exact matches below show what the recording step would link once it is switched on.
+            </span>
+          </p>
+          <p v-if="!coverage.reconciles" class="notice-error mb-4" role="alert">
+            The recording totals do not add up to the lectures listed. Please report this run.
+          </p>
+          <p v-if="recordingSummary?.days_with_recording_errors.length" class="notice-error mb-4" role="alert">
+            <AppIcon name="info" :size="16" class="mt-0.5" />
+            <span>
+              Recordings could not be checked on
+              {{ recordingSummary.days_with_recording_errors.map(day => businessDate(day)).join(', ') }}
+              ({{ recordingSummary.recording_error_codes.map(code => humanise(code)).join(', ') }}).
+              Those days are missing from the figures below.
+            </span>
+          </p>
+
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <StatTile
+              v-for="tile in recordingTiles"
+              :key="tile.label"
+              :label="tile.label"
+              :value="tile.value"
+              :tone="tile.tone"
+            />
+          </div>
+
+          <p v-if="recordingDetail.length" class="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+            <span v-for="entry in recordingDetail" :key="entry.label">
+              {{ entry.label }}: <strong class="font-semibold text-ink tabular-nums">{{ entry.value }}</strong>
+            </span>
+          </p>
+
+          <p v-if="isPreview" class="mt-3 text-2xs text-faint">
+            Database writes {{ recordingSummary?.database_writes ?? 0 }} ·
+            sharing links created {{ recordingSummary?.sharing_links_created ?? 0 }} ·
+            model calls {{ recordingSummary?.provider_calls ?? 0 }}.
+            A link is only ever made for exactly one matching recording; anything
+            ambiguous is left for a person.
+          </p>
+        </template>
+      </SectionPanel>
+
+      <SectionPanel
+        v-if="selected?.is_finished && recordingItems.length"
+        title="Recording results"
+        :count="visibleRecordingItems.length"
+        flush
+      >
+        <template #actions>
+          <label class="sr-only" for="recording-outcome">Show outcome</label>
+          <select id="recording-outcome" v-model="outcomeFilter" class="field-sm !w-auto">
+            <option value="">All outcomes</option>
+            <option v-for="option in outcomeOptions" :key="option.value" :value="option.value">
+              {{ option.label }} ({{ option.count }})
+            </option>
+          </select>
+        </template>
+        <div class="no-scrollbar overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Day</th>
+                <th scope="col">Lecture</th>
+                <th scope="col">Recording step</th>
+                <th scope="col">Result</th>
+                <th scope="col">Why</th>
+                <th scope="col">Where found</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in visibleRecordingItems" :key="`${row.business_date}-${row.item_key}`">
+                <td class="whitespace-nowrap">{{ businessDate(row.business_date) }}</td>
+                <th scope="row" class="max-w-xs">
+                  <RouterLink
+                    v-if="row.lecture_id"
+                    class="font-semibold text-ink hover:underline"
+                    :to="{ name: 'lecture', params: { lectureId: row.lecture_id }, query: { tab: 'pipeline' } }"
+                  >
+                    {{ row.subject }}
+                  </RouterLink>
+                  <span v-else>{{ row.subject }}</span>
+                </th>
+                <td>
+                  <StatusBadge
+                    v-if="row.recording_stage_state"
+                    :label="stageState(row.recording_stage_state).label"
+                    :tone="stageState(row.recording_stage_state).tone"
+                  />
+                  <span v-else class="text-2xs text-muted">—</span>
+                </td>
+                <td>
+                  <StatusBadge
+                    :label="recordingOutcome(row.outcome).label"
+                    :tone="recordingOutcome(row.outcome).tone"
+                    :title="row.recording_status ?? row.outcome"
+                  />
+                  <div v-if="row.recording_status" class="mt-1 font-mono text-2xs text-faint">
+                    {{ row.recording_status }}
+                  </div>
+                </td>
+                <td class="max-w-sm text-xs text-muted">{{ explanation(row) }}</td>
+                <td class="whitespace-nowrap text-xs text-muted">
+                  <template v-if="row.source">
+                    {{ recordingSource(row.source) }}
+                    <div class="text-2xs text-faint">{{ lead(row) }}</div>
+                  </template>
+                  <template v-else-if="row.attempt_count">
+                    {{ row.attempt_count }} attempt{{ row.attempt_count === 1 ? '' : 's' }}
+                    <div v-if="row.next_attempt_after" class="text-2xs text-faint">
+                      next {{ cairoDateTime(row.next_attempt_after) }}
+                    </div>
+                  </template>
+                  <template v-else>—</template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </SectionPanel>
 

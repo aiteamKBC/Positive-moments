@@ -95,8 +95,14 @@ def test_a_test_run_pointed_at_the_production_url_is_refused():
 def test_a_test_prefixed_database_on_the_production_server_is_still_refused():
     """Django's own `test_` prefix is not a safety property."""
     sneaky = "postgresql://u:p@db.prod.example.com:5432/test_AiTeamKBC"
-    assert "same server" in refused(
+    assert "not the approved isolated test database" in refused(
         env(TEST_DATABASE_URL=sneaky, KBC_TEST_DB_ALLOW_REMOTE_HOST="1"))
+
+
+def test_even_the_approved_name_on_the_production_server_is_refused():
+    approved_name_on_production =         "postgresql://u:p@db.prod.example.com:5432/kbc_qa_integration_test"
+    assert "same server" in refused(
+        env(TEST_DATABASE_URL=approved_name_on_production, KBC_TEST_DB_ALLOW_REMOTE_HOST="1"))
 
 
 def test_a_local_database_without_a_test_name_is_refused():

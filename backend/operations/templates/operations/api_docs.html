@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>KBC Publisher LMS API</title>
+  <link rel="stylesheet" href="{{ css_url }}" integrity="{{ css_integrity }}" crossorigin="anonymous" referrerpolicy="no-referrer">
+  <style nonce="{{ nonce }}">
+    body { margin: 0; background: #fafafa; }
+    .docs-bar { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center;
+                padding: 10px 20px; background: #1f2a44; color: #fff; font: 14px/1.4 system-ui, sans-serif; }
+    .docs-user { display: flex; gap: 12px; align-items: center; }
+    .docs-bar a { color: #1f2a44; background: #fff; border-radius: 4px; padding: 4px 12px; text-decoration: none; }
+    /* Reading only: this page never sends a request to the API, so no token is ever entered here. */
+    .swagger-ui .auth-wrapper, .swagger-ui .authorization__btn { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="docs-bar">
+    <span>KBC Publisher LMS API &middot; contract v1 &middot; internal documentation</span>
+    <span class="docs-user"><span>{{ username }}</span><a href="/">Back to the Dashboard</a></span>
+  </div>
+  <div id="swagger-ui" data-swagger-ui-version="{{ version }}"></div>
+  <script src="{{ js_url }}" integrity="{{ js_integrity }}" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script nonce="{{ nonce }}">
+    SwaggerUIBundle({
+      url: "{% url 'api-schema' %}",
+      dom_id: "#swagger-ui",
+      deepLinking: true,
+      docExpansion: "list",
+      defaultModelsExpandDepth: 1,
+      supportedSubmitMethods: [],
+      tryItOutEnabled: false,
+      persistAuthorization: false,
+      validatorUrl: null
+    });
+  </script>
+</body>
+</html>

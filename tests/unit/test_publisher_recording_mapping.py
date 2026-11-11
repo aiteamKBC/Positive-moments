@@ -1,0 +1,659 @@
+"""P0-C: the pure multipart recording mapping rules (no database, no Graph)."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from app.publisher import recording_mapping as rm
+from app.recordings.candidates import candidate_from_drive_item
+from tests.unit.recording_fakes import END, START, SUBJECT, FakeRecordingGraph, iso
+
+DATE = START.date()
+EXPECTED = (END - START).total_seconds()
+
+
+def _select(graph, start=START, end=END):
+    return rm.select_occurrence(graph.recordings, scheduled_start=start, scheduled_end=end, session_date=DATE)
+
+
+def _candidates(*metas, source="onedrive_recordings"):
+    return [candidate_from_drive_item(m, source) for m in metas]
+
+
+def _map(occurrence, candidates):
+    assigned, diagnostics = rm.assign_files(occurrence.parts, candidates, subject=SUBJECT,
+                                            session_date=DATE.isoformat())
+    mappings = [rm.map_part(i, p, kept, shared, expected_duration=EXPECTED)
+                for i, (p, kept, shared) in enumerate(assigned, start=1)]
+    return rm.claimed_twice(mappings), diagnostics
+
+
+# -- occurrence selection ---------------------------------------------------------------------
+
+def test_single_part_selected_and_last_weeks_recording_ignored():
+    g = FakeRecordingGraph()
+    g.recording(START - timedelta(days=7), END - timedelta(days=7), call_id="old")
+    this = g.recording(START + timedelta(minutes=1), END - timedelta(minutes=2))
+    occurrence = _select(g)
+    assert occurrence.status == rm.SELECTED and [p.recording_id for p in occurrence.parts] == [this["id"]]
+    assert len(occurrence.all_recordings) == 2 and not occurrence.in_progress
+
+
+def test_parts_of_one_call_are_kept_in_recording_order():
+    g = FakeRecordingGraph()
+    second = g.recording(START + timedelta(minutes=61), END, call_id="c")
+    first = g.recording(START, START + timedelta(minutes=62), call_id="c")      # overlaps the next by a minute
+    occurrence = _select(g)
+    assert [p.recording_id for p in occurrence.parts] == [first["id"], second["id"]]
+
+
+def test_restarted_call_within_twenty_minutes_is_one_occurrence():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(minutes=50), call_id="a")
+    g.recording(START + timedelta(minutes=62), END, call_id="b")                 # new call id after a drop
+    assert len(_select(g).parts) == 2
+
+
+def test_unattached_recording_overlapping_the_slot_is_ambiguous():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(minutes=30), call_id="a")
+    g.recording(START + timedelta(minutes=60), END, call_id="b")                 # 30 min gap, other call
+    occurrence = _select(g)
+    assert occurrence.status == rm.AMBIGUOUS_OCCURRENCE_RECORDINGS
+
+
+def test_no_recording_in_the_window_and_unreadable_rows():
+    g = FakeRecordingGraph()
+    g.recording(START + timedelta(hours=8), START + timedelta(hours=9))          # same day, far outside
+    assert _select(g).status == rm.NO_RECORDING_FOR_OCCURRENCE
+    g.recordings.append({"id": "bad", "createdDateTime": "not a time"})
+    assert _select(g).status == rm.GRAPH_RESPONSE_INVALID
+
+
+def test_recording_without_end_time_is_in_progress():
+    g = FakeRecordingGraph()
+    g.recording(START, None)
+    assert _select(g).in_progress
+
+
+def test_duplicate_listing_of_one_recording_collapses():
+    g = FakeRecordingGraph()
+    row = g.recording(START, END)
+    g.recordings.append(dict(row))
+    assert len(_select(g).parts) == 1
+
+
+# -- file per part ---------------------------------------------------------------------------------
+
+def test_one_file_per_part_with_graph_origin_duration():
+    g = FakeRecordingGraph()
+    a = g.recording(START, START + timedelta(minutes=62), call_id="c")
+    b = g.recording(START + timedelta(minutes=61), END, call_id="c")
+    files = [g.recorded_file(a, lead=40), g.recorded_file(b, lead=20)]
+    mappings, _ = _map(_select(g), _candidates(*files))
+    assert [m.locate_status for m in mappings] == [rm.LOCATED, rm.LOCATED]
+    assert [m.candidate.item_id for m in mappings] == [files[0]["id"], files[1]["id"]]
+    assert {m.media_origin for m in mappings} == {"graph_created_origin"}
+    assert [m.part_index for m in mappings] == [1, 2]
+
+
+def test_file_name_origin_also_proves_the_duration():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    f = g.recorded_file(r, lead=50, duration=EXPECTED + 50)
+    [m], _ = _map(_select(g), _candidates(f))
+    assert (m.locate_status, m.media_origin) == (rm.LOCATED, "file_name_origin")
+
+
+def test_duration_mismatch_pending_and_origin_ambiguity():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    [m], _ = _map(_select(g), _candidates(g.recorded_file(r, duration=EXPECTED - 600)))
+    assert m.locate_status == rm.DURATION_MISMATCH
+    g2 = FakeRecordingGraph()
+    r2 = g2.recording(START, END)
+    unindexed = g2.mp4(started=START - timedelta(seconds=35), duration_seconds=None)
+    [m2], _ = _map(_select(g2), _candidates(unindexed))
+    assert (m2.locate_status, m2.reason) == (rm.DURATION_PENDING, "FILE_DURATION_UNAVAILABLE")
+    g3 = FakeRecordingGraph()
+    r3 = g3.recording(START, END)
+    # both origins fit, 3 s apart, and the file sits half way: neither residual is within 1 s
+    [m3], _ = _map(_select(g3), _candidates(g3.recorded_file(r3, lead=3, duration=EXPECTED + 1.5)))
+    assert (m3.locate_status, m3.reason) == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")
+
+
+def test_wrong_subject_and_wrong_date_never_match():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    other_subject = g.recorded_file(r, subject="Another Cohort Lecture")
+    wrong_day = g.mp4(started=START - timedelta(days=1, seconds=30), duration_seconds=EXPECTED)
+    [m], diagnostics = _map(_select(g), _candidates(other_subject, wrong_day))
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["subject_mismatch_in_window"] == 1
+
+
+def test_file_fitting_two_parts_is_ambiguous_for_both():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(minutes=1), call_id="c")
+    g.recording(START + timedelta(seconds=90), END, call_id="c")
+    f = g.mp4(started=START - timedelta(seconds=10), duration_seconds=EXPECTED)  # within 120 s of both
+    mappings, diagnostics = _map(_select(g), _candidates(f))
+    assert {m.locate_status for m in mappings} == {rm.AMBIGUOUS}
+    assert diagnostics["files_fitting_several_parts"] == 1
+
+
+def test_two_files_for_one_part_is_ambiguous_but_copies_collapse():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    f1 = g.recorded_file(r, lead=30)
+    f2 = g.recorded_file(r, lead=31, size=123)
+    [m], _ = _map(_select(g), _candidates(f1, f2))
+    assert (m.locate_status, m.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
+    copy = dict(f1, id="ITEM-COPY", parentReference={"driveId": "b!site", "id": "x"})
+    [m2], _ = _map(_select(g), _candidates(f1, copy))
+    assert m2.locate_status == rm.LOCATED
+
+
+def test_false_start_is_its_own_classified_part():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(minutes=2), call_id="c")
+    g.recording(START + timedelta(minutes=5), END, call_id="c")
+    files = [g.recorded_file(r) for r in g.recordings]
+    mappings, _ = _map(_select(g), _candidates(*files))
+    assert [m.classification for m in mappings] == ["FRAGMENT", "FULL"]
+    assert all(m.located for m in mappings)
+
+
+def test_same_file_resolved_for_two_parts_is_refused():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    f = _candidates(g.recorded_file(r))[0]
+    one = rm.map_part(1, rm.parse_recordings([r])[0][0], [rm.Exact(f, 35.0, None)], 0, expected_duration=EXPECTED)
+    two = rm.replace(one, part_index=2)
+    assert {m.locate_status for m in rm.claimed_twice([one, two])} == {rm.AMBIGUOUS}
+
+
+# -- transcript corroboration ------------------------------------------------------------------------
+
+def _located_two_parts():
+    g = FakeRecordingGraph()
+    a = g.recording(START, START + timedelta(minutes=62), call_id="c", correlation="corr-a")
+    b = g.recording(START + timedelta(minutes=61), END, call_id="c", correlation="corr-b")
+    occurrence = _select(g)
+    mappings, _ = _map(occurrence, _candidates(g.recorded_file(a), g.recorded_file(b)))
+    return g, occurrence, mappings
+
+
+def test_transcript_parts_pair_by_correlation_then_time():
+    _, occurrence, mappings = _located_two_parts()
+    transcripts = [rm.TranscriptPartRef("art-1", 1, "c", "corr-a", None),
+                   rm.TranscriptPartRef("art-2", 2, "c", None, occurrence.parts[1].created_at)]
+    paired, status, conflict = rm.pair_transcripts(mappings, occurrence.all_recordings, transcripts)
+    assert (status, conflict) == (rm.PAIRED, None)
+    assert [(m.transcript_artifact_id, m.transcript_pairing) for m in paired] == [
+        ("art-1", "content_correlation_id"), ("art-2", "created_at")]
+
+
+def test_no_transcript_and_partial_transcript_are_not_failures():
+    _, occurrence, mappings = _located_two_parts()
+    assert rm.pair_transcripts(mappings, occurrence.all_recordings, [])[1] == rm.NO_TRANSCRIPT
+    one = [rm.TranscriptPartRef("art-1", 1, "c", "corr-a", None)]
+    assert rm.pair_transcripts(mappings, occurrence.all_recordings, one)[1:] == (rm.PARTIAL, None)
+
+
+def test_transcript_conflicts_are_detected():
+    g, occurrence, mappings = _located_two_parts()
+    g.recording(START - timedelta(days=7), END - timedelta(days=7), call_id="old", correlation="corr-old")
+    occurrence = _select(g)
+    other = [rm.TranscriptPartRef("art-x", 1, "old", "corr-old", None)]
+    assert rm.pair_transcripts(mappings, occurrence.all_recordings, other)[2] == \
+        "TRANSCRIPT_PART_BELONGS_TO_ANOTHER_RECORDING"
+    calls = [rm.TranscriptPartRef("art-y", 1, "zzz", None, None)]
+    assert rm.pair_transcripts(mappings, occurrence.all_recordings, calls)[2] == "CALL_ID_CONFLICT"
+    twice = [rm.TranscriptPartRef("t1", 1, "c", "corr-a", None), rm.TranscriptPartRef("t2", 2, "c", "corr-a", None)]
+    assert rm.pair_transcripts(mappings, occurrence.all_recordings, twice)[2] == \
+        "SEVERAL_TRANSCRIPT_PARTS_FOR_ONE_RECORDING"
+
+
+# -- previously verified parts ----------------------------------------------------------------------------
+
+def _stored(mapping, **override):
+    row = {"part_index": mapping.part_index, "locate_status": rm.LOCATED,
+           "source_drive_id": mapping.candidate.drive_id, "source_item_id": mapping.candidate.item_id}
+    return {**row, **override}
+
+
+def test_a_verified_part_is_kept_when_a_later_read_misses_it():
+    _, occurrence, mappings = _located_two_parts()
+    stored = {mappings[0].recording.recording_id: _stored(mappings[0])}
+    lost = [rm.replace(mappings[0], locate_status=rm.NOT_FOUND, candidate=None), mappings[1]]
+    merged, conflict = rm.merge_with_stored(lost, stored)
+    assert conflict is None and merged[0].located and merged[0].reason == "PREVIOUSLY_VERIFIED_SOURCE_KEPT"
+
+
+def test_a_verified_part_is_never_re_pointed():
+    _, occurrence, mappings = _located_two_parts()
+    stored = {mappings[0].recording.recording_id: _stored(mappings[0], source_item_id="OTHER")}
+    assert rm.merge_with_stored(mappings, stored)[1] == "SOURCE_CONFLICT_WITH_VERIFIED_FILE"
+    moved = {mappings[0].recording.recording_id: _stored(mappings[0], part_index=2)}
+    assert rm.merge_with_stored(mappings, moved)[1] == "RECORDING_SET_CHANGED"
+    gone = {"rec-gone": _stored(mappings[0])}
+    assert rm.merge_with_stored(mappings, gone)[1] == "RECORDING_SET_CHANGED"
+
+
+def test_a_moved_verified_part_takes_its_new_place_only_when_renumbering_is_allowed():
+    _, occurrence, mappings = _located_two_parts()
+    moved = {mappings[0].recording.recording_id: _stored(mappings[0], part_index=2)}
+    merged, conflict = rm.merge_with_stored(mappings, moved, renumber=True)
+    assert conflict is None and [m.part_index for m in merged] == [1, 2]
+    other_file = {mappings[0].recording.recording_id: _stored(mappings[0], part_index=2, source_item_id="OTHER")}
+    assert rm.merge_with_stored(mappings, other_file, renumber=True)[1] == "SOURCE_CONFLICT_WITH_VERIFIED_FILE"
+    gone = {"rec-gone": _stored(mappings[0])}
+    assert rm.merge_with_stored(mappings, gone, renumber=True)[1] == "RECORDING_SET_CHANGED"
+
+
+def test_no_url_survives_candidate_mapping():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    [m], _ = _map(_select(g), _candidates(g.recorded_file(r)))
+    persisted = (m.candidate.drive_id, m.candidate.item_id, m.candidate.name, m.recording.recording_id)
+    assert not any("http" in str(v) for v in persisted)
+    assert iso(m.recording.created_at) == r["createdDateTime"]
+
+
+# -- several files for one part: duration tie-break ---------------------------------------------------
+def test_full_recording_beats_a_short_stray_file_by_duration():
+    """Martech - Fri 2026-10-23: the 97-min recording named 71 s early, an 87-s stray file named 46 s early."""
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    full = g.recorded_file(r, lead=71)                     # file names carry whole seconds
+    stray = g.recorded_file(r, lead=46, duration=87.36, size=285_053)
+    [m], diagnostics = _map(_select(g), _candidates(full, stray))
+    assert (m.locate_status, m.reason) == (rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED")
+    assert m.candidate.item_id == full["id"] and m.candidate_count == 2
+    assert m.media_origin == "graph_created_origin" and m.lead_seconds == 71.0
+    assert m.classification == "FULL" and diagnostics["same_subject_date"] == 2
+
+
+def test_two_files_matching_the_duration_stay_ambiguous():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    a, b = g.recorded_file(r, lead=40, size=111), g.recorded_file(r, lead=90, size=222)
+    [m], _ = _map(_select(g), _candidates(a, b))
+    assert (m.locate_status, m.reason, m.candidate) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART", None)
+
+
+def test_an_unknown_duration_decides_nothing():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    full = g.recorded_file(r, lead=71)
+    unindexed = g.mp4(started=START - timedelta(seconds=46), duration_seconds=None, size=285_053)
+    [m], _ = _map(_select(g), _candidates(full, unindexed))
+    assert (m.locate_status, m.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
+    g2 = FakeRecordingGraph()
+    r2 = g2.recording(START, None)                               # the recording's own end is unknown
+    f1, f2 = g2.mp4(started=START - timedelta(seconds=71), duration_seconds=EXPECTED), \
+        g2.mp4(started=START - timedelta(seconds=46), duration_seconds=87.0, size=1)
+    [m2], _ = _map(_select(g2), _candidates(f1, f2))
+    assert (m2.locate_status, m2.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
+
+
+def test_genuine_ambiguity_is_never_resolved():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    # neither file has the recording's duration
+    a, b = g.recorded_file(r, lead=40, duration=EXPECTED - 900, size=1), g.recorded_file(r, lead=90, duration=87, size=2)
+    [m], _ = _map(_select(g), _candidates(a, b))
+    assert (m.locate_status, m.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
+    # one file fits the duration but its media origin is itself ambiguous (named 3 s early, 1.5 s from both)
+    g2 = FakeRecordingGraph()
+    r2 = g2.recording(START, END)
+    c = g2.recorded_file(r2, lead=3, duration=EXPECTED + 1.5, size=1)
+    d = g2.recorded_file(r2, lead=60, duration=87, size=2)
+    [m2], _ = _map(_select(g2), _candidates(c, d))
+    assert (m2.locate_status, m2.reason) == (rm.AMBIGUOUS, "SEVERAL_FILES_FOR_PART")
+
+
+def test_only_duration_match_rules():
+    g = FakeRecordingGraph()
+    r = g.recording(START, END)
+    occurrence = _select(g)
+    [part] = occurrence.parts
+    full, stray = _candidates(g.recorded_file(r, lead=71), g.recorded_file(r, lead=46, duration=87, size=2))
+    exact = lambda c, lead: rm.Exact(c, lead, part)                                    # noqa: E731
+    assert rm.only_duration_match(part, [exact(full, 71), exact(stray, 46)]).candidate is full
+    assert rm.only_duration_match(part, [exact(full, 71)]) is None                     # nothing to break a tie
+
+
+# -- several recordings: the longest is the lecture (2026-10-28) ----------------------------------
+
+def _part(index, start_minute, seconds, *, located=True, file_seconds=None, rid=None):
+    created = START + timedelta(minutes=start_minute)
+    recording = rm.RecordingPart(recording_id=rid or f"rec-{index}", call_id=f"call-{index}", created_at=created,
+                                 end_at=None if seconds is None else created + timedelta(seconds=seconds))
+    candidate = None
+    if located:
+        meta = FakeRecordingGraph().mp4(started=created - timedelta(seconds=30),
+                                        duration_seconds=seconds if file_seconds is None else file_seconds)
+        candidate = candidate_from_drive_item(meta, "onedrive_recordings")
+    return rm.PartMapping(part_index=index, recording=recording, candidate=candidate,
+                          locate_status=rm.LOCATED if located else rm.NOT_FOUND, reason="test")
+
+
+def test_one_recording_is_selected_whatever_its_length():
+    selection = rm.select_recording([_part(1, 0, 180)])
+    assert (selection.part_index, selection.rule) == (1, rm.RULE_SINGLE_RECORDING)
+
+
+def test_3_minutes_vs_2_hours_selects_the_2_hours_in_either_order():
+    for parts in ([_part(1, 0, 180), _part(2, 5, 7200)], [_part(2, 5, 7200), _part(1, 0, 180)]):
+        selection = rm.select_recording(parts)
+        assert (selection.part_index, selection.rule) == (2, rm.RULE_LONGEST_RECORDING)
+        assert [c["part_index"] for c in selection.candidates] == [1, 2]
+
+
+def test_1m02s_vs_1h41m58s_selects_the_long_one_even_when_it_comes_first():
+    selection = rm.select_recording([_part(1, 0, 6118), _part(2, 110, 62)])
+    assert selection.part_index == 1
+    assert [c["duration_seconds"] for c in selection.candidates] == [6118, 62]
+
+
+def test_measured_media_length_decides_not_graph_order_start_or_size():
+    early_big = _part(1, 0, 3000)
+    late_small = _part(2, 55, 3300)
+    selection = rm.select_recording([early_big, late_small])
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "video_facet"
+
+
+def test_an_unlocated_part_counts_by_its_graph_length_so_a_shorter_file_never_wins():
+    selection = rm.select_recording([_part(1, 0, 180), _part(2, 5, 7000, located=False)])
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "graph_recording"
+
+
+def test_a_kept_part_uses_its_stored_measured_duration():
+    kept = rm.PartMapping(part_index=2, recording=_part(2, 5, 7000).recording, locate_status=rm.LOCATED,
+                          reason="PREVIOUSLY_VERIFIED_SOURCE_KEPT")
+    selection = rm.select_recording([_part(1, 0, 180), kept], {"rec-2": {"source_duration_seconds": 6990.5}})
+    assert selection.part_index == 2 and selection.candidates[1]["duration_source"] == "stored_video_facet"
+
+
+def test_missing_or_invalid_duration_decides_nothing():
+    invalid = rm.RecordingPart(recording_id="rec-2", call_id="c", created_at=START, end_at=START)  # end == start
+    for parts in ([_part(1, 0, 180), _part(2, 5, None, located=False)],
+                  [_part(1, 0, 180), rm.PartMapping(part_index=2, recording=invalid, locate_status=rm.NOT_FOUND,
+                                                    reason="test")]):
+        selection = rm.select_recording(parts)
+        assert (selection.part_index, selection.rule) == (None, rm.DURATION_UNKNOWN)
+    assert rm.select_recording([]).part_index is None
+
+
+def test_equal_lengths_tie_break_on_the_earlier_recording_then_the_recording_id():
+    a, b = _part(1, 0, 3600, rid="rec-b"), _part(2, 61, 3600.4, rid="rec-a")
+    assert rm.select_recording([b, a]).part_index == 1                     # same whole seconds: earlier
+    same_start = [_part(1, 0, 3600, rid="rec-z"), _part(2, 0, 3600, rid="rec-m")]
+    assert rm.select_recording(same_start).part_index == 2                 # same start: lower recording id
+    assert rm.select_recording(list(reversed(same_start))).part_index == 2
+
+
+def test_selection_detail_carries_no_url_or_file_name():
+    detail = rm.select_recording([_part(1, 0, 180), _part(2, 5, 7200)]).as_detail()
+    assert detail["version"] == rm.SELECTION_VERSION and "http" not in repr(detail) and ".mp4" not in repr(detail)
+
+
+# -- a verified false start the occurrence rule later places outside the lecture (2026-10-30 MSP) --------------
+
+TWO_HOURS = (END - START).total_seconds()
+
+
+def _msp(graph, *, lecture_call="call-b"):
+    """59 s false start, then the 8,533 s lecture on another call 21 min 36 s later."""
+    short = graph.recording(START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27),
+                            call_id="call-a")
+    long = graph.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                           call_id=lecture_call)
+    return short, long
+
+
+def _verified(recording_id, classification="FRAGMENT", index=1):
+    return {recording_id: {"part_index": index, "locate_status": rm.LOCATED, "classification": classification,
+                           "source_drive_id": "D", "source_item_id": "I"}}
+
+
+def test_the_msp_occurrence_keeps_only_the_lecture_and_the_false_start_may_leave():
+    g = FakeRecordingGraph()
+    short, long = _msp(g)
+    occurrence = _select(g)
+    assert occurrence.status == rm.SELECTED and [p.recording_id for p in occurrence.parts] == [long["id"]]
+    assert round(occurrence.parts[0].duration_seconds) == 8533
+    assert rm.releasable_parts(_verified(short["id"]), occurrence, expected_duration=TWO_HOURS) == [short["id"]]
+    assert rm.releasable_parts(_verified(long["id"]), occurrence, expected_duration=TWO_HOURS) == []
+
+
+def test_a_departed_part_may_not_leave_when_it_vanished_was_not_a_fragment_or_the_occurrence_is_unclear():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    occurrence = _select(g)
+    assert rm.releasable_parts(_verified("rec-vanished"), occurrence, expected_duration=TWO_HOURS) is None
+    assert rm.releasable_parts(_verified(short["id"], "FULL"), occurrence, expected_duration=TWO_HOURS) is None
+    assert rm.releasable_parts(_verified(short["id"], None), occurrence, expected_duration=TWO_HOURS) is None
+    ambiguous = rm.replace(occurrence, status=rm.AMBIGUOUS_OCCURRENCE_RECORDINGS)
+    assert rm.releasable_parts(_verified(short["id"]), ambiguous, expected_duration=TWO_HOURS) is None
+
+
+def test_a_departed_false_start_may_not_leave_next_to_two_competing_full_recordings():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    g.recording(END + timedelta(minutes=45), END + timedelta(hours=2, minutes=50), call_id="call-b")  # attaches
+    occurrence = _select(g)
+    assert len(occurrence.parts) == 2
+    assert rm.releasable_parts(_verified(short["id"]), occurrence, expected_duration=TWO_HOURS) is None
+
+
+def test_a_released_part_is_not_merged_back():
+    g = FakeRecordingGraph()
+    short, _ = _msp(g)
+    stored = _verified(short["id"])
+    assert rm.merge_with_stored([], stored)[1] == "RECORDING_SET_CHANGED"
+    assert rm.merge_with_stored([], stored, released=[short["id"]]) == ([], None)
+
+
+# -- a file proven by its Teams source facet (2026-10-30 MSP: named 1,304 s before the recording) ----------------
+
+THREAD = "19:meeting_MSPsynthetic01@thread.v2"
+NAMED_EARLY = 1303.9                    # Teams named the lecture's MP4 at the CALL start
+
+
+def _proven_map(g, *metas, thread=THREAD):
+    occurrence = _select(g)
+    assigned, diagnostics = rm.assign_files(occurrence.parts, _candidates(*metas), subject=SUBJECT,
+                                            session_date=DATE.isoformat(), thread_id=thread,
+                                            all_recordings=occurrence.all_recordings)
+    mappings = [rm.map_part(i, p, kept, shared, expected_duration=EXPECTED)
+                for i, (p, kept, shared) in enumerate(assigned, start=1)]
+    return rm.claimed_twice(mappings), diagnostics
+
+
+def _msp_lecture(g, **file_kwargs):
+    long = g.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                       call_id="call-b")
+    return long, g.recorded_file(long, lead=NAMED_EARLY, **{"thread": THREAD, **file_kwargs})
+
+
+def test_msp_the_lecture_file_named_1304_s_early_is_proven_by_call_and_thread():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    [m], diagnostics = _proven_map(g, mp4)
+    assert (m.locate_status, m.reason, m.candidate.item_id) == (rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", mp4["id"])
+    assert round(m.lead_seconds) == 1304 and m.media_origin == rm.METHOD_GRAPH_CREATED
+    assert diagnostics["files_proven_by_teams_source"] == 1
+    [unproven], _ = _map(_select(g), _candidates(mp4))                         # without the facet path: not found
+    assert unproven.locate_status == rm.NOT_FOUND
+
+
+def test_the_file_name_rule_is_unchanged_and_wins():
+    g = FakeRecordingGraph()
+    r = g.recording(START + timedelta(minutes=1), END - timedelta(minutes=2), call_id="call-a")
+    mp4 = g.recorded_file(r, lead=35, thread=THREAD)
+    [m], diagnostics = _proven_map(g, mp4)
+    assert m.located and m.lead_seconds == 35 and "files_proven_by_teams_source" not in diagnostics
+
+
+def test_a_wrong_call_or_thread_proves_nothing():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, teams_source={"application": "Teams", "externalId": "call-other", "threadId": THREAD})
+    assert _proven_map(g, mp4)[0][0].locate_status == rm.NOT_FOUND
+    g2 = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g2, thread="19:meeting_OTHER@thread.v2")
+    [m], diagnostics = _proven_map(g2, mp4)
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["teams_source_refused"] == ["TEAMS_SOURCE_THREAD_CONFLICT"]
+
+
+def test_two_files_for_one_call_prove_nothing():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    copy = g.recorded_file(long, lead=NAMED_EARLY + 5, thread=THREAD, size=800_000_000)
+    [m], diagnostics = _proven_map(g, mp4, copy)
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["teams_source_refused"] == ["SEVERAL_FILES_FOR_CALL"]
+
+
+def test_a_call_with_several_recordings_proves_nothing():
+    g = FakeRecordingGraph()
+    long, mp4 = _msp_lecture(g)
+    g.recording(END + timedelta(hours=1), END + timedelta(hours=1, minutes=10), call_id="call-b")  # same call, later
+    [m, *_], diagnostics = _proven_map(g, mp4)
+    assert m.locate_status == rm.NOT_FOUND and "CALL_HAS_SEVERAL_RECORDINGS" in diagnostics["teams_source_refused"]
+
+
+def test_a_proven_file_with_the_wrong_duration_is_a_mismatch_not_a_match():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, duration=4000)
+    [m], _ = _proven_map(g, mp4)
+    assert m.locate_status == rm.DURATION_MISMATCH
+
+
+def test_missing_malformed_or_foreign_source_facets_prove_nothing():
+    for facet in (None, {"application": "Teams"}, {"application": "Teams", "externalId": "", "threadId": THREAD},
+                  {"application": "Teams", "externalId": 7, "threadId": THREAD},
+                  {"application": "SharePoint", "externalId": "call-b", "threadId": THREAD}, "Teams"):
+        g = FakeRecordingGraph()
+        long = g.recording(START + timedelta(minutes=19, seconds=9), END + timedelta(minutes=41, seconds=22),
+                           call_id="call-b")
+        mp4 = g.recorded_file(long, lead=NAMED_EARLY)
+        if facet is not None:
+            mp4["source"] = facet
+        assert _proven_map(g, mp4)[0][0].locate_status == rm.NOT_FOUND, facet
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g)
+    assert _proven_map(g, mp4, thread=None)[0][0].locate_status == rm.NOT_FOUND      # the lecture's thread unknown
+
+
+def test_another_subject_or_date_proves_nothing():
+    g = FakeRecordingGraph()
+    _, mp4 = _msp_lecture(g, subject="Another Lecture")
+    [m], diagnostics = _proven_map(g, mp4)
+    assert m.locate_status == rm.NOT_FOUND
+    assert diagnostics["teams_source_refused"] == ["TEAMS_SOURCE_FILE_SUBJECT_OR_DATE_MISMATCH"]
+
+
+def test_msp_false_start_by_file_name_and_lecture_by_teams_source_longest_selected():
+    g = FakeRecordingGraph()
+    short = g.recording(START - timedelta(minutes=3, seconds=26), START - timedelta(minutes=2, seconds=27),
+                        call_id="call-a")
+    short_mp4 = g.recorded_file(short, lead=71.7, thread=THREAD)
+    long, mp4 = _msp_lecture(g)
+    occurrence = _select(g)
+    assert [p.recording_id for p in occurrence.parts] == [long["id"]]          # the 20 min rule keeps the lecture
+    [m], _ = _proven_map(g, short_mp4, mp4)
+    selection = rm.select_recording([m])
+    assert m.located and m.candidate.item_id == mp4["id"] and selection.part_index == 1
+    assert round(selection.candidates[0]["duration_seconds"]) == 8533
+
+
+# -- media origin precision (2026-11-02: backfill run 9c23773d, 2026-09-02) ---------------------------
+# Teams named these three MP4s ~5.3 s before the Graph createdDateTime. With a 0.1 % tolerance (8-10 s on a
+# 2-3 h recording) both origins passed, so the lectures went to review. The values are production's.
+SEPT_2 = (  # (lecture, createdDateTime, Graph window s, file-name time, measured video s)
+    ("Andrew SP", datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc), 8034.22,
+     datetime(2026, 9, 2, 10, 54, 35, tzinfo=timezone.utc), 8034.304),
+    ("Ray PMP", datetime(2026, 9, 2, 7, 58, 4, 504789, tzinfo=timezone.utc), 9338.94,
+     datetime(2026, 9, 2, 7, 57, 59, tzinfo=timezone.utc), 9339.008),
+    ("Steve EVM", datetime(2026, 9, 2, 7, 34, 10, 275690, tzinfo=timezone.utc), 10282.24,
+     datetime(2026, 9, 2, 7, 34, 5, tzinfo=timezone.utc), 10282.304),
+)
+
+
+def _graph_part(created, window):
+    return rm.RecordingPart("rec-1", "call-1", created, created + timedelta(seconds=window))
+
+
+@pytest.mark.parametrize("name, created, window, named, measured", SEPT_2, ids=[c[0] for c in SEPT_2])
+def test_september_2_lectures_resolve_to_the_graph_origin(name, created, window, named, measured):
+    lead = created.timestamp() - named.timestamp()
+    assert 5.2 < lead < 5.6
+    status, reason, origin, difference = rm.check_duration(_graph_part(created, window), measured, lead)
+    assert (status, reason, origin) == (rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+    assert 0.06 <= difference <= 0.09
+
+
+def test_a_september_2_shaped_lecture_is_located_end_to_end():
+    g = FakeRecordingGraph()
+    created = START + timedelta(seconds=40.266825)
+    r = g.recording(created, created + timedelta(seconds=8034.22))
+    mp4 = g.recorded_file(r, lead=5.266825, duration=8034.304)
+    [m], _ = _map(_select(g), _candidates(mp4))
+    assert (m.locate_status, m.media_origin, m.candidate.item_id) == (rm.LOCATED, rm.METHOD_GRAPH_CREATED, mp4["id"])
+    assert round(m.lead_seconds, 3) == 5.267 and m.duration_difference_seconds == 0.084
+
+
+def test_october_28_near_miss_still_resolves_to_the_graph_origin():
+    # Advanced Project and Logistics Management: lead 14.736 s, tolerance 14.4 s - the name origin missed by 0.27 s.
+    created = datetime(2026, 10, 28, 8, 0, 14, 736000, tzinfo=timezone.utc)
+    assert rm.check_duration(_graph_part(created, 14400.0), 14400.064, 14.736)[:3] == (
+        rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+    # the same recording named 2 s later: both origins now pass the tolerance, the 1 s bound decides
+    assert rm.check_duration(_graph_part(created, 14400.0), 14400.064, 12.736)[2] == rm.METHOD_GRAPH_CREATED
+
+
+def test_october_30_msp_is_unchanged():
+    created = datetime(2026, 10, 30, 12, 19, 9, 947192, tzinfo=timezone.utc)
+    status, _, origin, difference = rm.check_duration(_graph_part(created, 8532.502), 8532.625, 1303.947)
+    assert (status, origin, difference) == (rm.LOCATED, rm.METHOD_GRAPH_CREATED, 0.123)
+
+
+def test_a_file_that_really_starts_at_its_name_time_resolves_to_the_file_name_origin():
+    created = datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc)
+    status, _, origin, difference = rm.check_duration(_graph_part(created, 8034.22), 8034.22 + 5.267 + 0.07, 5.267)
+    assert (status, origin) == (rm.LOCATED, rm.METHOD_FILE_NAME) and abs(difference - 0.07) < 1e-6
+
+
+def test_both_or_neither_residual_within_one_second_stays_ambiguous():
+    created = datetime(2026, 9, 2, 10, 54, 40, tzinfo=timezone.utc)
+    part = _graph_part(created, 8034.0)
+    assert rm.check_duration(part, 8034.0 + 0.8, 1.6)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")   # both
+    assert rm.check_duration(part, 8034.0 + 2.6, 5.3)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")   # neither
+    # a smaller residual alone never decides (1.2 s vs 4.1 s)
+    assert rm.check_duration(part, 8034.0 + 1.2, 5.3)[:2] == (rm.AMBIGUOUS, "MEDIA_ORIGIN_AMBIGUOUS")
+
+
+def test_a_lead_of_one_second_or_less_is_the_existing_same_origin_rule():
+    created = datetime(2026, 9, 2, 10, 54, 40, tzinfo=timezone.utc)
+    for measured in (8034.0 + 0.5, 8034.0 + 0.9, 8034.0 + 2.5):
+        assert rm.check_duration(_graph_part(created, 8034.0), measured, 0.9)[:3] == (
+            rm.LOCATED, "EXACT_RECORDING_FILE_MATCHED", rm.METHOD_GRAPH_CREATED)
+
+
+def test_a_september_2_shaped_file_with_another_subject_or_date_is_never_matched():
+    g = FakeRecordingGraph()
+    created = START + timedelta(seconds=40.266825)
+    r = g.recording(created, created + timedelta(seconds=8034.22))
+    other = g.recorded_file(r, lead=5.266825, duration=8034.304, subject="Another Cohort Lecture")
+    yesterday = g.mp4(started=created - timedelta(days=1, seconds=5.266825), duration_seconds=8034.304)
+    [m], diagnostics = _map(_select(g), _candidates(other, yesterday))
+    assert m.locate_status == rm.NOT_FOUND and diagnostics["subject_mismatch_in_window"] == 1
+
+
+def test_a_september_2_shaped_file_with_the_wrong_duration_is_a_mismatch():
+    created = datetime(2026, 9, 2, 10, 54, 40, 266825, tzinfo=timezone.utc)
+    for measured in (8034.22 + 30, 8034.22 - 30, 8034.22 + 5.267 + 15):
+        assert rm.check_duration(_graph_part(created, 8034.22), measured, 5.267)[:2] == (
+            rm.DURATION_MISMATCH, "FILE_DURATION_CONTRADICTS_RECORDING")

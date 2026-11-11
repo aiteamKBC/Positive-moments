@@ -111,7 +111,61 @@ def test_bootstrap_refuses_an_unmarked_database_that_already_holds_tables(approv
         assert seed.returncode == 0, seed.stderr[-300:]
         result = _child({guard.TEST_URL_ENV: _url_for(scratch)}, "--reset")
         assert result.returncode == 2
-        assert "did not build" in result.stderr
+        # Refused - since the name pin, already by name ("not the approved"),
+        # before bootstrap's own unmarked-tables check ("did not build").
+        assert "REFUSED" in result.stderr
+        assert ("not the approved isolated test database" in result.stderr
+                or "did not build" in result.stderr)
+        survived = subprocess.run(
+            [sys.executable, "-c",
+             "import os, psycopg; "
+             "c = psycopg.connect(os.environ['U']); "
+             "print(c.execute(\"SELECT to_regclass('public.someone_elses_data') IS NOT NULL\")"
+             ".fetchone()[0])"],
+            env={**os.environ, "U": _url_for(scratch)}, capture_output=True, text=True,
+            timeout=60)
+        assert survived.stdout.strip() == "True", survived.stderr[-300:]
     finally:
         with psycopg.connect(admin, autocommit=True) as connection:
             connection.execute(f"DROP DATABASE IF EXISTS {scratch} WITH (FORCE)")
+
+
+STANDALONE_DEBUG_SCRIPT = r"""
+import psycopg
+from app.config.settings import Settings
+from tests.integration.seeding import seed_lecture
+from tools.integration_db_guard import UnsafeTestDatabase
+
+connection = psycopg.connect(Settings.from_environment().database_url)
+try:
+    seed_lecture(connection)
+except UnsafeTestDatabase as exc:
+    print("REFUSED:", exc)
+    raise SystemExit(3)
+finally:
+    connection.rollback()
+    connection.close()
+print("WROTE")
+"""
+
+
+def test_a_standalone_script_cannot_seed_through_the_environment_database_url(approved):
+    """
+    Regression for 2026-09-24: ad-hoc scripts outside pytest imported the
+    seeding helpers and connected through Settings.from_environment(), whose
+    DATABASE_URL is production on an operator machine. Replay exactly that in
+    a child process, with DATABASE_URL pointed at a stand-in 'production'
+    database on the TEST server (production itself is never contacted), and
+    no TEST_DATABASE_URL / APP_ENV. The harness must refuse before writing.
+    """
+    stand_in = _url_for("postgres")
+    env = {k: v for k, v in os.environ.items()
+           if k not in (guard.TEST_URL_ENV, "APP_ENV")}
+    env["DATABASE_URL"] = stand_in
+    result = subprocess.run([sys.executable, "-c", STANDALONE_DEBUG_SCRIPT],
+                            cwd=guard.REPO_ROOT, env=env, capture_output=True, text=True,
+                            timeout=120)
+    assert result.returncode == 3, result.stdout[-300:] + result.stderr[-300:]
+    assert "REFUSED:" in result.stdout and "PRODUCTION database name" in result.stdout
+    assert "WROTE" not in result.stdout
+    assert stand_in not in result.stdout + result.stderr

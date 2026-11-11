@@ -73,7 +73,7 @@ export const STAGE_NOTES: Record<string, string> = {
   PERFECT_ELIGIBILITY: 'Perfect-lecture policy was applied to the result.',
   LEGACY_QA_SYNC: 'The report was written to the legacy QA record.',
   PERFECT_SYNC: 'The perfect outcome was written to the legacy record.',
-  RECORDING_LINK: 'A durable recording link was stored. Owned by the legacy workflows.',
+  RECORDING_LINK: 'A durable recording link was stored for the exact Teams recording.',
   EXCEL_SYNC: 'The outcome was stamped into the reporting workbook. Owned by the legacy workflows.',
 }
 
@@ -146,6 +146,7 @@ export const ACTION_LABELS: Record<string, string> = {
   EVALUATE_PERFECT: 'Apply the Perfect policy',
   SYNC_PERFECT: 'Sync Perfect to the legacy record',
   WAIT_FOR_RECORDING: 'Waiting for the recording link',
+  LINK_RECORDING: 'Link the exact recording',
   WAIT_FOR_EXCEL_SYNC: 'Waiting for the Excel sync',
   NOTHING_TO_DO: 'Nothing to do',
   MANUAL_REVIEW_REQUIRED: 'Needs a human decision',
@@ -238,6 +239,48 @@ export function recordingLabel(available: boolean) {
   return available ? 'Recording available' : 'Recording link pending'
 }
 
+/** One phrase per backend outcome (app/recordings/coverage.py). */
+export const RECORDING_OUTCOMES: Record<string, { label: string; tone: Tone }> = {
+  ALREADY_LINKED: { label: 'Already linked', tone: 'ok' },
+  WRITTEN: { label: 'Linked by this run', tone: 'ok' },
+  EXACT_MATCH: { label: 'Exact match — would link', tone: 'info' },
+  AMBIGUOUS: { label: 'Ambiguous — not linked', tone: 'review' },
+  BLOCKED_BY_EARLIER_STAGE: { label: 'Waiting on an earlier step', tone: 'waiting' },
+  REVIEW_REQUIRED: { label: 'Needs review', tone: 'review' },
+  NOT_APPLICABLE: { label: 'Not applicable — cancelled', tone: 'quiet' },
+  NOT_FOUND: { label: 'No recording file found', tone: 'waiting' },
+  GRAPH_LOOKUP_FAILED: { label: 'Microsoft lookup failed', tone: 'error' },
+  DISCOVERY_FAILED: { label: 'File search failed', tone: 'error' },
+  NO_CODED_LECTURE: { label: 'Not in the lecture registry', tone: 'neutral' },
+  NO_LEGACY_TARGET: { label: 'No QA record to link', tone: 'neutral' },
+  WAITING: { label: 'Retry scheduled', tone: 'waiting' },
+  NOT_EVALUATED: { label: 'Not evaluated (observe mode)', tone: 'quiet' },
+  OTHER: { label: 'Other', tone: 'neutral' },
+}
+
+export function recordingOutcome(value?: string | null) {
+  return RECORDING_OUTCOMES[value ?? ''] ?? { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export const RECORDING_SOURCES: Record<string, string> = {
+  channel_recordings: 'Channel recordings folder',
+  onedrive_recordings: 'Organizer OneDrive recordings',
+  tenant_search: 'Tenant search',
+}
+
+export function recordingSource(value?: string | null) {
+  return (value && RECORDING_SOURCES[value]) || humanise(value)
+}
+
+export const RECORDING_OWNERS: Record<string, string> = {
+  CODED_RECORDING_LINK: 'Linked by this platform',
+  LEGACY_RECORDING_BRANCH: 'Legacy n8n recording workflow',
+}
+
+export function recordingOwner(value?: string | null) {
+  return (value && RECORDING_OWNERS[value]) || humanise(value)
+}
+
 /* ---------------------------------------------------------------------------
  * QA Core RC2: Operations Backfill vocabulary.
  * ------------------------------------------------------------------------- */
@@ -271,4 +314,109 @@ export function backfillDayStatus(value?: string | null) {
 export const BACKFILL_MODE: Record<string, string> = {
   PREVIEW: 'Preview',
   EXECUTE: 'Backfill',
+}
+
+// --- Positive Moments Media -------------------------------------------------
+
+export const MEDIA_STATUS: Record<string, { label: string; tone: Tone }> = {
+  PLANNED: { label: 'Planned', tone: 'neutral' },
+  WAITING_FOR_RECORDING: { label: 'Waiting for recording', tone: 'waiting' },
+  WAITING_FOR_ALIGNMENT: { label: 'Waiting for alignment', tone: 'waiting' },
+  REVIEW_REQUIRED_ALIGNMENT: { label: 'Alignment needs review', tone: 'review' },
+  READY_TO_RENDER: { label: 'Ready to render', tone: 'info' },
+  QUEUED: { label: 'Queued', tone: 'info' },
+  RENDERING: { label: 'Rendering', tone: 'info' },
+  RENDER_SUCCEEDED: { label: 'Rendered', tone: 'info' },
+  UPLOAD_PENDING: { label: 'Upload pending', tone: 'info' },
+  UPLOADING: { label: 'Uploading', tone: 'info' },
+  COMPLETED: { label: 'Ready', tone: 'ok' },
+  FAILED_RETRYABLE: { label: 'Failed — will retry', tone: 'waiting' },
+  FAILED_FINAL: { label: 'Failed', tone: 'error' },
+  NO_MEDIA: { label: 'No clips', tone: 'quiet' },
+  NEEDS_REVIEW: { label: 'Needs review', tone: 'review' },
+  FAILED: { label: 'Failed', tone: 'error' },
+}
+
+export function mediaStatus(value?: string | null) {
+  return (value && MEDIA_STATUS[value]) || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export const ANALYSIS_STATE: Record<string, { label: string; tone: Tone }> = {
+  NOT_ANALYZED: { label: 'Not analyzed', tone: 'neutral' },
+  ANALYZING: { label: 'Analyzing', tone: 'info' },
+  NO_POSITIVE_MOMENTS: { label: 'No positive moments', tone: 'quiet' },
+  MOMENTS_FOUND: { label: 'Moments found', tone: 'ok' },
+  REVIEW_REQUIRED: { label: 'Needs review', tone: 'review' },
+  STALE: { label: 'Out of date', tone: 'waiting' },
+  FAILED: { label: 'Analysis failed', tone: 'error' },
+}
+
+export function analysisState(value?: string | null) {
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return ANALYSIS_STATE[value] || { label: humanise(value), tone: 'neutral' as Tone }
+}
+
+export function transcriptState(value?: string | null) {
+  if (value === 'READY') return { label: 'Ready', tone: 'ok' as Tone }
+  if (value === 'NOT_APPLICABLE') return { label: 'Not applicable', tone: 'quiet' as Tone }
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return { label: 'Not ready', tone: 'waiting' as Tone }
+}
+
+export function mediaRecordingState(value?: string | null) {
+  if (value === 'READY') return { label: 'Ready', tone: 'ok' as Tone }
+  if (value === 'NOT_APPLICABLE') return { label: 'Not applicable', tone: 'quiet' as Tone }
+  if (!value) return { label: 'Not previewed', tone: 'quiet' as Tone }
+  return { label: 'Waiting', tone: 'waiting' as Tone }
+}
+
+export const MOMENT_CATEGORIES: Record<string, string> = {
+  trainer: 'Trainer',
+  teaching_method: 'Teaching method',
+  content: 'Content',
+  support: 'Support',
+  learning_experience: 'Learning experience',
+}
+
+/** Positive clip evidence. The type itself is decided by the API, never here. */
+export const EVIDENCE_TYPES: Record<string, { label: string; tone: Tone }> = {
+  POSITIVE_MOMENT: { label: 'Positive Moment', tone: 'brand' },
+  OFSTED_CASE_STUDY: { label: 'OFSTED Case Study', tone: 'info' },
+  REJECT: { label: 'Rejected as evidence', tone: 'review' },
+}
+
+export function evidenceType(value?: string | null) {
+  return value ? EVIDENCE_TYPES[value] ?? { label: humanise(value), tone: 'neutral' as Tone }
+    : { label: 'Type not recorded', tone: 'quiet' as Tone }
+}
+
+/** The semantic verifier is advisory: its verdict is shown, never treated as approval. */
+export const SEMANTIC_STATUS: Record<string, { label: string; tone: Tone }> = {
+  accepted: { label: 'AI accepted', tone: 'ok' },
+  rejected: { label: 'AI rejected', tone: 'review' },
+  not_verified: { label: 'Not verified', tone: 'quiet' },
+  unrecognised: { label: 'AI verdict unrecognised', tone: 'neutral' },
+}
+
+export const SOCIAL_FORMATS: Record<string, string> = {
+  quote_post: 'Quote post',
+  reel: 'Reel',
+  carousel: 'Carousel',
+}
+
+export const RUN_MODE: Record<string, string> = {
+  PREVIEW: 'Preview',
+  ANALYZE: 'Analysis',
+  RENDER: 'Render',
+  RETRY_FAILED: 'Retry failed',
+}
+
+/** Seconds -> h:mm:ss (media positions) */
+export function clock(seconds?: number | null) {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) return '—'
+  const whole = Math.max(0, Math.round(seconds))
+  const h = Math.floor(whole / 3600)
+  const m = Math.floor((whole % 3600) / 60)
+  const s = whole % 60
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }

@@ -1,0 +1,33 @@
+# Positive Moments media runner.
+# Analysis, Creatomate render processing and SharePoint delivery.
+# Restarting this service does not queue a render by itself.
+
+[Unit]
+Description=KBC Positive Moments media runner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+WorkingDirectory=/var/www/Positive-moments
+
+EnvironmentFile=/var/www/Positive-moments/backend/config/.env
+Environment="PYTHONPATH=/var/www/Positive-moments"
+Environment="PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
+
+ExecStart=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.media media-runner --poll-seconds 10
+
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+TimeoutStopSec=300
+
+MemoryMax=512M
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

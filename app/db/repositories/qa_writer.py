@@ -18,6 +18,7 @@ import uuid
 from psycopg import sql
 
 from app.common.errors import DATABASE_ERROR, PlatformError
+from app.qa.generation_budget import attempt_row, generation_budget
 from app.writer.mapping import (
     CHECKLIST_COLUMNS,
     LEGACY_CHECKLIST_KEY,
@@ -40,6 +41,23 @@ SELECT rs.rendered_session_id, rs.lecture_id, rs.evaluation_id, rs.render_status
   JOIN public.lecture_qa_evaluations e ON e.evaluation_id = rs.evaluation_id
   JOIN public.lecture_sessions l ON l.lecture_id = rs.lecture_id
  WHERE l.session_date = %s AND rs.renderer_version = %s
+   -- A render of a SUPERSEDED answer is history, not a payload: once a
+   -- strictly newer evaluation exists for the lecture - a NON_DELIVERED later
+   -- replaced by a coverage review, say - it must never be written or judged
+   -- for Perfect again. Strictly newer, deliberately: two evaluations with the
+   -- same timestamp are indistinguishable, and guessing between them on a
+   -- uuid would be worse than the behaviour this refines.
+   AND NOT EXISTS (
+         SELECT 1
+           FROM public.lecture_qa_evaluations e2
+          WHERE e2.lecture_id = rs.lecture_id
+            AND (e2.updated_at > e.updated_at
+                 -- A deterministic refresh written in the SAME transaction as
+                 -- its origin shares its now(). The refresh names its origin,
+                 -- so that tie is decided by fact (Andrew SP, 2026-09-23).
+                 OR (e2.updated_at = e.updated_at
+                     AND e2.metadata #>> '{deterministic_refresh,origin_evaluation_id}'
+                         = e.evaluation_id::text)))
  ORDER BY l.scheduled_start, l.subject
 """
 
@@ -52,7 +70,8 @@ LOAD_RENDERED_FOR_LECTURE = (
     .replace(" WHERE l.session_date = %s AND rs.renderer_version = %s",
              " WHERE rs.lecture_id = %s AND rs.renderer_version = %s")
     .replace(" ORDER BY l.scheduled_start, l.subject",
-             " ORDER BY rs.updated_at DESC, rs.rendered_session_id DESC"))
+             " ORDER BY rs.updated_at DESC,"
+             " (e.metadata ? 'deterministic_refresh') DESC, rs.rendered_session_id DESC"))
 
 LOAD_RENDERED_ITEMS = """
 SELECT checklist_order, checklist_item, status, session_id, session_id_match, evidence
@@ -64,6 +83,37 @@ SELECT checklist_order, checklist_item, status, session_id, session_id_match, ev
 
 class RenderedPayloadRepository:
     """READ-ONLY access to the Phase 3B payload the writer would persist."""
+
+    def is_deterministic_refresh_of(self, connection, published_evaluation_id,
+                                    current_evaluation_id) -> bool:
+        """
+        Is the current evaluation a deterministic refresh that reuses the
+        published evaluation's stored model answer - same lecture, same
+        provider question, byte-identical output?
+
+        This is what makes a late-attendance update a deterministic change
+        rather than a new verdict: the AI analysis is the one already
+        published, and only the fields attendance supplies can differ. A
+        DIFFERENT evaluation is required, stamped by the refresh itself, so a
+        regeneration written over the published evaluation in place can never
+        pass by being compared with itself.
+        """
+        try:
+            row = connection.execute("""
+            SELECT p.lecture_id = c.lecture_id
+               AND p.evaluation_id <> c.evaluation_id
+               AND c.metadata ? 'deterministic_refresh'
+               AND p.ai_raw_output IS NOT NULL
+               AND p.ai_raw_output = c.ai_raw_output
+               AND p.metadata ->> 'model_input_fingerprint' IS NOT NULL
+               AND p.metadata ->> 'model_input_fingerprint'
+                   = c.metadata ->> 'model_input_fingerprint'
+              FROM public.lecture_qa_evaluations p, public.lecture_qa_evaluations c
+             WHERE p.evaluation_id = %s AND c.evaluation_id = %s
+            """, (published_evaluation_id, current_evaluation_id)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "model answer comparison failed") from exc
+        return bool(row and row[0])
 
     def load_sessions(self, connection, target_date, renderer_version) -> list[dict]:
         try:
@@ -124,6 +174,60 @@ class LegacyQaTargetRepository:
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "legacy session read failed") from exc
         return dict(zip(SESSION_COLUMNS, row)) if row else None
+
+    def load_foreign_columns(self, connection, session_id) -> dict | None:
+        """
+        Every column of the legacy row the coded writer does NOT own.
+
+        Read generically (`to_jsonb`) rather than from a list, so a column
+        another system adds tomorrow is covered by the same check without
+        anyone remembering to add it here.
+        """
+        try:
+            row = connection.execute(
+                "SELECT to_jsonb(s) FROM public.qa_doctors_sessions s "
+                " WHERE s.session_id = %s", (session_id,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "legacy session read failed") from exc
+        if row is None:
+            return None
+        return {name: value for name, value in row[0].items()
+                if name not in SESSION_COLUMNS}
+
+    def current_evaluation(self, connection, lecture_id) -> dict | None:
+        """The lecture's CURRENT evaluation, by the recovery_state rule."""
+        try:
+            rows = connection.execute("""
+            SELECT e.evaluation_id, e.qa_status, e.review_reason, e.updated_at,
+                   e.metadata #>> '{deterministic_refresh,origin_evaluation_id}'
+              FROM public.lecture_qa_evaluations e
+             WHERE e.lecture_id = %s
+             ORDER BY e.updated_at DESC, (e.metadata ? 'deterministic_refresh') DESC,
+                      e.evaluation_id DESC
+             LIMIT 2
+            """, (lecture_id,)).fetchall()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "current evaluation read failed") from exc
+        if not rows:
+            return None
+        row = rows[0]
+        return {"evaluation_id": str(row[0]), "qa_status": row[1], "review_reason": row[2],
+                # Two evaluations with the same timestamp: which is current is
+                # not knowable, and a deletion must never rest on a coin toss.
+                # A refresh tied with its own origin is not ambiguous: it
+                # names the evaluation it supersedes.
+                "ambiguous": (len(rows) > 1 and rows[1][3] == row[3]
+                              and row[4] != str(rows[1][0]))}
+
+    def coded_perfect_writes(self, connection, lecture_id) -> int:
+        try:
+            row = connection.execute("""
+            SELECT count(*) FROM public.lecture_perfect_lecture_legacy_writes p
+             WHERE p.lecture_id = %s AND p.write_status IN ('WRITTEN', 'UPDATED')
+            """, (lecture_id,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "perfect ownership read failed") from exc
+        return int(row[0])
 
     def load_checklist(self, connection, session_id) -> list[dict]:
         columns = sql.SQL(", ").join(sql.Identifier(name) for name in CHECKLIST_COLUMNS)
@@ -210,7 +314,7 @@ class WriterOwnershipRepository:
         try:
             row = connection.execute("""
             SELECT write_id, lecture_id, source_fingerprint, write_status, write_mode,
-                   post_write_digest
+                   post_write_digest, evaluation_id, legacy_session_id
               FROM public.lecture_qa_legacy_writes
              WHERE legacy_session_id = %s AND writer_version = %s
             """, (legacy_session_id, writer_version)).fetchone()
@@ -219,7 +323,8 @@ class WriterOwnershipRepository:
         if row is None:
             return None
         return {"write_id": row[0], "lecture_id": row[1], "source_fingerprint": row[2],
-                "write_status": row[3], "write_mode": row[4], "post_write_digest": row[5]}
+                "write_status": row[3], "write_mode": row[4], "post_write_digest": row[5],
+                "evaluation_id": row[6], "legacy_session_id": row[7]}
 
     def record(self, connection, entry: dict) -> dict:
         """
@@ -261,6 +366,23 @@ class WriterOwnershipRepository:
             raise PlatformError(DATABASE_ERROR, "writer ownership write failed") from exc
         return {"write_id": row[0], "created": bool(row[1])}
 
+    def live_writes_for_lecture(self, connection, lecture_id, writer_version) -> list[dict]:
+        """This lecture's coded-owned legacy rows that are still published."""
+        try:
+            rows = connection.execute("""
+            SELECT write_id, legacy_session_id, evaluation_id, write_status,
+                   post_write_digest
+              FROM public.lecture_qa_legacy_writes
+             WHERE lecture_id = %s AND writer_version = %s
+               AND write_status IN ('WRITTEN', 'UPDATED')
+             ORDER BY written_at DESC, write_id DESC
+            """, (lecture_id, writer_version)).fetchall()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "writer ownership lookup failed") from exc
+        return [{"write_id": row[0], "legacy_session_id": row[1],
+                 "evaluation_id": str(row[2]), "write_status": row[3],
+                 "post_write_digest": row[4]} for row in rows]
+
     def mark_status(self, connection, write_id, status, metadata=None) -> None:
         try:
             connection.execute("""
@@ -277,12 +399,41 @@ class GenerationAttemptRepository:
     """Append-only model-generation attempts, for the bounded retry policy."""
 
     def count(self, connection, source_fingerprint) -> int:
+        """Attempt RECORDS for the fingerprint - the ledger's numbering, not the budget."""
         try:
             return connection.execute(
                 "SELECT count(*) FROM public.lecture_qa_generation_attempts "
                 " WHERE source_fingerprint = %s", (source_fingerprint,)).fetchone()[0]
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "generation attempt count failed") from exc
+
+    def budget(self, connection, source_fingerprint, *, max_generations: int) -> dict:
+        """
+        The generation budget spent on this fingerprint, under the shared
+        policy in `app.qa.generation_budget`. Reads only.
+        """
+        try:
+            rows = connection.execute("""
+            SELECT a.outcome, a.error_code, a.metadata ->> 'consumes_generation_budget',
+                   a.metadata ->> 'generation_budget_used', a.metadata ->> 'http_status',
+                   a.metadata ->> 'provider_error_code', a.metadata ->> 'provider_error_type',
+                   a.metadata ->> 'generation_budget_policy_version'
+              FROM public.lecture_qa_generation_attempts a
+             WHERE a.source_fingerprint = %s
+             ORDER BY a.generation_number
+            """, (source_fingerprint,)).fetchall()
+            evaluation = connection.execute("""
+            SELECT q.error_code, q.metadata ->> 'http_status', q.ai_raw_output IS NOT NULL
+              FROM public.lecture_qa_evaluations AS q
+             WHERE q.source_fingerprint = %s
+            """, (source_fingerprint,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "generation budget read failed") from exc
+        return generation_budget(
+            [attempt_row(*row) for row in rows],
+            ({"error_code": evaluation[0], "http_status": evaluation[1],
+              "has_model_output": evaluation[2]} if evaluation else None),
+            max_generations=max_generations)
 
     def record(self, connection, entry: dict) -> int:
         """Append one attempt and return its generation number."""

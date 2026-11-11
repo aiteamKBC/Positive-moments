@@ -2,7 +2,7 @@
 /**
  * One product, one shell.
  *
- * Operations, Lectures and Positive Moments are three jobs inside a single
+ * Positive Moments, Operations and Lectures are three jobs inside a single
  * Kent Business College application, so they share one header, one navigation
  * and one type scale. Anything that made them look like three tools bolted
  * together belongs in here, once, rather than in each view.
@@ -24,9 +24,11 @@ const menuOpen = ref(false)
 const showShell = computed(() => route.meta.public !== true)
 
 const NAV = [
+  { label: 'Positive Moments', to: '/positive-moments', icon: 'moments', match: /^\/positive-moments/ },
+  { label: 'Social Media', to: '/social-media', icon: 'sparkle', match: /^\/social-media/ },
   { label: 'Operations', to: '/operations', icon: 'operations', match: /^\/operations/ },
   { label: 'Lectures', to: '/lectures', icon: 'lectures', match: /^\/lectures/ },
-  { label: 'Positive Moments', to: '/positive-moments', icon: 'moments', match: /^\/positive-moments/ },
+  { label: 'Publishing', to: '/publishing', icon: 'video', match: /^\/publishing/ },
 ]
 
 const active = computed(() => NAV.find((item) => item.match.test(route.path))?.to ?? '')
@@ -45,7 +47,7 @@ async function signOut() {
   <div v-if="showShell" class="min-h-screen bg-canvas">
     <header class="on-plum sticky top-0 z-40 bg-brand-900 text-white">
       <div class="mx-auto flex h-14 w-full max-w-[1520px] items-center gap-6 px-4 sm:px-6 lg:px-8">
-        <RouterLink to="/operations" class="shrink-0" aria-label="Kent Business College Lecture Intelligence — Operations">
+        <RouterLink to="/positive-moments" class="shrink-0" aria-label="Kent Business College Lecture Intelligence — Positive Moments">
           <BrandIdentity size="sm" inverse />
         </RouterLink>
 
@@ -69,6 +71,14 @@ async function signOut() {
           <span class="hidden text-2xs font-medium uppercase tracking-kicker text-white/45 lg:inline">
             Internal workspace
           </span>
+          <a
+            href="/api-documentation"
+            target="_blank"
+            rel="noopener"
+            class="hidden items-center gap-1.5 rounded-lg px-3 py-1.5 text-[0.8125rem] font-semibold text-white/70 transition hover:text-white sm:inline-flex"
+          >
+            <AppIcon name="external" :size="15" /> API docs
+          </a>
           <button
             v-if="hasToken()"
             type="button"
@@ -99,6 +109,14 @@ async function signOut() {
         >
           <AppIcon :name="item.icon" :size="16" /> {{ item.label }}
         </RouterLink>
+        <a
+          href="/api-documentation"
+          target="_blank"
+          rel="noopener"
+          class="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-semibold text-white/65"
+        >
+          <AppIcon name="external" :size="16" /> API docs
+        </a>
         <button
           type="button"
           class="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-white/65"

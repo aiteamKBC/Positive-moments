@@ -106,6 +106,8 @@ from app.orchestration.stages import (
     BUILD_CANONICAL_CUES,
     CALCULATE_ENGAGEMENT,
     EVALUATE_PERFECT,
+    LINK_RECORDING,
+    RECORDING_LINK,
     RECOVER_ATTENDANCE,
     REFRESH_DETERMINISTIC_QA,
     RENDER_QA,
@@ -119,8 +121,13 @@ from app.orchestration.stages import (
     SYNC_PERFECT,
 )
 from app.qa.perfect import DEFAULT_PERFECT_ELIGIBILITY_VERSION
-from app.qa.provider import OpenAIChatProvider
-from app.qa.service import ShadowQaService
+from app.common.errors import DATABASE_ERROR, PlatformError
+from app.qa.provider import (
+    PROVIDER_CONFIGURATION_ERROR_CODE,
+    OpenAIChatProvider,
+    ProviderError,
+)
+from app.qa.service import NO_REUSABLE_MODEL_OUTPUT, ShadowQaService
 from app.rendering.evidence import RENDERER_VERSION
 from app.rendering.service import QaRenderingService
 from app.transcripts.document_service import CanonicalTranscriptService
@@ -132,7 +139,7 @@ from app.orchestration.sync_safety import classify_plan
 from app.writer.modes import DRY_RUN, PRODUCTION_NEW_ONLY
 from app.writer.mapping import WRITER_VERSION
 from app.writer.perfect_service import PerfectLecturePlanner, plan_perfect_for_day
-from app.writer.service import LegacyQaWriter
+from app.writer.service import DETERMINISTIC_REFRESH_ONLY, LegacyQaWriter
 
 
 DAY_SCOPE = "DAY"
@@ -158,17 +165,56 @@ ACTION_SCOPE = {
     # actions in this table that touch a legacy production row.
     SYNC_LEGACY_QA: LECTURE_SCOPE,
     SYNC_PERFECT: LECTURE_SCOPE,
+    # Lecture-scoped: one organizer Graph lookup, DriveItem discovery, and at
+    # most one guarded write of the recording-owned columns.
+    LINK_RECORDING: LECTURE_SCOPE,
 }
 
 # Actions that would cost a Graph call or a paid generation. Listed explicitly
 # so the gates are auditable rather than implied by which service is built.
-GRAPH_ACTIONS = frozenset({ACQUIRE_TRANSCRIPT})
+GRAPH_ACTIONS = frozenset({ACQUIRE_TRANSCRIPT, LINK_RECORDING})
 PROVIDER_ACTIONS = frozenset({RUN_QA})
 # Actions that can write a legacy production row. Gated separately from
 # Graph and the provider because the risk is different in kind: money is
 # recoverable, a corrupted production row shared with a live n8n pipeline
 # is not.
-LEGACY_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT})
+LEGACY_WRITE_ACTIONS = frozenset({SYNC_LEGACY_QA, SYNC_PERFECT, LINK_RECORDING})
+
+# Slack on top of the provider's own worst case (every try timing out, plus
+# the waits between them), so the database never gives up before the HTTP
+# client does.
+PROVIDER_IDLE_MARGIN_SECONDS = 120
+
+
+def allow_idle_through_provider_call(connection, provider) -> int:
+    """
+    Keep the cycle's transaction alive while the model is thinking.
+
+    The QA call is made inside the cycle's open transaction: it holds the
+    lecture lock and a savepoint, and the answer is written in the same
+    transaction. Production ends any session idle in a transaction for 5
+    minutes, and a gpt-5.2 call can take longer. On 2026-10-15 a paid answer
+    came back to a connection the server had already closed, and the whole
+    backfill day rolled back with nothing recorded.
+
+    `set_config(..., true)` is SET LOCAL: it ends with this transaction, so it
+    never reaches the next client of a pooled backend. Returns the seconds
+    granted, 0 for an in-memory run that has no database session.
+    """
+    if connection is None:
+        return 0
+    tries = max(1, int(getattr(provider, "max_tries", 1)))
+    seconds = (int(getattr(provider, "timeout", 300)) * tries
+               + int(getattr(provider, "wait_between_tries_ms", 0)) * (tries - 1) // 1000
+               + PROVIDER_IDLE_MARGIN_SECONDS)
+    try:
+        connection.execute(
+            "SELECT set_config('idle_in_transaction_session_timeout', %s, true)",
+            (f"{seconds}s",))
+    except Exception as exc:
+        raise PlatformError(DATABASE_ERROR,
+                            "could not extend the idle limit for the QA call") from exc
+    return seconds
 
 
 class StageNotAutomatable(RuntimeError):
@@ -217,7 +263,12 @@ class StageRunner:
                 self.allow_legacy_writes and self.persist):
             # A dry run can never reach a legacy table, whatever it is asked.
             return False
+        if action == LINK_RECORDING and not self._recording_links_armed():
+            return False
         return True
+
+    def _recording_links_armed(self) -> bool:
+        return bool(getattr(self.settings, "recording_links_writable", False))
 
     def refusal_reason(self, action: str) -> str:
         if action not in ACTION_SCOPE:
@@ -229,6 +280,8 @@ class StageRunner:
         if action in LEGACY_WRITE_ACTIONS and not (
                 self.allow_legacy_writes and self.persist):
             return "LEGACY_WRITES_DISABLED_FOR_THIS_RUN"
+        if action == LINK_RECORDING and not self._recording_links_armed():
+            return "RECORDING_LINK_MODE_IS_NOT_WRITE"
         return "ACTION_NOT_AUTOMATED"
 
     # -- dispatch -----------------------------------------------------------
@@ -299,22 +352,41 @@ class StageRunner:
         return _outcome(outcome)
 
     def _run_qa(self, connection, lecture_id, session_date) -> dict:
-        self.settings.require_qa_model()
-        provider = OpenAIChatProvider(
-            api_key=self.settings.qa_model_api_key,
-            model=self.settings.qa_model_name,
-            base_url=self.settings.qa_model_base_url,
-            **({"response_contract": self.provider_contract_version}
-               if self.provider_contract_version else {}))
+        try:
+            self.settings.require_qa_model()
+            provider = OpenAIChatProvider(
+                api_key=self.settings.qa_model_api_key,
+                model=self.settings.qa_model_name,
+                base_url=self.settings.qa_model_base_url,
+                **({"response_contract": self.provider_contract_version}
+                   if self.provider_contract_version else {}))
+        except (ValueError, ProviderError) as exc:
+            # No usable key or model name: the same for every lecture of the
+            # cycle, and no call was made. The orchestrator opens its circuit
+            # on this code exactly as it does on a refused credential.
+            raise PlatformError(PROVIDER_CONFIGURATION_ERROR_CODE,
+                                "QA model provider is not configured") from exc
+        allow_idle_through_provider_call(connection, provider)
         service = self._qa_service(provider=provider, lecture_ids=[str(lecture_id)])
         outcome = service.run_day(connection, session_date, execute=self.persist)
-        return _outcome(outcome, provider_calls=outcome.get("provider_calls", 0))
+        result = _outcome(outcome, provider_calls=outcome.get("provider_calls", 0))
+        circuit = outcome.get("provider_circuit") or {}
+        if circuit.get("state") == "OPEN":
+            # The provider refused the credential for this lecture. Raised to
+            # the cycle so no other lecture is sent the same call.
+            result["provider_configuration_failure"] = circuit.get("opened_by")
+        return result
 
     def _refresh_deterministic_qa(self, connection, lecture_id, session_date) -> dict:
         # No provider at all: a deterministic refresh that could buy a
         # generation is not a deterministic refresh.
         outcome = self._qa_service(provider=None).refresh_deterministic(
             connection, lecture_id, persist=self.persist)
+        if outcome.get("refresh_status") == NO_REUSABLE_MODEL_OUTPUT:
+            # Fail closed, and say so. The only other way forward is a paid
+            # generation, which a refresh must never buy; reporting this as a
+            # quiet no-op would leave the lecture asking again every cycle.
+            raise ManualReviewRequired(NO_REUSABLE_MODEL_OUTPUT)
         return _outcome(outcome)
 
     def _revalidate_evidence(self, connection, lecture_id, session_date) -> dict:
@@ -417,7 +489,8 @@ class StageRunner:
 
         written = self._writer(
             lecture_id, mode=PRODUCTION_NEW_ONLY, confirmed=True,
-            include_perfect=verdict["include_perfect_planner"]).plan_day(
+            include_perfect=verdict["include_perfect_planner"],
+            update_policy=DETERMINISTIC_REFRESH_ONLY).plan_day(
                 connection, session_date)
         result = self._only_lecture(written, lecture_id)
         if result.get("write_status") == "WRITE_VERIFICATION_FAILED":
@@ -443,6 +516,37 @@ class StageRunner:
             raise ManualReviewRequired("WRITE_VERIFICATION_FAILED")
         return _outcome(outcome)
 
+    # -- RECORDING_LINK ---------------------------------------------------------
+
+    def _link_recording(self, connection, lecture_id, session_date) -> dict:
+        """
+        Link ONE lecture's recording through app/recordings.
+
+        The stage is re-derived here from the same resolver the orchestrator
+        used, so the legacy row this writes to is the resolver's own answer
+        (coded-owned or foreign-same-occurrence), never a second derivation.
+        If the resolver no longer offers LINK_RECORDING, nothing happens.
+        """
+        from app.db.repositories.pipeline_observations import LegacyObservationRepository
+        from app.orchestration.state import PipelineStateResolver
+
+        state = PipelineStateResolver(
+            legacy_observations=LegacyObservationRepository(),
+            perfect_eligibility_version=self.perfect_eligibility_version,
+            recording_link_mode="write").for_lecture(connection, lecture_id)
+        stage = state["stages"][RECORDING_LINK]
+        if stage.get("action") != LINK_RECORDING:
+            return _outcome({"status": "NOOP", "reason": stage.get("reason"),
+                             "stage_state": stage["state"]})
+        service = self._recording_link_service()
+        outcome = service.link(connection, lecture_id, stage["legacy_session_id"],
+                               write=self.persist, persist=self.persist)
+        return _outcome(outcome, graph_calls=outcome.get("graph_calls", 0))
+
+    def _recording_link_service(self):
+        from app.recordings.factory import build_recording_link_service
+        return build_recording_link_service(self.settings)
+
     def _only_lecture(self, plan: dict, lecture_id) -> dict:
         rows = [row for row in plan.get("lectures", [])
                 if str(row["lecture_id"]) == str(lecture_id)]
@@ -452,7 +556,7 @@ class StageRunner:
         return rows[0]
 
     def _writer(self, lecture_id, *, mode, confirmed: bool = False,
-                include_perfect: bool = True):
+                include_perfect: bool = True, update_policy=None):
         """
         The existing guarded writer, scoped to ONE lecture.
 
@@ -478,7 +582,8 @@ class StageRunner:
             mode=mode, writer_version=WRITER_VERSION,
             renderer_version=RENDERER_VERSION,
             allow_update_existing=False, lecture_ids=[str(lecture_id)],
-            confirmed=confirmed, perfect_planner=planner)
+            confirmed=confirmed, perfect_planner=planner,
+            update_policy=update_policy)
 
     # -- service construction -----------------------------------------------
 

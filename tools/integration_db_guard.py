@@ -18,14 +18,24 @@ below agrees; any single failure refuses it:
 
   1. `TEST_DATABASE_URL` is set explicitly.
   2. `APP_ENV=test` is set explicitly.
-  3. The database name carries a `test` marker (`kbc_qa_integration_test`).
+  3. The database name is EXACTLY the approved isolated test database,
+     `kbc_qa_integration_test`. A name merely containing `test` is not enough,
+     and a URL is not trusted merely because it sits in TEST_DATABASE_URL.
   4. The host is loopback, unless `KBC_TEST_DB_ALLOW_REMOTE_HOST=1`.
   5. It is not the same URL, nor the same host:port server, as any
      `DATABASE_URL` / `APTEM_DATABASE_URL` found in the environment or in the
      backend env files. Production is identified at run time, never hardcoded.
-  6. LIVE: the connected `current_database()` is the named one and it holds the
+  6. LIVE: the connected `current_database()` is exactly the approved name, is
+     not the name of any production database, and it holds the
      `kbc_test_database_marker` row that only `tools/bootstrap_integration_db.py`
      writes - and that tool applies checks 1-5 before it will write anything.
+
+The same checks guard every test helper that writes (`assert_isolated`, called
+by tests/integration/seeding.py) and the one sanctioned way for a helper or a
+debug script to open a connection (`connect_test_database`). A script that
+imports the harness but connects through `Settings.from_environment()` - whose
+DATABASE_URL is production on an operator machine - is refused before its
+first statement.
 
 Nothing here ever prints a URL, a user or a password. `describe()` reports
 host:port/dbname only.
@@ -35,6 +45,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,6 +57,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 TEST_URL_ENV = "TEST_DATABASE_URL"
 APP_ENV = "APP_ENV"
 ALLOW_REMOTE_ENV = "KBC_TEST_DB_ALLOW_REMOTE_HOST"
+
+# The one database the integration harness may ever write to.
+APPROVED_TEST_DATABASE = "kbc_qa_integration_test"
 
 MARKER_TABLE = "kbc_test_database_marker"
 MARKER_PURPOSE = "kbc-qa-integration-test"
@@ -136,6 +150,10 @@ def check_static(environ=None, production=None) -> Target:
     if not target.dbname or not TEST_NAME.search(target.dbname):
         raise UnsafeTestDatabase(
             f"database name {target.dbname!r} carries no 'test' marker")
+    if target.dbname != APPROVED_TEST_DATABASE:
+        raise UnsafeTestDatabase(
+            f"database name {target.dbname!r} is not the approved isolated test "
+            f"database {APPROVED_TEST_DATABASE!r}")
     if (_normal_host(target.host) != "localhost"
             and (environ.get(ALLOW_REMOTE_ENV) or "") != "1"):
         raise UnsafeTestDatabase(
@@ -158,10 +176,39 @@ def check_static(environ=None, production=None) -> Target:
     return target
 
 
-def check_live(connection, target: Target) -> None:
+def production_database_names(production=None) -> set[str]:
+    """The database names of every production connection string, lower-cased."""
+    if production is None:
+        # Inside a pytest session conftest points DATABASE_URL at the approved
+        # test URL (after check_static refused any identical pair), so that one
+        # value is not production. backend/.env is still read.
+        test_url = (os.environ.get(TEST_URL_ENV) or "").strip()
+        production = [url for url in production_urls() if not test_url or url != test_url]
+    names = set()
+    for candidate in production:
+        try:
+            names.add(parse_target(candidate).dbname.lower())
+        except UnsafeTestDatabase:
+            continue
+    names.discard("")
+    return names
+
+
+def _refuse_name(name: str, production=None) -> None:
+    if name.lower() in production_database_names(production):
+        raise UnsafeTestDatabase(
+            f"connected to {name!r}, which is a PRODUCTION database name")
+    if name != APPROVED_TEST_DATABASE:
+        raise UnsafeTestDatabase(
+            f"connected to {name!r}, not the approved isolated test database "
+            f"{APPROVED_TEST_DATABASE!r}")
+
+
+def check_live(connection, target: Target, production=None) -> None:
     """Signal 6, on an open connection. Leaves no transaction open."""
     try:
         name = connection.execute("SELECT current_database()").fetchone()[0]
+        _refuse_name(name, production)
         if name != target.dbname:
             raise UnsafeTestDatabase(
                 f"connected to {name!r}, expected the test database {target.dbname!r}")
@@ -179,6 +226,61 @@ def check_live(connection, target: Target) -> None:
     finally:
         if not connection.autocommit and not connection.closed:
             connection.rollback()
+
+
+# --- per-connection guard for helpers and scripts -----------------------------
+
+_VERIFIED: "weakref.WeakSet" = weakref.WeakSet()
+
+
+def assert_isolated(connection, production=None) -> None:
+    """
+    Fail closed unless `connection` is the approved, marked test database.
+
+    First from the connection's own libpq parameters - before a single
+    statement is sent, so a production connection runs nothing, not even a
+    SELECT - then live: current_database() and the marker. The live half is
+    cached per connection object. Test helpers that write call this first.
+    """
+    info = getattr(connection, "info", None)
+    dbname = str(getattr(info, "dbname", "") or "")
+    host = str(getattr(info, "host", "") or "")
+    if not dbname:
+        raise UnsafeTestDatabase("connection does not report its database name")
+    _refuse_name(dbname, production)
+    if (_normal_host(host) != "localhost" and not host.startswith("/")
+            and (os.environ.get(ALLOW_REMOTE_ENV) or "") != "1"):
+        raise UnsafeTestDatabase("test helper connection is not on a loopback host")
+    try:
+        if connection in _VERIFIED:
+            return
+    except TypeError:  # an object that cannot be weakly referenced: re-check live
+        pass
+    target = Target(host=host, port=str(getattr(info, "port", "") or ""), dbname=dbname)
+    check_live(connection, target, production)
+    try:
+        _VERIFIED.add(connection)
+    except TypeError:
+        pass
+
+
+def connect_test_database(**kwargs):
+    """
+    The only sanctioned way for a test helper or debug script to connect:
+    TEST_DATABASE_URL after every static check, then the live check. Never
+    DATABASE_URL, never Settings.from_environment().
+    """
+    import psycopg
+
+    target = check_static()
+    connection = psycopg.connect(os.environ[TEST_URL_ENV].strip(), **kwargs)
+    try:
+        check_live(connection, target)
+        assert_isolated(connection)
+    except Exception:
+        connection.close()
+        raise
+    return connection
 
 
 # --- process-wide guards -------------------------------------------------------

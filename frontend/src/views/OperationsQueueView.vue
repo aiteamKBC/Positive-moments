@@ -161,6 +161,7 @@ function reasonFor(row: { reason_codes?: Record<string, string>; blocking_stage:
                 <AttendanceCell
                   compact
                   :authoritative="row.attendance_source_authoritative"
+                  :not-delivered="row.not_delivered"
                   :coverage-status="row.attendance_coverage_status"
                 />
               </td>

@@ -1,14 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { hasToken } from './services/api'
+import { hasToken, startMicrosoftSignIn } from './services/api'
+import ApiDocumentationView from './views/ApiDocumentationView.vue'
 import LectureDetailView from './views/LectureDetailView.vue'
 import LecturesView from './views/LecturesView.vue'
 import LoginView from './views/LoginView.vue'
+import SsoCompleteView from './views/SsoCompleteView.vue'
 import OperationsDashboardView from './views/OperationsDashboardView.vue'
 import OperationsQueueView from './views/OperationsQueueView.vue'
 import OperationsBackfillView from './views/OperationsBackfillView.vue'
+import OperationsMediaView from './views/OperationsMediaView.vue'
 import OperationsRunsView from './views/OperationsRunsView.vue'
 import PositiveMomentDetailView from './views/PositiveMomentDetailView.vue'
 import PositiveMomentsView from './views/PositiveMomentsView.vue'
+import PublishingMonitorView from './views/PublishingMonitorView.vue'
+import SocialMediaDetailView from './views/SocialMediaDetailView.vue'
+import SocialMediaView from './views/SocialMediaView.vue'
 
 /**
  * Three areas, one product.
@@ -16,6 +22,9 @@ import PositiveMomentsView from './views/PositiveMomentsView.vue'
  *   /operations        what needs attention today
  *   /lectures          the lecture workspace, and one lecture in full
  *   /positive-moments  the learner-moments feature
+ *   /social-media      AI-suggested social media opportunities
+ *   /publishing        Lecture Publishing Monitor: Teams -> Bunny -> LMS (read-only)
+ *   /api-documentation opens the LMS API documentation (backend /api/docs/) without a second sign-in
  *
  * The canonical lecture detail is keyed by `lecture_id`, which is always a
  * UUID. The constraint on the parameter is what lets the old bookmark shape
@@ -28,8 +37,9 @@ const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/operations' },
+    { path: '/', redirect: '/positive-moments' },
     { path: '/login', name: 'login', component: LoginView, meta: { public: true, title: 'Sign in' } },
+    { path: '/sso/complete', name: 'sso-complete', component: SsoCompleteView, meta: { public: true, title: 'Signing in' } },
 
     // --- Operations ------------------------------------------------------
     { path: '/operations', name: 'operations', component: OperationsDashboardView, meta: { title: 'Operations' } },
@@ -51,6 +61,11 @@ const router = createRouter({
       path: '/operations/backfill', name: 'operations-backfill',
       component: OperationsBackfillView, meta: { title: 'Historical backfill' },
     },
+    {
+      // Positive Moments Media: analyse, plan, render and deliver clips.
+      path: '/operations/positive-moments-media', name: 'operations-media',
+      component: OperationsMediaView, meta: { title: 'Positive Moments Media' },
+    },
 
     // --- Lectures --------------------------------------------------------
     { path: '/lectures', name: 'lectures', component: LecturesView, meta: { title: 'Lectures' } },
@@ -59,11 +74,22 @@ const router = createRouter({
       component: LectureDetailView, meta: { title: 'Lecture' },
     },
 
+    // --- Publishing (read-only Lecture Publishing Monitor) ---------------
+    { path: '/publishing', name: 'publishing', component: PublishingMonitorView, meta: { title: 'Lecture Publishing Monitor' } },
+
     // --- Positive Moments ------------------------------------------------
     { path: '/positive-moments', name: 'positive-moments', component: PositiveMomentsView, meta: { title: 'Positive Moments' } },
     {
       path: '/positive-moments/:sessionKey', name: 'positive-moment-detail',
       component: PositiveMomentDetailView, meta: { title: 'Positive Moments' },
+    },
+
+    // --- Social Media ----------------------------------------------------
+    { path: '/social-media', name: 'social-media', component: SocialMediaView, meta: { title: 'Social Media' } },
+    { path: '/api-documentation', name: 'api-documentation', component: ApiDocumentationView, meta: { title: 'API documentation' } },
+    {
+      path: '/social-media/:sessionKey', name: 'social-media-detail',
+      component: SocialMediaDetailView, meta: { title: 'Social Media' },
     },
 
     // --- kept so existing bookmarks do not break -------------------------
@@ -73,14 +99,21 @@ const router = createRouter({
     },
     { path: '/lectures/:sessionKey', redirect: (to) => ({ name: 'positive-moment-detail', params: to.params }) },
 
-    { path: '/:pathMatch(.*)*', redirect: '/operations' },
+    { path: '/:pathMatch(.*)*', redirect: '/positive-moments' },
   ],
   scrollBehavior: () => ({ top: 0 }),
 })
 
 router.beforeEach((to) => {
-  if (!to.meta.public && !hasToken()) return { name: 'login', query: { next: to.fullPath } }
-  if (to.name === 'login' && hasToken()) return { name: 'operations' }
+  if (!to.meta.public && !hasToken()) {
+    // Straight to Microsoft: someone signed in to the Communication Centre is
+    // already signed in there and comes back without seeing a login page.
+    // /login stays reachable for the local-account fallback and never
+    // redirects by itself, so a failed sign-in cannot loop.
+    startMicrosoftSignIn(to.fullPath)
+    return false
+  }
+  if (to.name === 'login' && hasToken()) return { name: 'positive-moments' }
 })
 
 router.afterEach((to) => {

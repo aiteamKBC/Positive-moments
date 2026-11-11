@@ -3,9 +3,10 @@ import axios from 'axios'
 import type { LectureDetail, PaginatedLectures, Summary } from '../types'
 
 const TOKEN_KEY = 'positive_mentions_token'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: API_BASE,
   timeout: 20000,
   headers: { 'Content-Type': 'application/json' },
 })
@@ -21,7 +22,9 @@ api.interceptors.response.use(
   (error: unknown) => {
     if (axios.isAxiosError(error) && error.response?.status === 401) {
       localStorage.removeItem(TOKEN_KEY)
-      if (window.location.pathname !== '/login') window.location.assign('/login')
+      if (window.location.pathname !== '/login') {
+        startMicrosoftSignIn(window.location.pathname + window.location.search)
+      }
     }
     return Promise.reject(error)
   },
@@ -44,8 +47,34 @@ export async function login(username: string, password: string) {
   setToken(data.token)
 }
 
+/**
+ * Sign in with Microsoft, the way the Communication Centre does. Someone
+ * already signed in there comes straight back without typing anything.
+ */
+export function startMicrosoftSignIn(returnTo = '/positive-moments') {
+  window.location.assign(`${API_BASE}/auth/sso/start?${new URLSearchParams({ return_to: returnTo })}`)
+}
+
+/** Trade the one-time sign-in code for the API token. Returns where to go. */
+export async function completeMicrosoftSignIn(code: string) {
+  const { data } = await api.post<{ token: string; return_to: string }>('/auth/sso/exchange/', { code })
+  setToken(data.token)
+  return data.return_to
+}
+
 export async function logout() {
   await api.post('/auth/logout/')
+}
+
+/**
+ * Open the LMS API documentation (Swagger UI at /api/docs/) for the signed-in user.
+ * A page navigation cannot carry the token header, so the token first opens a short,
+ * documentation-only grant in the backend's HttpOnly session cookie. The token never goes into
+ * the URL; signing out of the Dashboard ends the grant.
+ */
+export async function openApiDocumentation(navigate = (url: string) => window.location.replace(url)) {
+  await api.post('/docs/session/')
+  navigate(`${API_BASE}/docs/`)
 }
 
 export async function getSummary(params: Record<string, string | number> = {}) {
@@ -60,6 +89,17 @@ export async function getLecture(sessionKey: string) {
   return (await api.get<LectureDetail>(
     `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/`,
   )).data
+}
+
+/**
+ * Ask for one moment to be cut into a clip. Accepted means "requested": the
+ * clip itself appears later, once it has been produced.
+ */
+export async function requestClip(sessionKey: string, startCue: number, endCue: number) {
+  await api.post(
+    `/positive-mentions/lectures/${encodeURIComponent(sessionKey)}/clip-requests/`,
+    { start_cue: startCue, end_cue: endCue },
+  )
 }
 
 export async function getWatchUrl(sessionKey: string, clipIndex: number) {

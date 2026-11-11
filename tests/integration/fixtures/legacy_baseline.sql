@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS public.qa_doctors_sessions (
     recording_link_status        text,
     recording_item_id            text,
     recording_drive_id           text,
+    recording_filename           text,
+    recording_link_updated_at    timestamptz,
     recording_id                 text,
     recap_url                    text,
     transcript_url               text,

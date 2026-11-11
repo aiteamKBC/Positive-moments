@@ -123,6 +123,12 @@ production deployment.
 | GET | `/api/positive-mentions/lectures/<session-key>/` | Lecture and normalized clips |
 | GET | `/api/positive-mentions/lectures/<session-key>/clips/<index>/watch/` | Timestamped SharePoint URL |
 
+The LMS delivery API (`/api/publisher/v1/`: recording per occurrence, change feed, health) is documented in
+[docs/api/publisher_lms_v1.openapi.json](docs/api/publisher_lms_v1.openapi.json) and the
+[LMS integration guide](docs/integration/LMS_INTEGRATION_GUIDE.md). With `PUBLISHER_API_DOCS_ENABLED=true`,
+every Dashboard user can browse it as Swagger UI through the Dashboard's "API docs" link
+(`/api-documentation`, which opens `/api/docs/` with the Dashboard sign-in; schema at `/api/schema/`).
+
 Lecture list query parameters:
 
 `page`, `page_size`, `search`, `trainer`, `date_from`, `date_to`, `clips_status`,

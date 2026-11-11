@@ -36,10 +36,21 @@ recorded and stepped over. Two exceptions, both deliberate:
   * a SHARED-INFRASTRUCTURE failure - Graph auth, the database itself - stops
     the run too, because the next lecture will fail the same way and a hundred
     identical failures in the audit log is noise, not information.
+
+A refused QA-model credential is shared too, but it only concerns ONE stage,
+so it does not stop the cycle: it opens the cycle's provider circuit. Every
+later RUN_QA in the same cycle is BLOCKED without a call and without spending
+budget, while transcripts, attendance, rendering and the rest carry on. The
+circuit lives and dies with the cycle, so the next one tries the credential
+again and a repaired key is used at once.
 """
 import logging
 import time
+from contextlib import contextmanager
 from datetime import date as _date, timedelta
+
+import psycopg
+from psycopg.pq import TransactionStatus
 
 from app.common.errors import (
     DATABASE_ERROR,
@@ -54,7 +65,7 @@ from app.orchestration.locks import (
     NullLockManager,
     SchedulerCycleBusy,
 )
-from app.orchestration.runner import ManualReviewRequired
+from app.orchestration.runner import PROVIDER_ACTIONS, ManualReviewRequired
 from app.orchestration.n8n_preflight import (
     LEGACY_QA_DISABLED,
     PRECHECK_SKIPPED,
@@ -87,6 +98,12 @@ from app.orchestration.stages import (
     RUN_TYPE_MANUAL,
     WAIT_FOR_ATTENDANCE_SOURCE,
 )
+from app.qa.provider import (
+    PROVIDER_CONFIGURATION_BLOCKED,
+    PROVIDER_CONFIGURATION_ERROR,
+    PROVIDER_CONFIGURATION_ERROR_CODE,
+    ProviderCircuit,
+)
 
 
 # A refusal from the writer guard is never "this lecture"; it is "the rules
@@ -113,6 +130,8 @@ class PipelineOrchestrator:
         self.discovery_service = discovery_service
         self.max_passes = max_passes
         self.orchestration_version = orchestration_version
+        # Replaced at the start of every cycle (see `_run_window`).
+        self._provider_circuit = ProviderCircuit()
         self.log = logging.getLogger(__name__)
 
     # -- entry point --------------------------------------------------------
@@ -167,6 +186,8 @@ class PipelineOrchestrator:
         window_start = target_date - timedelta(days=max(lookback_days, 0))
         window = [window_start + timedelta(days=offset)
                   for offset in range((target_date - window_start).days + 1)]
+        # Cycle-local by construction: a new cycle is a new, closed circuit.
+        self._provider_circuit = ProviderCircuit()
 
         summary = {
             "run_id": None,
@@ -244,6 +265,16 @@ class PipelineOrchestrator:
                                       "error": stop.message,
                                       "stopped_run": True})
 
+        summary["provider_circuit"] = self._provider_circuit.report(blocked=[
+            item["lecture_id"] for item in outcomes.values()
+            if item.get("error_code") == PROVIDER_CONFIGURATION_BLOCKED])
+        if self._provider_circuit.is_open:
+            summary["errors"].append({
+                "error_code": PROVIDER_CONFIGURATION_ERROR, "stage": "QA_EVALUATION",
+                "stopped_run": False,
+                "error": "the QA model provider refused the configured credential; "
+                         "no further provider calls were made this cycle"})
+
         # -- 7. reconcile the day again --------------------------------------
         final = self._resolve_window(connection, window, lecture_ids)
         summary["final"] = _snapshot(final)
@@ -291,7 +322,8 @@ class PipelineOrchestrator:
                 legacy_rows_written=summary["legacy_rows_written"],
                 metadata={"passes": summary["passes"],
                           "idempotent": summary["idempotent"],
-                          "day_stages": summary["day_stages"]})
+                          "day_stages": summary["day_stages"],
+                          "provider_circuit": summary["provider_circuit"]})
         return summary
 
     # -- the pass loop ------------------------------------------------------
@@ -396,6 +428,17 @@ class PipelineOrchestrator:
             outcome["error_code"] = "DRY_RUN"
             return False
 
+        if action in PROVIDER_ACTIONS and self._provider_circuit.is_open:
+            # The credential was refused earlier in this cycle. No call, no
+            # attempt row, no budget: the lecture is left exactly where it
+            # was, for the next cycle.
+            outcome["status"] = ITEM_BLOCKED
+            outcome["error_code"] = PROVIDER_CONFIGURATION_BLOCKED
+            outcome["error_message"] = ("the QA model provider refused the credential "
+                                        "earlier in this cycle; no call was made")
+            outcome["retryable"] = True
+            return False
+
         session_date = _date.fromisoformat(state["session_date"])
         scope = self.runner.scope_of(action)
         if scope == "DAY":
@@ -419,14 +462,15 @@ class PipelineOrchestrator:
         started = time.monotonic()
         try:
             if locked:
-                with self.lock_manager.hold(connection, lecture_id):
+                with self.lock_manager.hold(connection, lecture_id),                         _stage_savepoint(connection):
                     result = self.runner.execute(
                         connection, action, session_date=session_date,
                         lecture_id=lecture_id)
             else:
-                result = self.runner.execute(connection, action,
-                                             session_date=session_date,
-                                             lecture_id=lecture_id)
+                with _stage_savepoint(connection):
+                    result = self.runner.execute(connection, action,
+                                                 session_date=session_date,
+                                                 lecture_id=lecture_id)
         except LectureBusy:
             # Another process owns this lecture right now. Not a failure, and
             # not something to wait for: the other cycle will finish it.
@@ -444,16 +488,32 @@ class PipelineOrchestrator:
             return False
         except PlatformError as exc:
             self._record_failure(outcome, exc.code, str(exc))
+            if exc.code == PROVIDER_CONFIGURATION_ERROR_CODE:
+                # No usable key at all. Same answer for every lecture.
+                self._provider_circuit.open(
+                    lecture_id=lecture_id, failure_class=PROVIDER_CONFIGURATION_ERROR,
+                    http_status=None, provider_error_code=exc.code)
             if exc.code in WRITER_INTEGRITY_CODES:
                 raise _RunStopped(RUN_BLOCKED_WRITER_INTEGRITY, exc.code,
                                   str(exc)) from exc
-            if exc.code in SHARED_INFRASTRUCTURE_CODES:
+            if (exc.code in SHARED_INFRASTRUCTURE_CODES
+                    and not _statement_error_recovered(connection, exc)):
                 raise _RunStopped(RUN_ABORTED, exc.code, str(exc)) from exc
             return False
         except Exception as exc:  # noqa: BLE001 - one lecture must not stop the rest
             self._record_failure(outcome, type(exc).__name__, str(exc))
             return False
 
+        failure = result.get("provider_configuration_failure")
+        if failure:
+            # Recorded on this lecture (its attempt row is written, and spends
+            # nothing); every other lecture of the cycle is spared the call.
+            self._provider_circuit.open(**{"lecture_id": lecture_id, **failure})
+            outcome["error_code"] = PROVIDER_CONFIGURATION_ERROR
+            outcome["error_message"] = (
+                "the QA model provider refused the credential "
+                f"(HTTP {failure.get('http_status')})")
+            outcome["retryable"] = True
         outcome["actions"].append(action)
         outcome["graph_calls"] += result.get("graph_calls", 0)
         outcome["provider_calls"] += result.get("provider_calls", 0)
@@ -678,3 +738,54 @@ def _counts(items) -> dict:
             key = "skipped_count"
         buckets[key] += 1
     return {"lectures_seen": len(items), **buckets}
+
+
+STAGE_SAVEPOINT = "orchestrator_stage"
+
+
+@contextmanager
+def _stage_savepoint(connection):
+    """
+    Keep one stage's DATABASE error from aborting the whole cycle.
+
+    The isolation rule above ("its failure is caught, recorded and stepped
+    over") only held for errors outside PostgreSQL. A failed statement leaves
+    the cycle's single transaction aborted, so the very next state read failed
+    and the daemon rolled back every lecture's work - which is how every cycle
+    from 2026-10-01 18:00 UTC onward was lost with nothing but "PlatformError".
+
+    Rolled back ONLY when the transaction is actually aborted: then nothing in
+    it could have been committed anyway, and losing this one action's writes
+    is the whole cost. When the transaction is still healthy the savepoint is
+    released, so whatever an action recorded before raising - a generation
+    attempt that spent budget, a recording-link attempt - is kept exactly as
+    before.
+    """
+    if not isinstance(connection, psycopg.Connection) or connection.autocommit:
+        yield
+        return
+    connection.execute(f"SAVEPOINT {STAGE_SAVEPOINT}")
+    try:
+        yield
+    except BaseException:
+        if connection.info.transaction_status == TransactionStatus.INERROR:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {STAGE_SAVEPOINT}")
+        connection.execute(f"RELEASE SAVEPOINT {STAGE_SAVEPOINT}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {STAGE_SAVEPOINT}")
+
+
+def _statement_error_recovered(connection, exc) -> bool:
+    """
+    A DATABASE_ERROR that was one failed STATEMENT, already rolled back to the
+    stage savepoint on a connection that is still healthy. That is this
+    lecture's failure - a constraint it violates will not repeat for the next
+    lecture - so it is recorded and stepped over. A lost or broken connection
+    is still shared infrastructure and still stops the run.
+    """
+    cause = exc.__cause__
+    return (isinstance(connection, psycopg.Connection)
+            and not connection.closed
+            and connection.info.transaction_status == TransactionStatus.INTRANS
+            and isinstance(cause, psycopg.Error)
+            and not isinstance(cause, psycopg.OperationalError))

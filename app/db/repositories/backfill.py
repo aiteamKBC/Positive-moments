@@ -53,7 +53,24 @@ DAY_FIELDS = (
     "matched_lectures", "newly_discovered", "already_complete", "processed",
     "waiting", "review_required", "failed", "suppressed", "graph_calls",
     "provider_calls", "error_code", "error_message", "started_at",
-    "finished_at", "duration_ms")
+    "finished_at", "duration_ms", "recording_error_code")
+
+# Migration 022. The Recording Links snapshot a run keeps per lecture.
+RECORDING_ITEM_FIELDS = (
+    "business_date", "item_key", "lecture_id", "subject", "population",
+    "recording_link_mode", "evaluation", "outcome", "recording_stage_state",
+    "recording_status", "reason", "earlier_stage", "earlier_action",
+    "would_write", "written", "perfect_row_updated", "perfect_row_would_update",
+    "source", "timestamp_difference_seconds", "candidate_file_count",
+    "exact_candidate_count", "graph_lookup_status", "graph_http_status",
+    "verification", "legacy_cancelled", "attempt_count", "next_attempt_after",
+    "last_attempted_at")
+
+INSERT_RECORDING_ITEM = f"""
+INSERT INTO public.backfill_run_recording_items (
+    backfill_run_id, {', '.join(RECORDING_ITEM_FIELDS)})
+VALUES (%(backfill_run_id)s, {', '.join(f'%({name})s' for name in RECORDING_ITEM_FIELDS)})
+"""
 
 INSERT_RUN = """
 INSERT INTO public.backfill_runs (
@@ -254,6 +271,46 @@ class BackfillRepository:
                                                 ELSE current_business_date END
              WHERE backfill_run_id = %(run_id)s""",
             {"run_id": run_id, "status": status, "error_summary": error_summary})
+
+    # -- Recording Links (migration 022) ------------------------------------
+
+    def replace_recording_items(self, connection, run_id, *, business_date, items,
+                                error_code=None) -> None:
+        """
+        Store one day's Recording Links snapshot, replacing any earlier attempt
+        at the same day. Run progress only: no platform table is touched.
+        """
+        connection.execute(
+            "DELETE FROM public.backfill_run_recording_items"
+            " WHERE backfill_run_id = %s AND business_date = %s", (run_id, business_date))
+        for item in items:
+            connection.execute(INSERT_RECORDING_ITEM, {
+                "backfill_run_id": run_id,
+                **{name: item.get(name) for name in RECORDING_ITEM_FIELDS},
+                "business_date": business_date,
+                "would_write": bool(item.get("would_write")),
+                "written": bool(item.get("written")),
+                "perfect_row_updated": bool(item.get("perfect_row_updated")),
+                "perfect_row_would_update": bool(item.get("perfect_row_would_update")),
+                "legacy_cancelled": bool(item.get("legacy_cancelled"))})
+        connection.execute(
+            "UPDATE public.backfill_run_days SET recording_error_code = %s"
+            " WHERE backfill_run_id = %s AND business_date = %s",
+            (error_code, run_id, business_date))
+
+    def recording_items(self, connection, run_id) -> list[dict]:
+        rows = _rows(
+            connection,
+            f"SELECT {', '.join(RECORDING_ITEM_FIELDS)}"
+            " FROM public.backfill_run_recording_items WHERE backfill_run_id = %s"
+            " ORDER BY business_date, subject NULLS LAST, item_key",
+            (run_id,), RECORDING_ITEM_FIELDS, "backfill recording item")
+        for row in rows:
+            if row["lecture_id"] is not None:
+                row["lecture_id"] = str(row["lecture_id"])
+            if row["timestamp_difference_seconds"] is not None:
+                row["timestamp_difference_seconds"] = float(row["timestamp_difference_seconds"])
+        return rows
 
     # -- cancellation --------------------------------------------------------
 

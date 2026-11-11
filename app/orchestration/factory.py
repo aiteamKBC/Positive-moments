@@ -33,7 +33,8 @@ from app.orchestration.scheduler import SchedulerConfig, SchedulerService
 from app.orchestration.state import PipelineStateResolver
 
 
-def build_resolver(*, probe: bool = False, perfect_eligibility_version=None):
+def build_resolver(*, probe: bool = False, perfect_eligibility_version=None,
+                   recording_link_mode: str = "observe"):
     """
     The state resolver, optionally able to notice that attendance has arrived.
 
@@ -50,7 +51,13 @@ def build_resolver(*, probe: bool = False, perfect_eligibility_version=None):
              if perfect_eligibility_version else {})
     return PipelineStateResolver(
         legacy_observations=LegacyObservationRepository(),
-        attendance_probe=attendance_probe, **extra)
+        attendance_probe=attendance_probe,
+        recording_link_mode=recording_link_mode, **extra)
+
+
+def _recording_link_mode(settings) -> str:
+    """The scheduler, backfill and CLI all read the one switch the same way."""
+    return getattr(settings, "recording_link_mode", "observe") or "observe"
 
 
 def build_discovery_service(settings):
@@ -65,7 +72,14 @@ def build_discovery_service(settings):
         aptem_repository=AptemRepository(),
         lecture_repository=LectureSessionRepository(),
         run_repository=DiscoveryRunRepository(),
-        qa_validation_repository=QaValidationRepository())
+        qa_validation_repository=QaValidationRepository(),
+        lms_repository=_lms_repository(settings))
+
+
+def _lms_repository(settings):
+    from app.db.repositories.lms import LmsModuleRepository
+    url = getattr(settings, "lms_database_url", "")
+    return LmsModuleRepository(url) if url else None
 
 
 def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = True,
@@ -87,7 +101,8 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
     if probe_attendance is None:
         probe_attendance = dry_run
     resolver = build_resolver(probe=probe_attendance,
-                              perfect_eligibility_version=perfect_eligibility_version)
+                              perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=_recording_link_mode(settings))
     runner = StageRunner(
         settings=settings, allow_graph=allow_graph and not dry_run,
         allow_provider=allow_provider and not dry_run,
@@ -118,13 +133,17 @@ def build_scheduler(settings, *, config: SchedulerConfig | None = None,
     return SchedulerService(orchestrator=orchestrator, config=config)
 
 
-def build_operations(*, perfect_eligibility_version=None) -> OperationsService:
-    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version)
+def build_operations(*, perfect_eligibility_version=None,
+                     recording_link_mode: str = "observe") -> OperationsService:
+    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=recording_link_mode)
+    from app.db.repositories.recording_links import RecordingLinkRepository
     return OperationsService(
         resolver=resolver, run_repository=PipelineRunRepository(),
         reconciliation=DayReconciliation(resolver=resolver),
         directory_repository=LectureDirectoryRepository(),
         media_repository=MediaStateRepository(),
+        recording_links=RecordingLinkRepository(),
         preflight=LegacyQaPreflight(gateway=N8nReadOnlyGateway.from_environment(),
                                     required=True))
 
@@ -138,7 +157,8 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
     instance would mean the attendance button inherited whatever gates the
     retry button happened to need.
     """
-    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version)
+    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=_recording_link_mode(settings))
 
     def orchestrator_factory(*, allow_provider: bool = True):
         return build_orchestrator(
@@ -151,7 +171,8 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
     return GuardedActionService(
         resolver=resolver,
         operations=build_operations(
-            perfect_eligibility_version=perfect_eligibility_version),
+            perfect_eligibility_version=perfect_eligibility_version,
+            recording_link_mode=_recording_link_mode(settings)),
         orchestrator_factory=orchestrator_factory)
 
 
@@ -176,10 +197,46 @@ def build_backfill_preview(settings, *, discover: bool = True,
 
     return BackfillPreviewService(
         resolver=build_resolver(
-            probe=True, perfect_eligibility_version=perfect_eligibility_version),
+            probe=True, perfect_eligibility_version=perfect_eligibility_version,
+            recording_link_mode=_recording_link_mode(settings)),
         discovery_service=build_discovery_service(settings) if discover else None,
         preflight=LegacyQaPreflight(
             gateway=N8nReadOnlyGateway.from_environment(), required=False))
+
+
+def build_backfill_recording_report(settings, *, graph_factory=None,
+                                    perfect_eligibility_version=None):
+    """
+    Recording Links for Historical Backfill.
+
+    PREVIEW days use the SAME live preview the `recording-links-preview` CLI
+    builds (app/recordings/preview.build_preview): Graph reads through the
+    platform's one app-only client, no publisher, and a resolver in `write`
+    mode so it reports what the coded stage would do - including a retry not
+    yet due or an earlier stage still pending. EXECUTE days read back what the
+    orchestrator did through a resolver in the CONFIGURED mode.
+
+    The Graph client is built in the backfill runner's process, which already
+    owns MICROSOFT_GRAPH_* for discovery; nothing here needs the web process
+    to hold a Graph credential.
+    """
+    from app.recordings.coverage import BackfillRecordingReport
+    from app.recordings.preview import build_preview
+
+    extra = ({"perfect_eligibility_version": perfect_eligibility_version}
+             if perfect_eligibility_version else {})
+
+    def preview_factory():
+        graph = graph_factory() if graph_factory else None
+        return build_preview(settings, resolver=build_resolver(
+            recording_link_mode="write", **extra), live_graph=True, graph=graph)
+
+    def resolver_factory():
+        return build_resolver(recording_link_mode=_recording_link_mode(settings), **extra)
+
+    return BackfillRecordingReport(mode=_recording_link_mode(settings),
+                                   preview_factory=preview_factory,
+                                   resolver_factory=resolver_factory)
 
 
 def build_backfill_runner(settings, *, connection_factory,
@@ -206,4 +263,6 @@ def build_backfill_runner(settings, *, connection_factory,
         aptem_connection_factory=aptem_connection_factory,
         # The same runner handles PREVIEW runs, on a read-only connection.
         preview_service=build_backfill_preview(
+            settings, perfect_eligibility_version=perfect_eligibility_version),
+        recording_report=build_backfill_recording_report(
             settings, perfect_eligibility_version=perfect_eligibility_version))

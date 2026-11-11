@@ -33,9 +33,26 @@ from app.orchestration.stages import (
     ORCHESTRATION_VERSION,
     PRODUCTION_WRITE_ACTIONS,
     QA_EVALUATION,
+    RECORDING_LINK,
     RETRY,
     STAGE_ORDER,
 )
+from app.recordings.models import (
+    AMBIGUOUS_RECORDING_FILES,
+    GRAPH_RECORDING_AMBIGUOUS,
+    MULTIPART_RECORDING,
+    TIMESTAMP_MISMATCH,
+)
+
+# A recording outcome where more than one answer was possible (or none was
+# exact) and the stage refused to pick one.
+REFUSED_TO_GUESS_STATUSES = frozenset({
+    AMBIGUOUS_RECORDING_FILES, GRAPH_RECORDING_AMBIGUOUS, MULTIPART_RECORDING,
+    TIMESTAMP_MISMATCH})
+
+
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 class OperationsService:
@@ -43,13 +60,16 @@ class OperationsService:
 
     def __init__(self, *, resolver, run_repository=None, reconciliation=None,
                  preflight=None, directory_repository=None,
-                 media_repository=None):
+                 media_repository=None, recording_links=None):
         self.resolver = resolver
         self.run_repository = run_repository
         self.reconciliation = reconciliation or DayReconciliation(resolver=resolver)
         self.preflight = preflight
         self.directory_repository = directory_repository
         self.media_repository = media_repository
+        # The RECORDING_LINK stage's durable state. Read only in `write` mode,
+        # exactly like the resolver: `observe` never touches that table.
+        self.recording_links = recording_links
 
     # -- delivered media ----------------------------------------------------
 
@@ -152,8 +172,55 @@ class OperationsService:
             "attendance_source_authoritative":
                 state["attendance_source_authoritative"],
             "is_suppressed_duplicate": bool(state.get("is_suppressed_duplicate")),
+            "not_delivered": bool(state.get("not_delivered")),
+            "not_delivered_reason": state.get("not_delivered_reason"),
             "duplicate_resolution": state.get("duplicate_resolution"),
             "bucket": bucket_for(state),
+            "recording_link": self.recording_link_detail(connection, state),
+        }
+
+    def recording_link_detail(self, connection, state) -> dict:
+        """
+        RECORDING_LINK for one lecture, in words an operator can act on.
+
+        The stage state and action are the resolver's; the last evaluation is
+        the stage's own durable row. `recording_available` is a yes/no - the
+        URL itself is never returned here (the console links to it through the
+        directory's existing "watch" behaviour), and neither is any Graph id,
+        file name or payload.
+        """
+        stage = (state.get("stages") or {}).get(RECORDING_LINK) or {}
+        mode = getattr(self.resolver, "recording_link_mode", "observe")
+        detail = None
+        if mode == "write" and self.recording_links is not None and not state.get(
+                "is_suppressed_duplicate"):
+            detail = self.recording_links.details(
+                connection, [state["lecture_id"]]).get(str(state["lecture_id"]))
+            if detail and detail.get("legacy_session_id") != stage.get("legacy_session_id"):
+                detail = None
+        status = (detail or {}).get("status")
+        return {
+            "recording_link_mode": mode,
+            "state": stage.get("state"),
+            "action": stage.get("action"),
+            "reason": stage.get("reason"),
+            "owner": stage.get("owner"),
+            "recording_available": stage.get("state") == COMPLETE,
+            "last_status": status,
+            "last_reason": (detail or {}).get("reason"),
+            "last_checked_at": _iso((detail or {}).get("last_attempted_at")),
+            "first_checked_at": _iso((detail or {}).get("first_attempted_at")),
+            "attempt_count": (detail or {}).get("attempt_count"),
+            "next_attempt_after": _iso((detail or {}).get("next_attempt_after")),
+            "written_by_platform": bool((detail or {}).get("recording_url_written")),
+            "written_at": _iso((detail or {}).get("written_at")),
+            "source": (detail or {}).get("source"),
+            "timestamp_difference_seconds": (detail or {}).get("timestamp_difference_seconds"),
+            "candidate_file_count": (detail or {}).get("candidate_file_count"),
+            "exact_candidate_count": (detail or {}).get("exact_candidate_count"),
+            # The stage declined to choose between candidates. Said as data so
+            # the console can explain the refusal instead of implying a fault.
+            "refused_to_guess": status in REFUSED_TO_GUESS_STATUSES,
         }
 
     def lecture_next_action(self, connection, lecture_id) -> dict:
@@ -168,14 +235,12 @@ class OperationsService:
     # -- the operator's working lists ---------------------------------------
 
     def pending_attendance(self, connection, session_date: _date) -> list[dict]:
-        report = self.reconciliation.for_day(connection, session_date)
-        return [row for row in report["lectures"]
-                if not row["attendance_source_authoritative"]]
+        return pending_attendance_rows(
+            self.reconciliation.for_day(connection, session_date))
 
     def review_required(self, connection, session_date: _date) -> list[dict]:
-        report = self.reconciliation.for_day(connection, session_date)
-        return [row for row in report["lectures"]
-                if row["bucket"] in ("review", "failed")]
+        return review_required_rows(
+            self.reconciliation.for_day(connection, session_date))
 
     def error_reasons(self, connection, session_date: _date) -> list[dict]:
         report = self.reconciliation.for_day(connection, session_date)
@@ -261,3 +326,18 @@ def force_reprocess_eligibility(state) -> dict:
             # show it rather than assume it.
             "available_to_scheduler": False,
             "requires_explicit_operator_action": True}
+
+
+# The two working lists, as filters over a day report. Kept apart from the
+# report itself so the Operations API can apply them to a report it resolved
+# however it likes (it resolves lectures in parallel) without restating them.
+
+def pending_attendance_rows(report: dict) -> list[dict]:
+    return [row for row in report["lectures"]
+            if not row["attendance_source_authoritative"]
+            and not row.get("not_delivered")]
+
+
+def review_required_rows(report: dict) -> list[dict]:
+    return [row for row in report["lectures"]
+            if row["bucket"] in ("review", "failed")]

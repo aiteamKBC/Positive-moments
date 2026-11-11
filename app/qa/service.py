@@ -35,13 +35,17 @@ from app.qa.checklist import (
 from app.qa.deterministic import (
     DELIVERED,
     NON_DELIVERED,
-    delivery_status,
     duration_score,
     duration_text,
     item1_status,
     item2_status,
     non_delivered_checklist,
     non_delivered_summary,
+)
+from app.qa.delivery import (
+    DELIVERY_POLICY_VERSION,
+    TRANSCRIPT_COVERAGE_INCOMPLETE,
+    classify_delivery,
 )
 from app.qa.inputs import (
     KSB_FRAMEWORK,
@@ -67,7 +71,14 @@ from app.qa.prompt import (
     build_user_message,
     prompt_sha256,
 )
-from app.qa.provider import ProviderError
+from app.qa.generation_budget import GENERATION_BUDGET_POLICY_VERSION, generation_budget
+from app.qa.inputs import ATTENDANCE_DERIVED_FIELDS, attendance_flag
+from app.qa.provider import (
+    PROVIDER_CONFIGURATION_BLOCKED,
+    PROVIDER_CONFIGURATION_ERROR,
+    ProviderCircuit,
+    ProviderError,
+)
 from app.qa.structured_output import (
     DEFAULT_PROVIDER_CONTRACT,
     contract_provenance,
@@ -89,6 +100,7 @@ from app.qa.evidence_policy import (
     EVIDENCE_POLICY_V1,
     EVIDENCE_POLICY_VERSIONS,
     assess as assess_evidence,
+    reads_minutes_seconds,
 )
 from app.transcripts.webvtt import PARSER_VERSION
 
@@ -211,6 +223,9 @@ class ShadowQaService:
         # provider call on any other lecture of the day.
         self.lecture_ids = {str(value) for value in lecture_ids} if lecture_ids else None
         self.log = logging.getLogger(__name__)
+        # Replaced at the start of every run_day; closed until a credential
+        # rejection opens it.
+        self._circuit = ProviderCircuit()
 
     @property
     def versions(self) -> dict:
@@ -242,15 +257,23 @@ class ShadowQaService:
         counters = {name: 0 for name in (
             "lectures_considered", "delivered_count", "non_delivered_count", "provider_calls",
             "reused_evaluations", "evaluations_created", "evaluations_updated",
-            "review_required_count", "error_count", "attendance_waiting_count")}
+            "review_required_count", "error_count", "attendance_waiting_count",
+            "coverage_incomplete_count", "provider_configuration_failures",
+            "provider_configuration_blocked_count")}
         counters["lectures_considered"] = len(packages)
         results = []
+        # The same circuit the orchestrator holds per cycle, held here per
+        # run: after the first credential rejection, no other lecture of this
+        # run is sent to the provider.
+        self._circuit = ProviderCircuit()
 
         for package in packages:
             if package["delivery_status"] == DELIVERED:
                 counters["delivered_count"] += 1
-            else:
+            elif package["delivery_status"] == NON_DELIVERED:
                 counters["non_delivered_count"] += 1
+            else:
+                counters["coverage_incomplete_count"] += 1
             results.append(self._evaluate(connection, package, counters,
                                           execute=execute, force=force))
 
@@ -266,6 +289,9 @@ class ShadowQaService:
             "transcript_rebuilds": 0, "speaker_rematches": 0,
             "engagement_recalculations": 0, "legacy_qa_writes": 0,
             "lectures": results, "legacy_comparison": comparison,
+            "provider_circuit": self._circuit.report(blocked=[
+                row["lecture_id"] for row in results
+                if row.get("qa_status") == PROVIDER_CONFIGURATION_BLOCKED]),
             "duration_ms": round((time.monotonic() - started) * 1000),
             "metadata": {**self.versions, "counters": counters, "mode": mode,
                          "legacy_qa_writes": 0, "ksb_framework_supplied": bool(KSB_FRAMEWORK)},
@@ -301,8 +327,12 @@ class ShadowQaService:
             if row["attendance_roster_version"] != REQUIRED_ATTENDANCE_ROSTER_VERSION:
                 raise QaInputError(
                     f"unexpected roster version {row['attendance_roster_version']}")
-            row["delivery_status"] = delivery_status(row["duration_minutes"])
+            # Punctuality first: it keeps the provider call bounds as
+            # call_actual_start / call_actual_end, which the delivery policy
+            # needs as its independent evidence.
             self._apply_punctuality_source(row)
+            self._classify_delivery(row)
+            self._apply_attendance_coverage(row)
             seen[row["lecture_id"]] = row
         packages = list(seen.values())
         if self.lecture_ids is not None:
@@ -312,6 +342,22 @@ class ShadowQaService:
                 raise QaInputError(
                     f"no QA input for the requested lecture scope on {target_date}")
         return packages
+
+    def _classify_delivery(self, row) -> None:
+        """
+        The versioned delivery policy, over the provider CALL bounds and the
+        scheduled window. See app/qa/delivery.py for why a short transcript is
+        no longer, on its own, proof that a lecture was not delivered.
+        """
+        decision = classify_delivery(
+            duration_minutes=row["duration_minutes"],
+            scheduled_start=row["scheduled_start"], scheduled_end=row["scheduled_end"],
+            call_start=row["call_actual_start"], call_end=row["call_actual_end"],
+            transcript_span_seconds=(float(row["duration_seconds"])
+                                     if row.get("duration_seconds") is not None else None),
+            spoken_seconds=row.get("spoken_seconds"))
+        row["delivery"] = decision
+        row["delivery_status"] = decision.classification
 
     def _apply_punctuality_source(self, row) -> None:
         """
@@ -373,9 +419,19 @@ class ShadowQaService:
             "ai_called": False, "provider_calls": 0,
         }
 
-        coverage = package_attendance_coverage(package)
+        coverage = package["attendance_coverage_status"]
         result["attendance_coverage_status"] = coverage
-        result["attendance_source_authoritative"] = is_authoritative(coverage)
+        result["attendance_source_authoritative"] = package[
+            "attendance_source_authoritative"]
+        result.update(attendance_flag(package["attendance_source_authoritative"]))
+        if not package["attendance_source_authoritative"]:
+            # A flag, not a gate. The transcript is the QA evidence; the
+            # attendance-derived values were already left UNKNOWN when the
+            # package was loaded, so nothing below can publish a zero the
+            # source never reported. (F-03 used to stop here; the business
+            # rule is now that missing attendance must not block QA.)
+            counters["attendance_pending_count"] = (
+                counters.get("attendance_pending_count", 0) + 1)
 
         if not execute:
             result["qa_status"] = PENDING
@@ -384,29 +440,6 @@ class ShadowQaService:
 
         existing = self.evaluation_repository.find_by_fingerprint(connection, fingerprint)
 
-        # F-03. The attendance gate used to live ONLY in the orchestrator's
-        # resolver, so an operator running this service directly could finalize
-        # a lecture whose attendance source had never answered - which is how
-        # two 11/11 evaluations came to rest on empty snapshots. The service now
-        # asks the same question itself, with the same predicate, of the exact
-        # snapshot it is about to consume. It checks BEFORE reuse as well: an
-        # evaluation finalized on non-authoritative attendance must not be
-        # re-reported as a current answer either.
-        if not is_authoritative(coverage):
-            counters["attendance_waiting_count"] = (
-                counters.get("attendance_waiting_count", 0) + 1)
-            result.update({
-                "qa_status": WAITING_FOR_ATTENDANCE_SOURCE,
-                "review_reason": ATTENDANCE_NOT_AUTHORITATIVE,
-                "persisted": False, "ai_called": False, "provider_calls": 0,
-                # Reported, never reused: the caller should see that a stale
-                # answer exists without that answer being passed off as current.
-                "existing_evaluation_id": (str(existing["evaluation_id"])
-                                           if existing else None),
-                "existing_qa_status": existing["qa_status"] if existing else None,
-            })
-            return result
-
         if existing and existing["qa_status"] in (COMPLETED, "NON_DELIVERED") and not force:
             # Same inputs, same prompt, same model, same engine: nothing to buy.
             counters["reused_evaluations"] += 1
@@ -414,36 +447,82 @@ class ShadowQaService:
                            "evaluation_id": str(existing["evaluation_id"])})
             return result
 
+        if package["delivery_status"] == TRANSCRIPT_COVERAGE_INCOMPLETE:
+            # Never a model call: thirteen minutes of a two-hour lecture cannot
+            # support a full checklist, and the answer to that is a human.
+            if existing:
+                counters["reused_evaluations"] += 1
+                result.update({"qa_status": existing["qa_status"], "reused": True,
+                               "review_reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+                               "evaluation_id": str(existing["evaluation_id"])})
+                return result
+            return self._persist_coverage_incomplete(connection, package, fingerprint,
+                                                     counters, result)
+
         if package["delivery_status"] == NON_DELIVERED:
             return self._persist_non_delivered(connection, package, fingerprint,
                                                counters, result)
 
         # Bounded re-generation: after MAX unsuccessful generations for the
         # same source fingerprint, scheduled processing stops calling the
-        # model. Only an explicit force may try again.
-        attempts = (self.attempt_repository.count(connection, fingerprint)
-                    if self.attempt_repository is not None else 0)
-        if attempts >= self.max_model_generations and not force:
+        # model. Only an explicit force may try again. A call the provider
+        # refused on the credential is on record but is not a generation.
+        budget = self._budget(connection, fingerprint)
+        used = budget["generation_budget_used"]
+        if used >= self.max_model_generations and not force:
             counters["review_required_count"] += 1
             result.update({"qa_status": REVIEW_REQUIRED, "ai_called": False,
-                           "provider_calls": 0, "generation_attempts": attempts,
+                           "provider_calls": 0, "generation_attempts": used,
                            "attempts_remaining": 0,
                            "max_model_generations": self.max_model_generations,
                            "review_reason": MAX_GENERATIONS_EXHAUSTED})
             evaluation_id = self._mark_review_required(
-                connection, package, fingerprint, attempts)
+                connection, package, fingerprint, used)
             if evaluation_id:
                 result["evaluation_id"] = str(evaluation_id)
             return result
 
+        if self.provider is not None and self._circuit.is_open:
+            # The credential was refused earlier in this run. Calling again
+            # would be the same refusal; nothing is written and nothing is
+            # spent, and the lecture stays exactly as retryable as it was.
+            counters["provider_configuration_blocked_count"] += 1
+            result.update({"qa_status": PROVIDER_CONFIGURATION_BLOCKED,
+                           "review_reason": PROVIDER_CONFIGURATION_BLOCKED,
+                           "persisted": False, "ai_called": False,
+                           "provider_calls": 0, "generation_attempts": used,
+                           "attempts_remaining": budget["attempts_remaining"],
+                           "existing_evaluation_id": (str(existing["evaluation_id"])
+                                                      if existing else None)})
+            return result
+
         # Phase 3C3D. The generation number is known BEFORE the call, so the
         # evaluation can carry the authoritative count instead of the transport
-        # retry count it used to store.
+        # retry count it used to store. It numbers the RECORD; what the call
+        # costs the budget is decided by its outcome.
+        records = budget["attempt_records"]
         outcome = self._persist_delivered(connection, package, fingerprint, counters,
                                           result, force,
-                                          generation_number=attempts + 1)
-        self._record_attempt(connection, package, fingerprint, outcome, attempts, force)
+                                          generation_number=records + 1,
+                                          budget_used=used)
+        self._record_attempt(connection, package, fingerprint, outcome, records,
+                             force, used=used)
         return outcome
+
+    def _budget(self, connection, fingerprint) -> dict:
+        """The fingerprint's generation budget, under the shared policy."""
+        if self.attempt_repository is None:
+            return generation_budget([], max_generations=self.max_model_generations)
+        reader = getattr(self.attempt_repository, "budget", None)
+        if reader is None:
+            # A ledger that can only count rows: every row is a generation,
+            # which is exactly the rule it was written under.
+            records = self.attempt_repository.count(connection, fingerprint)
+            return generation_budget(
+                [{"consumes_generation_budget": True}] * records,
+                max_generations=self.max_model_generations)
+        return reader(connection, fingerprint,
+                      max_generations=self.max_model_generations)
 
     # -- Phase 3C3E: deterministic refresh -----------------------------------
 
@@ -617,7 +696,7 @@ class ShadowQaService:
             result.update({**summary, "created": False, "mode": "DRY_RUN"})
             return result
 
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, clips)
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, clips)
         result.update({**summary, "evaluation_id": str(written["evaluation_id"]),
                        "created": bool(written["created"])})
         return result
@@ -775,7 +854,7 @@ class ShadowQaService:
             "ai_raw_output": output,
             "metadata": metadata,
         }
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist,
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist,
                                                     clips)
         result.update({"evaluation_id": str(written["evaluation_id"]),
                        "created": bool(written["created"]),
@@ -801,17 +880,47 @@ class ShadowQaService:
         if row["attendance_roster_version"] != REQUIRED_ATTENDANCE_ROSTER_VERSION:
             raise QaInputError(
                 f"unexpected roster version {row['attendance_roster_version']}")
-        row["delivery_status"] = delivery_status(row["duration_minutes"])
         self._apply_punctuality_source(row)
+        self._classify_delivery(row)
+        self._apply_attendance_coverage(row)
         row["provider_contract_version"] = self.provider_contract_version
         return row
 
-    def _record_attempt(self, connection, package, fingerprint, outcome, attempts,
-                        forced) -> None:
-        """Append this generation, and close the fingerprint if the cap is hit."""
+    def _apply_attendance_coverage(self, row) -> None:
+        """
+        Ask the coverage question of the exact snapshot this input is built
+        on, with the same predicate the resolver and Perfect use.
+
+        Non-authoritative attendance does not stop QA. It does mean nothing in
+        this package may claim to know who attended: the Phase 2C4 row for an
+        empty snapshot says 0 attended and score 1, which is legacy's encoding
+        of "nobody came", so those values are replaced by UNKNOWN and the Item
+        7 override is withheld. The engagement row itself is untouched - it is
+        still the lineage the late-attendance refresh is detected against.
+        """
+        coverage = package_attendance_coverage(row)
+        authoritative = is_authoritative(coverage)
+        row["attendance_coverage_status"] = coverage
+        row["attendance_source_authoritative"] = authoritative
+        row.update(attendance_flag(authoritative))
+        if not authoritative:
+            for field in ATTENDANCE_DERIVED_FIELDS:
+                row[field] = None
+            row["item7_override_applied"] = False
+
+    def _record_attempt(self, connection, package, fingerprint, outcome, records,
+                        forced, *, used=None) -> None:
+        """Append this call, and close the fingerprint if the budget is spent."""
         if self.attempt_repository is None or not outcome.get("ai_called"):
             return
+        if used is None:
+            used = records      # every earlier record was a generation
         status = outcome.get("qa_status")
+        failure = outcome.get("provider_failure") or {}
+        # Recorded either way - the refusal is audit history - but only a call
+        # that could have produced an answer spends the budget.
+        consumes = failure.get("failure_class") != PROVIDER_CONFIGURATION_ERROR
+        used_after = used + (1 if consumes else 0)
         self.attempt_repository.record(connection, {
             "lecture_id": package["lecture_id"], "source_fingerprint": fingerprint,
             "qa_engine_version": self.engine_version, "prompt_version": PROMPT_VERSION,
@@ -820,14 +929,23 @@ class ShadowQaService:
             "structured_output_error_count": outcome.get("structured_output_error_count", 0),
             "invalid_evidence_clip_count": outcome.get("invalid_evidence_clip_count", 0),
             "forced": bool(forced),
-            "metadata": {"generation_number": attempts + 1},
+            "metadata": {"generation_number": records + 1,
+                         "consumes_generation_budget": consumes,
+                         "generation_budget_used": used_after,
+                         # Which rule produced that total, so a later policy
+                         # knows whether it still needs correcting.
+                         "generation_budget_policy_version": GENERATION_BUDGET_POLICY_VERSION,
+                         **failure},
         })
-        if status in UNSUCCESSFUL_OUTCOMES and attempts + 1 >= self.max_model_generations:
+        outcome["generation_budget_used"] = used_after
+        outcome["attempts_remaining"] = max(self.max_model_generations - used_after, 0)
+        if (consumes and status in UNSUCCESSFUL_OUTCOMES
+                and used_after >= self.max_model_generations):
             # Terminal for automated processing; the attempts stay on record.
-            self._mark_review_required(connection, package, fingerprint, attempts + 1)
+            self._mark_review_required(connection, package, fingerprint, used_after)
             outcome["qa_status"] = REVIEW_REQUIRED
             outcome["review_reason"] = MAX_GENERATIONS_EXHAUSTED
-            outcome["generation_attempts"] = attempts + 1
+            outcome["generation_attempts"] = used_after
 
     def _mark_review_required(self, connection, package, fingerprint, attempts):
         """Flip the stored evaluation to the terminal review state."""
@@ -867,9 +985,10 @@ class ShadowQaService:
             "structured_output_error_count": 0, "review_reason": None,
             "ai_raw_output": None,
             "metadata": {**self.versions, "reason": "DURATION_BELOW_DELIVERY_MINIMUM",
-                         "duration_minutes": package["duration_minutes"]},
+                         "duration_minutes": package["duration_minutes"],
+                         **_delivery_metadata(package)},
         }
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, [])
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, [])
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         result.update({
@@ -880,8 +999,60 @@ class ShadowQaService:
         })
         return result
 
+    def _persist_coverage_incomplete(self, connection, package, fingerprint,
+                                     counters, result) -> dict:
+        """
+        The lecture appears to have run; the transcript cannot support QA.
+
+        REVIEW_REQUIRED with reason TRANSCRIPT_COVERAGE_INCOMPLETE. The
+        delivery status is DELIVERED because the independent call evidence says
+        the session took place, but cancelled_session stays false, no checklist
+        is written and no model answer exists: an empty verdict a human
+        resolves, never a score invented from the fragment that was captured.
+        """
+        evaluation = {
+            **self._common_evaluation(package, fingerprint),
+            "qa_status": REVIEW_REQUIRED, "delivery_status": DELIVERED,
+            "ai_called": False, "provider_attempts": 0, "error_code": None,
+            "cancelled_session": False,
+            "duration_score": None,
+            "duration_text": duration_text(package["duration_minutes"]),
+            "canonical_trainer": package["canonical_trainer"],
+            "canonical_trainer_speaker_id": package["canonical_trainer_speaker_id"],
+            "ai_suggested_trainer": None, "trainer_source": TRAINER_SOURCE_DETERMINISTIC,
+            "attended_count": package["attended_count"],
+            "spoke_count": package["spoke_count"],
+            "engagement_percentage": package["engagement_percentage"],
+            "engagement_score": package["engagement_score"],
+            "ai_item7_status": None, "final_item7_status": None,
+            "item7_override_applied": package["item7_override_applied"],
+            "met_count": None, "partial_count": None, "not_met_count": None,
+            "teaching_quality_rating": None, "teaching_quality_comments": None,
+            "overall_judgement": None,
+            "evidence_clip_count": 0, "invalid_evidence_clip_count": 0,
+            "structured_output_error_count": 0,
+            "review_reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+            "ai_raw_output": None,
+            "metadata": {**self.versions, "reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+                         "punctuality": package.get("punctuality"),
+                         **_delivery_metadata(package)},
+        }
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), [], [])
+        counters["evaluations_created"] += written["created"]
+        counters["evaluations_updated"] += written["updated"]
+        counters["review_required_count"] += 1
+        result.update({
+            "qa_status": REVIEW_REQUIRED, "review_reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+            "ai_called": False, "provider_calls": 0,
+            "evaluation_id": str(written["evaluation_id"]),
+            "cancelled_session": False, "checklist_rows": 0,
+            "delivery": package["delivery"].diagnostics,
+        })
+        return result
+
     def _persist_delivered(self, connection, package, fingerprint, counters,
-                           result, force, *, generation_number: int = 1) -> dict:
+                           result, force, *, generation_number: int = 1,
+                           budget_used: int | None = None) -> dict:
         if self.provider is None:
             # No model configured: record the deterministic layer and leave the
             # AI verdict PENDING. Inventing statuses, or writing MODEL_ERROR for
@@ -922,6 +1093,12 @@ class ShadowQaService:
                 system_message=SYSTEM_MESSAGE, user_message=user_message)
         except ProviderError as error:
             counters["error_count"] += 1
+            failure = error.diagnostics()
+            if error.is_configuration_failure:
+                # The credential, not the lecture. Recorded, never charged,
+                # and every other lecture of this run is spared the same call.
+                counters["provider_configuration_failures"] += 1
+                self._circuit.open(lecture_id=package["lecture_id"], **failure)
             evaluation.update({
                 "qa_status": MODEL_ERROR, "ai_called": True,
                 # Generations for this fingerprint, NOT HTTP retries inside one
@@ -936,20 +1113,26 @@ class ShadowQaService:
                 "evidence_clip_count": 0, "invalid_evidence_clip_count": 0,
                 "structured_output_error_count": 0,
                 # A provider failure is never turned into Not Met verdicts.
-                "review_reason": "PROVIDER_ERROR",
+                "review_reason": (PROVIDER_CONFIGURATION_ERROR
+                                  if error.is_configuration_failure
+                                  else "PROVIDER_ERROR"),
                 "metadata": {**self.versions,
                              **contract_provenance(self.provider_contract_version),
                              "generation_number": generation_number,
                              "provider_transport_attempts": getattr(error, "attempts", 1),
                              "max_model_generations": self.max_model_generations,
                              "provider_error_code": error.code,
-                             "http_status": error.http_status},
+                             "http_status": error.http_status,
+                             "provider_failure": failure},
             })
-            written = self.evaluation_repository.upsert(connection, evaluation, [], [])
+            written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), [], [])
             counters["evaluations_created"] += written["created"]
             counters["evaluations_updated"] += written["updated"]
             result.update({"qa_status": MODEL_ERROR, "ai_called": True,
                            "error_code": error.code,
+                           "review_reason": evaluation["review_reason"],
+                           "http_status": error.http_status,
+                           "provider_failure": failure,
                            "evaluation_id": str(written["evaluation_id"])})
             return result
 
@@ -1031,14 +1214,15 @@ class ShadowQaService:
                          "usage": response.get("usage"),
                          "forced_re_evaluation": bool(force)},
         })
-        written = self.evaluation_repository.upsert(connection, evaluation, checklist, clips)
+        written = self.evaluation_repository.upsert(connection, _stamp_attendance(evaluation, package), checklist, clips)
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         result.update({
             "qa_status": status, "ai_called": True, "provider_calls": 1,
             "generation_number": generation_number,
             "generation_attempts": generation_number,
-            "attempts_remaining": max(self.max_model_generations - generation_number, 0),
+            "attempts_remaining": max(self.max_model_generations - (
+                (generation_number - 1 if budget_used is None else budget_used) + 1), 0),
             "evaluation_id": str(written["evaluation_id"]),
             "structured_output_error_count": len(errors),
             "structured_output_errors": errors[:10],
@@ -1091,7 +1275,7 @@ class ShadowQaService:
         # than being invented.
         deterministic_rows = self._deterministic_only_checklist(package)
         written = self.evaluation_repository.upsert(
-            connection, evaluation, deterministic_rows, [])
+            connection, _stamp_attendance(evaluation, package), deterministic_rows, [])
         counters["evaluations_created"] += written["created"]
         counters["evaluations_updated"] += written["updated"]
         counters["review_required_count"] += 1
@@ -1170,8 +1354,9 @@ class ShadowQaService:
         rows, invalid = [], 0
         for found in collect_clips(output):
             clip = found["clip"]
-            verdict = validate_clip(clip, document_start_ms=start_ms,
-                                    document_end_ms=end_ms, cues=cues)
+            verdict = validate_clip(
+                clip, document_start_ms=start_ms, document_end_ms=end_ms, cues=cues,
+                allow_minutes_seconds=reads_minutes_seconds(self.evidence_policy_version))
             if verdict["status"] != VALID:
                 invalid += 1
             rows.append({
@@ -1331,6 +1516,16 @@ class ShadowQaService:
         }
 
 
+def _delivery_metadata(package) -> dict:
+    """The delivery decision's safe diagnostics: numbers and instants only."""
+    delivery = package.get("delivery")
+    if delivery is None:
+        return {"delivery_policy_version": DELIVERY_POLICY_VERSION}
+    return {"delivery_policy_version": delivery.diagnostics["delivery_policy_version"],
+            "delivery_classification_reason": delivery.reason,
+            "delivery": delivery.diagnostics}
+
+
 def _quality(output, field):
     quality = output.get("teaching_quality") if isinstance(output, dict) else None
     return quality.get(field) if isinstance(quality, dict) else None
@@ -1406,6 +1601,19 @@ def _end_status(difference) -> str:
     if difference is None:
         return ""
     return "OnTime" if difference == 0 else ("EarlyFinish" if difference < 0 else "Overrun")
+
+
+def _stamp_attendance(evaluation, package) -> dict:
+    """Record, on the evaluation itself, what attendance it was built on."""
+    authoritative = package.get("attendance_source_authoritative")
+    if authoritative is None:
+        return evaluation
+    evaluation["metadata"] = {
+        **(evaluation.get("metadata") or {}),
+        "attendance_coverage_status": package.get("attendance_coverage_status"),
+        "attendance_source_authoritative": authoritative,
+        **attendance_flag(authoritative)}
+    return evaluation
 
 
 def package_attendance_coverage(package) -> str:

@@ -56,6 +56,7 @@ class AuthenticationTests(TestCase):
         ("post", "operations-backfill-start", {}),
         ("get", "operations-backfill-detail", {"run_id": RUN_ID}),
         ("post", "operations-backfill-cancel", {"run_id": RUN_ID}),
+        ("get", "operations-backfill-recording-links", {"run_id": RUN_ID}),
     )
 
     def test_every_backfill_endpoint_requires_authentication(self):
@@ -193,6 +194,7 @@ class ReadTests(_Authenticated):
         repository = mock.Mock()
         repository.get.return_value = a_run(total_days=21, completed_days=7)
         repository.days.return_value = []
+        repository.recording_items.return_value = []
         with mock.patch("operations.backfill_views._repository",
                         return_value=repository), \
              mock.patch("operations.backfill_views.reading"):
@@ -207,6 +209,7 @@ class ReadTests(_Authenticated):
         repository.get.return_value = a_run(status="COMPLETED",
                                             total_days=21, completed_days=21)
         repository.days.return_value = []
+        repository.recording_items.return_value = []
         with mock.patch("operations.backfill_views._repository",
                         return_value=repository), \
              mock.patch("operations.backfill_views.reading"):
@@ -231,6 +234,7 @@ class ReadTests(_Authenticated):
         repository = mock.Mock()
         repository.get.return_value = a_run()
         repository.days.return_value = []
+        repository.recording_items.return_value = []
         with mock.patch("operations.backfill_views._repository",
                         return_value=repository), \
              mock.patch("operations.backfill_views.reading"):
@@ -239,6 +243,107 @@ class ReadTests(_Authenticated):
 
         self.assertEqual(response.data["backfill_run"]["requested_from"],
                          "2026-09-01")
+
+
+# --- Recording Links ----------------------------------------------------------------
+
+def a_recording_item(**overrides):
+    return {"business_date": date(2026, 9, 9), "item_key": "lecture-1",
+            "lecture_id": "d38dc566-bd76-5506-a284-8f4991bd3e7e",
+            "subject": "Samar - Marketing Technology (MarTech) oct 25",
+            "population": "CODED_LECTURE", "recording_link_mode": "observe",
+            "evaluation": "LIVE_PREVIEW", "outcome": "EXACT_MATCH",
+            "recording_stage_state": "MISSING",
+            "recording_status": "EXACT_RECORDING_FILE_MATCHED",
+            "reason": "lead 4.446s via channel_recordings", "earlier_stage": None,
+            "earlier_action": None, "would_write": True, "written": False,
+            "perfect_row_updated": False, "perfect_row_would_update": False,
+            "source": "channel_recordings", "timestamp_difference_seconds": 4.446,
+            "candidate_file_count": 98, "exact_candidate_count": 1,
+            "graph_lookup_status": "GRAPH_RECORDING_FOUND", "graph_http_status": None,
+            "verification": "LIVE_VERIFIED", "legacy_cancelled": False,
+            "attempt_count": None, "next_attempt_after": None, "last_attempted_at": None,
+            **overrides}
+
+
+class RecordingLinksTests(_Authenticated):
+
+    def _get(self, name, items, days=None, mode=MODE_PREVIEW):
+        repository = mock.Mock()
+        repository.get.return_value = a_run(mode=mode, status="COMPLETED")
+        repository.days.return_value = days or [
+            {"business_date": date(2026, 9, 9), "status": "COMPLETED",
+             "recording_error_code": None}]
+        repository.recording_items.return_value = items
+        with mock.patch("operations.backfill_views._repository",
+                        return_value=repository),              mock.patch("operations.backfill_views.reading"):
+            return self.client.get(reverse(name, kwargs={"run_id": RUN_ID}))
+
+    def test_the_run_detail_carries_backend_counted_recording_coverage(self):
+        items = [a_recording_item(),
+                 a_recording_item(item_key="b", outcome="ALREADY_LINKED",
+                                  recording_status="RECORDING_ALREADY_LINKED"),
+                 a_recording_item(item_key="c", outcome="AMBIGUOUS",
+                                  recording_status="AMBIGUOUS_RECORDING_FILES",
+                                  would_write=False)]
+        response = self._get("operations-backfill-detail", items)
+        coverage = response.data["recording_links"]["coverage"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual((coverage["total"], coverage["already_linked"],
+                          coverage["would_write"], coverage["ambiguous"]), (3, 1, 1, 1))
+        self.assertTrue(coverage["reconciles"])
+        self.assertEqual(response.data["recording_links"]["evaluation"], "LIVE_PREVIEW")
+        self.assertEqual(response.data["recording_links"]["database_writes"], 0)
+        self.assertEqual(response.data["recording_links"]["sharing_links_created"], 0)
+
+    def test_lecture_level_outcomes_are_exposed_with_their_exact_statuses(self):
+        response = self._get("operations-backfill-recording-links", [a_recording_item()])
+        self.assertEqual(response.status_code, 200)
+        row = response.data["items"][0]
+        self.assertEqual((row["outcome"], row["recording_status"], row["source"]),
+                         ("EXACT_MATCH", "EXACT_RECORDING_FILE_MATCHED",
+                          "channel_recordings"))
+        self.assertEqual(row["business_date"], "2026-09-09")
+        self.assertEqual(response.data["recording_links"]["coverage"]["would_write"], 1)
+
+    def test_no_url_graph_id_or_file_name_can_leave_the_endpoint(self):
+        response = self._get("operations-backfill-recording-links", [a_recording_item()])
+        body = response.content.decode()
+        for forbidden in ("https://", ".mp4", "recording_url", "item_id", "drive_id",
+                          "recording_filename", "webUrl", "token"):
+            self.assertNotIn(forbidden, body)
+
+    def test_a_day_whose_recording_evaluation_failed_is_named(self):
+        response = self._get(
+            "operations-backfill-detail", [],
+            days=[{"business_date": date(2026, 9, 9), "status": "COMPLETED",
+                   "recording_error_code": "GRAPH_AUTHENTICATION_FAILED"}])
+        summary = response.data["recording_links"]
+        self.assertEqual(summary["days_with_recording_errors"], ["2026-09-09"])
+        self.assertEqual(summary["recording_error_codes"], ["GRAPH_AUTHENTICATION_FAILED"])
+
+    def test_an_execute_run_makes_no_preview_guarantee_it_cannot_keep(self):
+        response = self._get("operations-backfill-detail", [], mode=MODE_EXECUTE)
+        summary = response.data["recording_links"]
+        self.assertEqual(summary["evaluation"], "EXECUTE")
+        self.assertIsNone(summary["database_writes"])
+
+    def test_an_unknown_run_is_a_404(self):
+        repository = mock.Mock()
+        repository.get.return_value = None
+        with mock.patch("operations.backfill_views._repository",
+                        return_value=repository),              mock.patch("operations.backfill_views.reading"):
+            response = self.client.get(reverse("operations-backfill-recording-links",
+                                               kwargs={"run_id": RUN_ID}))
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_recording_endpoint_is_read_only_and_authenticated(self):
+        anonymous = APIClient().get(reverse("operations-backfill-recording-links",
+                                            kwargs={"run_id": RUN_ID}))
+        self.assertIn(anonymous.status_code, (401, 403))
+        with mock.patch("operations.backfill_views.writing") as writing:
+            self._get("operations-backfill-recording-links", [])
+        writing.assert_not_called()
 
 
 # --- cancel ------------------------------------------------------------------------

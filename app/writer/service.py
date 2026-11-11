@@ -48,6 +48,7 @@ from app.writer.modes import (
     DRY_RUN,
     INSERTING_DECISIONS,
     PROTECTED_EXISTING_LEGACY_ROW,
+    REVIEW_REQUIRED,
     WOULD_INSERT,
     WOULD_SKIP_IDENTICAL,
     WOULD_UPDATE,
@@ -77,13 +78,26 @@ class WriteVerificationError(RuntimeError):
     """The rows read back after a write do not match what was written."""
 
 
+# Attendance-optional QA. A lecture published before its attendance source
+# answered is refreshed deterministically when attendance arrives: the model
+# answer is reused, and only what attendance supplies moves - the engagement
+# numbers, Item 7, and therefore the counts. That update, and nothing wider,
+# is one the scheduler may make on a row it already owns.
+DETERMINISTIC_REFRESH_UPDATE_POLICY = "deterministic_refresh_update_v1"
+DETERMINISTIC_REFRESH_ONLY = "DETERMINISTIC_REFRESH_ONLY"
+DETERMINISTIC_SESSION_COLUMNS = frozenset({
+    "Engagement", "engagement_score", "met_count", "partial_count", "not_met_count"})
+DETERMINISTIC_CHECKLIST_ORDERS = frozenset({7})
+OWNED_LIVE_STATUSES = frozenset({"WRITTEN", "UPDATED"})
+
+
 class LegacyQaWriter:
     def __init__(self, *, payload_repository, legacy_repository, ownership_repository,
                  mode: str = DRY_RUN, writer_version: str = WRITER_VERSION,
                  renderer_version: str = "legacy_qa_v8_renderer_v1",
                  allow_update_existing: bool = False, lecture_ids=None,
                  confirmed: bool = False, perfect_planner=None,
-                 occurrence_guard=None):
+                 occurrence_guard=None, update_policy=None):
         # An unknown mode is refused before anything is read.
         self.mode = validate_mode(mode)
         # Phase 3C2 defence in depth: the same guard the CLI applies, enforced
@@ -117,6 +131,14 @@ class LegacyQaWriter:
         # F-02. Always on: there is no configuration of this writer that finds
         # its target by exact session_id alone. Injectable for tests only.
         self.occurrence_guard = occurrence_guard or LegacyOccurrenceGuard()
+        # None: an operator's writer, as before. DETERMINISTIC_REFRESH_ONLY:
+        # the automated sync's writer, which refuses every update that is not
+        # proven to be a deterministic refresh of its own published answer -
+        # so the scheduler's gate is re-checked here, by the writer, at write
+        # time, and the writer keeps the last word.
+        if update_policy not in (None, DETERMINISTIC_REFRESH_ONLY):
+            raise WriterModeError(f"unknown update policy: {update_policy}")
+        self.update_policy = update_policy
         self.log = logging.getLogger(__name__)
 
     @property
@@ -256,11 +278,24 @@ class LegacyQaWriter:
 
         if existing_session is not None:
             field_diff = diff_session(proposed_session, existing_session)
+            raw_checklist_diff = diff_checklist(proposed_items, existing_items)
             result["field_diff"] = {
                 column: _classify(column) for column in sorted(field_diff)}
             result["identical_field_count"] = len(SESSION_COLUMNS) - len(field_diff)
-            result["checklist_diff"] = _summarise_checklist_diff(
-                diff_checklist(proposed_items, existing_items))
+            result["checklist_diff"] = _summarise_checklist_diff(raw_checklist_diff)
+            if decision == WOULD_UPDATE:
+                update = self._deterministic_refresh_update(
+                    connection, rendered, ownership, session_id, field_diff,
+                    raw_checklist_diff)
+                result["deterministic_refresh_update"] = update
+                if (self.update_policy == DETERMINISTIC_REFRESH_ONLY
+                        and not update["eligible"]):
+                    # The automated writer does not rewrite a published row
+                    # for any other reason. A human decides those.
+                    counters[decision.lower()] -= 1
+                    decision = REVIEW_REQUIRED
+                    counters[decision.lower()] = counters.get(decision.lower(), 0) + 1
+                    result["decision"] = decision
         else:
             result["field_diff"] = {}
             result["identical_field_count"] = 0
@@ -280,6 +315,52 @@ class LegacyQaWriter:
             result["perfect_lecture"] = self.perfect_planner.plan_one(
                 connection, rendered, items, counters)
         return result
+
+    def _deterministic_refresh_update(self, connection, rendered, ownership, session_id,
+                                      field_diff, checklist_diff) -> dict:
+        """
+        Is this update ONLY the late-attendance refresh of our own row?
+
+        Every condition must hold, and each failure is named:
+
+          * the row is coded-owned, live, for THIS lecture and THIS session id;
+          * the new evaluation is a deterministic refresh (a different
+            evaluation, stamped as such) reusing the published evaluation's
+            stored model answer - same lecture, same provider question,
+            identical output;
+          * the session columns that change are the engagement numbers and
+            the counts, and nothing else;
+          * the only checklist row that changes is Item 7.
+
+        Foreign-owned columns are not part of the comparison because this
+        writer can never touch them: its upsert lists only its own columns.
+        """
+        reasons = []
+        if ownership is None or ownership.get("write_status") not in OWNED_LIVE_STATUSES:
+            reasons.append("ROW_NOT_LIVE_CODED_OWNED")
+        elif str(ownership.get("lecture_id")) != str(rendered["lecture_id"]):
+            reasons.append("ROW_OWNED_FOR_ANOTHER_LECTURE")
+        elif str(ownership.get("legacy_session_id") or session_id) != str(session_id):
+            reasons.append("ROW_OWNED_UNDER_ANOTHER_SESSION_ID")
+        changed_columns = sorted(field_diff)
+        if set(changed_columns) - DETERMINISTIC_SESSION_COLUMNS:
+            reasons.append("NON_DETERMINISTIC_SESSION_COLUMNS_CHANGED")
+        changed_orders = sorted(set(checklist_diff["status_difference_orders"])
+                                | set(checklist_diff["evidence_difference_orders"])
+                                | set(checklist_diff["missing_orders"]))
+        if set(changed_orders) - DETERMINISTIC_CHECKLIST_ORDERS:
+            reasons.append("NON_DETERMINISTIC_CHECKLIST_ROWS_CHANGED")
+        same_answer = False
+        checker = getattr(self.payload_repository, "is_deterministic_refresh_of", None)
+        if ownership is not None and ownership.get("evaluation_id") and checker:
+            same_answer = checker(connection, ownership["evaluation_id"],
+                                  rendered["evaluation_id"])
+        if not same_answer:
+            reasons.append("MODEL_ANSWER_NOT_PROVEN_UNCHANGED")
+        return {"policy_version": DETERMINISTIC_REFRESH_UPDATE_POLICY,
+                "eligible": not reasons, "refusal_reasons": reasons,
+                "changed_session_columns": changed_columns,
+                "changed_checklist_orders": changed_orders}
 
     def _write_one(self, connection, rendered, proposed_session, proposed_items,
                    decision, pre_digest, ownership, counters) -> dict:
@@ -385,6 +466,136 @@ class LegacyQaWriter:
                                                   {"rolled_back_session": legacy_session_id})
         return {"status": "ROLLED_BACK", "deleted": True,
                 "legacy_session_id": legacy_session_id}
+
+
+    # -- withdrawing a verdict the canonical platform no longer holds --------
+
+    def withdraw_contradicted_session(self, connection, lecture_id) -> dict:
+        """
+        Withdraw ONE coded-owned legacy QA row that states a verdict the
+        canonical platform has replaced with "review required".
+
+        WHY WITHDRAW RATHER THAN REWRITE
+        qa_doctors_sessions has no truthful encoding of "the lecture ran, but
+        the transcript cannot support QA": its contract is a verdict - eleven
+        checklist rows each Met, Partially Met or Not Met (NOT NULL), counts,
+        scores and a cancelled flag. Writing any of those would be a QA result
+        that was never produced. Removing the coded platform's own false row is
+        the only representation that states nothing untrue; the canonical
+        REVIEW_REQUIRED evaluation remains the record of what is known.
+
+        REFUSES unless ALL of these hold, and says which one failed:
+          * the current evaluation is REVIEW_REQUIRED /
+            TRANSCRIPT_COVERAGE_INCOMPLETE - the one contradiction this path
+            is authorised for;
+          * exactly one live coded-owned row exists, and it was written from a
+            DIFFERENT (superseded) evaluation - ownership is proven by this
+            writer's own ledger, so a legacy/n8n row is unreachable;
+          * every column of that row the coded writer does not own is still
+            empty - no Positive Clips, recording or media data of another
+            system would go with it;
+          * no coded Perfect Lecture row was published from it.
+
+        The ownership record is kept, marked ROLLED_BACK with the reason and
+        the pre-withdrawal digest, so the withdrawal is fully auditable. The
+        superseded evaluation and its render are never touched.
+        """
+        from app.qa.delivery import TRANSCRIPT_COVERAGE_INCOMPLETE
+
+        lecture_id = str(lecture_id)
+        if self.lecture_ids != {lecture_id}:
+            raise WriterModeError("withdrawal is scoped to exactly one named lecture")
+        plan = {"lecture_id": lecture_id, "mode": self.mode, "withdrawn": False,
+                "legacy_rows_deleted": 0, "provider_calls": 0, "graph_calls": 0}
+
+        current = self.legacy_repository.current_evaluation(connection, lecture_id)
+        plan["current_evaluation"] = current
+        if not current or current.get("ambiguous") \
+                or current["qa_status"] != "REVIEW_REQUIRED" \
+                or current["review_reason"] != TRANSCRIPT_COVERAGE_INCOMPLETE:
+            return {**plan, "decision": WITHDRAW_REFUSED_NOT_CONTRADICTED}
+
+        live = self.ownership_repository.live_writes_for_lecture(
+            connection, lecture_id, self.writer_version)
+        if not live:
+            return {**plan, "decision": NOTHING_TO_WITHDRAW}
+        if len(live) != 1:
+            return {**plan, "decision": WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP,
+                    "live_coded_rows": len(live)}
+        owned = live[0]
+        session_id = owned["legacy_session_id"]
+        plan["legacy_session_id"] = session_id
+        plan["withdrawn_evaluation_id"] = owned["evaluation_id"]
+        if owned["evaluation_id"] == current["evaluation_id"]:
+            return {**plan, "decision": WITHDRAW_REFUSED_NOT_CONTRADICTED}
+
+        existing = self.legacy_repository.load_session(connection, session_id)
+        if existing is None:
+            return {**plan, "decision": NOTHING_TO_WITHDRAW}
+        foreign = self.legacy_repository.load_foreign_columns(connection, session_id) or {}
+        occupied = sorted(name for name, value in foreign.items()
+                          if not _foreign_column_is_empty(name, value))
+        plan["foreign_columns_checked"] = len(foreign)
+        plan["foreign_columns_occupied"] = occupied
+        if occupied:
+            return {**plan, "decision": WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT}
+        if self.legacy_repository.coded_perfect_writes(connection, lecture_id):
+            return {**plan, "decision": WITHDRAW_REFUSED_PERFECT_PUBLISHED}
+
+        items = self.legacy_repository.load_checklist(connection, session_id)
+        pre_digest = digest(existing, items)
+        plan.update({"decision": WOULD_WITHDRAW, "checklist_rows": len(items),
+                     "pre_withdraw_digest_prefix": pre_digest[:16]})
+        if not self.writes_enabled:
+            return plan
+
+        with connection.transaction():
+            self.legacy_repository.delete_owned_session(connection, session_id,
+                                                        allow_write=True)
+            self.ownership_repository.mark_status(
+                connection, owned["write_id"], "ROLLED_BACK", {
+                    "rolled_back_session": session_id,
+                    "reason": "WITHDRAWN_CONTRADICTED_BY_CURRENT_EVALUATION",
+                    "review_reason": TRANSCRIPT_COVERAGE_INCOMPLETE,
+                    "current_evaluation_id": current["evaluation_id"],
+                    "withdrawn_evaluation_id": owned["evaluation_id"],
+                    "pre_withdraw_digest": pre_digest,
+                    "checklist_rows_removed": len(items),
+                })
+            if self.legacy_repository.load_session(connection, session_id) is not None:
+                raise WriteVerificationError("legacy row still present after withdrawal")
+        return {**plan, "withdrawn": True, "legacy_rows_deleted": 1,
+                "decision": WITHDRAWN}
+
+
+WOULD_WITHDRAW = "WOULD_WITHDRAW"
+WITHDRAWN = "WITHDRAWN"
+NOTHING_TO_WITHDRAW = "NOTHING_TO_WITHDRAW"
+WITHDRAW_REFUSED_NOT_CONTRADICTED = "WITHDRAW_REFUSED_NOT_CONTRADICTED"
+WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP = "WITHDRAW_REFUSED_AMBIGUOUS_OWNERSHIP"
+WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT = "WITHDRAW_REFUSED_FOREIGN_DATA_PRESENT"
+WITHDRAW_REFUSED_PERFECT_PUBLISHED = "WITHDRAW_REFUSED_PERFECT_PUBLISHED"
+
+# What an untouched column of another system looks like: its table default,
+# or nothing at all. Anything else is data somebody else owns.
+FOREIGN_COLUMN_EMPTY_VALUES = {
+    "positive_clips": ([], None),
+    "positive_clips_count": (0, None),
+    "clips_status": ("pending", None),
+    "clips_review_count": (0, None),
+    "has_positive_clips": (False, None),
+}
+
+
+# Row bookkeeping, not data: a timestamp records when the row changed, and no
+# system's content lives in it.
+ROW_BOOKKEEPING_COLUMNS = frozenset({"created_at", "updated_at"})
+
+
+def _foreign_column_is_empty(name, value) -> bool:
+    if name in ROW_BOOKKEEPING_COLUMNS:
+        return True
+    return value in FOREIGN_COLUMN_EMPTY_VALUES.get(name, (None,))
 
 
 def _classify(column: str) -> str:

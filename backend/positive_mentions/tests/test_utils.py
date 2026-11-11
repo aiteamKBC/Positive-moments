@@ -28,7 +28,7 @@ class TimestampTests(SimpleTestCase):
 class SharePointUrlTests(SimpleTestCase):
     def decode_nav(self, url):
         value = parse_qs(urlsplit(url).query)["nav"][0]
-        return json.loads(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)))
+        return json.loads(base64.b64decode(value))
 
     def test_preserves_query_and_referral_data(self):
         original_nav = base64.urlsafe_b64encode(json.dumps({
@@ -43,6 +43,42 @@ class SharePointUrlTests(SimpleTestCase):
         self.assertEqual(nav["referrer"], "StreamWebApp")
         self.assertTrue(nav["playbackOptions"]["autoplay"])
         self.assertEqual(nav["playbackOptions"]["startTimeInSeconds"], 4880.134)
+
+    def test_a_direct_file_link_opens_in_the_stream_player_at_the_moment(self):
+        """The 2026-09-18 MSP shape: a drive item web URL to the .mp4 itself."""
+        url = ("https://tenant.sharepoint.com/sites/MSP/Shared%20Documents/"
+               "Ray%20%E2%80%93%20MSP/Recordings/Lecture-20260918_085900UTC-Meeting%20Recording.mp4")
+        result = timestamped_sharepoint_url(url, 1701.0)
+        parts = urlsplit(result)
+        self.assertEqual(parts.netloc, "tenant.sharepoint.com")
+        self.assertEqual(parts.path, "/sites/MSP/_layouts/15/stream.aspx")
+        query = parse_qs(parts.query)
+        self.assertEqual(query["id"], [
+            "/sites/MSP/Shared Documents/Ray – MSP/Recordings/"
+            "Lecture-20260918_085900UTC-Meeting Recording.mp4"])
+        self.assertEqual(self.decode_nav(result)["playbackOptions"]["startTimeInSeconds"], 1701.0)
+
+    def test_a_onedrive_recording_uses_the_onedrive_player(self):
+        url = ("https://tenant-my.sharepoint.com/personal/someone_tenant_com/Documents/"
+               "Recordings/Lecture.mp4")
+        parts = urlsplit(timestamped_sharepoint_url(url, 60))
+        self.assertEqual(parts.path, "/personal/someone_tenant_com/_layouts/15/stream.aspx")
+        self.assertEqual(parse_qs(parts.query)["id"],
+                         ["/personal/someone_tenant_com/Documents/Recordings/Lecture.mp4"])
+
+    def test_a_sharing_link_keeps_its_shape(self):
+        url = "https://tenant.sharepoint.com/:v:/s/MSP/IQDVxF9YZFCuSrTUCXfVQlzn"
+        parts = urlsplit(timestamped_sharepoint_url(url, 90))
+        self.assertEqual(parts.path, "/:v:/s/MSP/IQDVxF9YZFCuSrTUCXfVQlzn")
+        self.assertEqual(self.decode_nav(timestamped_sharepoint_url(url, 90))
+                         ["playbackOptions"]["startTimeInSeconds"], 90)
+
+    def test_nav_uses_streams_standard_padded_base64(self):
+        result = timestamped_sharepoint_url("https://tenant.sharepoint.com/:v:/s/X/abc", 1701.0)
+        value = parse_qs(urlsplit(result).query)["nav"][0]
+        self.assertEqual(len(value) % 4, 0)
+        self.assertNotIn("-", value)
+        self.assertNotIn("_", value)
 
     def test_malformed_nav_is_replaced_safely(self):
         result = timestamped_sharepoint_url(

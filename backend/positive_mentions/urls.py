@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import LectureDetailView, LectureListView, SummaryView, WatchMomentView
+from .views import ClipRequestView, LectureDetailView, LectureListView, SummaryView, WatchMomentView
 
 urlpatterns = [
     path("summary/", SummaryView.as_view(), name="summary"),
@@ -11,4 +11,5 @@ urlpatterns = [
         WatchMomentView.as_view(),
         name="watch-moment",
     ),
+    path("lectures/<str:session_key>/clip-requests/", ClipRequestView.as_view(), name="clip-request"),
 ]

@@ -11,14 +11,18 @@
  * There is no Force Reprocess here and there is no generic action runner. The
  * three guarded endpoints are the whole mutation surface.
  *
- * The tabs are prepared for Lecture Parts and Media, which do not exist yet -
- * so they are not shown. An empty tab promising future media would be a lie
- * told in navigation.
+ * The Positive Moments tab is the lecture's Media view: analysis, recording
+ * and every moment with its clip (components/media/LectureMomentsPanel.vue).
+ * Lecture Parts do not exist yet, so no tab promises them.
+ *
+ * The full recording is opened through an authenticated API call on click;
+ * its URL is never embedded in the page.
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import ActionPlanDialog from '../components/ActionPlanDialog.vue'
+import LectureMomentsPanel from '../components/media/LectureMomentsPanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AttendanceCell from '../components/operations/AttendanceCell.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -35,11 +39,13 @@ import {
   getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan,
   recoverAttendance, retryLecture,
 } from '../services/operations'
+import { openRecording } from '../services/media'
+import { errorMessage, openSafely } from '../utils/format'
 import type { DirectoryEntry, LectureDetail } from '../types/operations'
-import { businessDate, businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
+import { businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
 import {
   actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
-  retryReason, stageLabel,
+  recordingOwner, recordingSource, retryReason, stageLabel, stageState,
 } from '../utils/labels'
 
 const route = useRoute()
@@ -66,11 +72,16 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
+    // The plan needs only the id, so it is asked for alongside the lecture
+    // rather than after it; the directory needs the lecture's date.
+    const plan = getRecoverAttendancePlan(lectureId.value).catch(() => null)
     const detail = await getLecture(lectureId.value)
     lecture.value = detail
-    const directory = await getDirectory(detail.session_date, detail.session_date)
+    const [directory, recover] = await Promise.all([
+      getDirectory(detail.session_date, detail.session_date), plan,
+    ])
     entry.value = directory.lectures.find((row) => row.lecture_id === detail.lecture_id) ?? null
-    recoverPlan.value = await getRecoverAttendancePlan(lectureId.value).catch(() => null)
+    recoverPlan.value = recover
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'This lecture could not be loaded.'
   } finally {
@@ -85,6 +96,9 @@ const qa = computed(() => stages.value?.QA_EVALUATION ?? null)
 const perfect = computed(() => stages.value?.PERFECT_ELIGIBILITY ?? null)
 const attendanceStage = computed(() => stages.value?.ATTENDANCE ?? null)
 const recoverAvailable = computed(() => recoverPlan.value?.available === true)
+/** The platform's Recording Link answer for this lecture; never a URL. */
+const recording = computed(() => lecture.value?.recording_link ?? null)
+const codedRecordings = computed(() => recording.value?.recording_link_mode === 'write')
 const momentKey = computed(() => entry.value?.legacy_session_key ?? null)
 const momentCount = computed(() => entry.value?.positive_clips_count ?? 0)
 const analysed = computed(() => entry.value?.clips_analysis_completeness === 'positive_clips_v5_final')
@@ -93,7 +107,7 @@ const tabs = computed(() => [
   { id: 'overview', label: 'Overview' },
   { id: 'pipeline', label: 'Pipeline' },
   { id: 'qa', label: 'Quality' },
-  { id: 'moments', label: 'Positive Moments', count: analysed.value ? momentCount.value : null },
+  { id: 'moments', label: 'Positive Moments', count: null },
 ])
 
 const versionEntries = computed<[string, string][]>(() => {
@@ -109,6 +123,15 @@ const versionEntries = computed<[string, string][]>(() => {
   }
   return rows
 })
+
+/** The full recording, fetched on click through the authenticated API. */
+async function openFullRecording() {
+  try {
+    openSafely(await openRecording(lectureId.value))
+  } catch (caught) {
+    notice.value = errorMessage(caught, 'This lecture has no recording that can be opened yet.')
+  }
+}
 
 async function openAction(kind: 'Retry' | 'Recover attendance') {
   actionKind.value = kind
@@ -265,6 +288,7 @@ async function confirmAction() {
               <AttendanceCell
                 v-if="attendanceStage"
                 :authoritative="lecture.attendance_source_authoritative"
+                :not-delivered="lecture.not_delivered"
                 :coverage-status="lecture.attendance_coverage_status"
                 :attended-count="(attendanceStage.attended_count as number | undefined) ?? null"
               />
@@ -327,17 +351,22 @@ async function confirmAction() {
                 <dt class="text-muted">QA sync to legacy</dt><dd><StageChip :state="stages!.LEGACY_QA_SYNC.state" /></dd>
               </div>
             </dl>
-            <p class="mt-3 text-xs leading-5 text-muted">
+            <p v-if="codedRecordings" class="mt-3 text-xs leading-5 text-muted">
+              The recording link is made by this platform's recording step, only for an exact, unique Teams
+              recording. The Excel stamp is still produced by the legacy workflow.
+            </p>
+            <p v-else class="mt-3 text-xs leading-5 text-muted">
               The recording link and the Excel stamp are produced by the live legacy workflows, not by this
               platform. Waiting on them does not hold the lecture open.
             </p>
-            <a
+            <button
               v-if="entry?.recording_url"
+              type="button"
               class="btn-secondary btn-sm mt-3"
-              :href="entry.recording_url"
-              target="_blank"
-              rel="noopener noreferrer"
-            ><AppIcon name="play" :size="14" /> Watch the recording</a>
+              @click="openFullRecording"
+            >
+              <AppIcon name="play" :size="14" /> Open full recording
+            </button>
           </SectionPanel>
         </section>
 
@@ -351,6 +380,89 @@ async function confirmAction() {
           :stages="lecture.stages"
           :blocking-stage="lecture.blocking_stage"
         />
+
+        <SectionPanel
+          v-if="recording && !lecture.is_suppressed_duplicate"
+          title="Recording link"
+          :note="codedRecordings
+            ? 'Linked automatically by the pipeline, only for one exact recording.'
+            : 'Observed only: the legacy n8n recording workflow still makes this link.'"
+        >
+          <template #actions>
+            <StatusBadge
+              v-if="recording.state"
+              :label="stageState(recording.state).label"
+              :tone="stageState(recording.state).tone"
+            />
+          </template>
+
+          <p v-if="recording.refused_to_guess" class="notice-warn mb-4" role="note">
+            <AppIcon name="info" :size="16" class="mt-0.5" />
+            <span>
+              <strong class="font-semibold">The platform deliberately did not choose a recording.</strong>
+              More than one file (or no exactly matching file) fits this lecture, and linking the wrong
+              lecture's recording is worse than linking none. A person needs to decide.
+            </span>
+          </p>
+
+          <dl class="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Recording available</dt>
+              <dd class="font-semibold" :class="recording.recording_available ? 'text-emerald-700' : 'text-muted'">
+                {{ recording.recording_available ? 'Yes' : 'No' }}
+              </dd>
+            </div>
+            <div v-if="recording.owner" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Linked by</dt>
+              <dd>{{ recording.recording_available ? recordingOwner(recording.owner) : '—' }}</dd>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Next step</dt>
+              <dd>{{ actionLabel(recording.action ?? 'NOTHING_TO_DO') }}</dd>
+            </div>
+            <div v-if="recording.last_status" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Last result</dt>
+              <dd class="font-mono text-2xs" :title="recording.last_reason ?? undefined">{{ recording.last_status }}</dd>
+            </div>
+            <div v-if="recording.last_checked_at" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Last checked</dt>
+              <dd>{{ cairoDateTime(recording.last_checked_at) }}</dd>
+            </div>
+            <div v-if="recording.attempt_count" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Checks so far</dt>
+              <dd class="tabular-nums">{{ recording.attempt_count }}</dd>
+            </div>
+            <div v-if="recording.next_attempt_after" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Next automatic check</dt>
+              <dd>{{ cairoDateTime(recording.next_attempt_after) }}</dd>
+            </div>
+            <div v-if="recording.source" class="flex items-center justify-between gap-4">
+              <dt class="text-muted">Found in</dt>
+              <dd>
+                {{ recordingSource(recording.source) }}
+                <span v-if="recording.timestamp_difference_seconds !== null" class="text-2xs text-faint">
+                  · {{ recording.timestamp_difference_seconds.toFixed(1) }} s before Teams
+                </span>
+              </dd>
+            </div>
+          </dl>
+
+          <p
+            v-if="recording.last_reason || recording.reason"
+            class="mt-3 text-xs leading-5 text-muted"
+          >
+            {{ recording.last_reason ?? humanise(recording.reason) }}
+          </p>
+
+          <button
+            v-if="recording.recording_available"
+            type="button"
+            class="btn-secondary btn-sm mt-3"
+            @click="openFullRecording"
+          >
+            <AppIcon name="play" :size="14" /> Open full recording
+          </button>
+        </SectionPanel>
 
         <SectionPanel title="Run history" flush>
           <EmptyState
@@ -443,33 +555,13 @@ async function confirmAction() {
         </p>
       </template>
 
-      <!-- ================= Positive Moments ================= -->
+      <!-- ================= Positive Moments / Media ================= -->
       <template v-else>
-        <SectionPanel title="Positive moments">
-          <EmptyState
-            v-if="!analysed"
-            compact
-            tone="neutral"
-            icon="moments"
-            title="No positive-moment analysis for this lecture yet"
-            message="Positive-moment analysis runs separately from the processing pipeline. When it completes for this lecture, its moments will be linked here."
-          />
-          <template v-else>
-            <p class="text-sm text-body">
-              The analysis found
-              <strong class="font-semibold text-ink">{{ momentCount }}</strong>
-              positive moment{{ momentCount === 1 ? '' : 's' }} in this lecture on
-              {{ businessDate(lecture.session_date) }}.
-            </p>
-            <RouterLink
-              v-if="momentKey"
-              class="btn-primary mt-4"
-              :to="{ name: 'positive-moment-detail', params: { sessionKey: momentKey } }"
-            >
-              <AppIcon name="moments" :size="16" /> Open the moments
-            </RouterLink>
-          </template>
-        </SectionPanel>
+        <LectureMomentsPanel :lecture-id="lecture.lecture_id" :session-date="lecture.session_date" />
+        <p v-if="analysed && momentKey" class="text-xs text-muted">
+          The historical V5 analysis ({{ momentCount }} moment{{ momentCount === 1 ? '' : 's' }}) is still available in
+          <RouterLink class="font-semibold underline" :to="{ name: 'positive-moment-detail', params: { sessionKey: momentKey } }">the Positive Moments archive</RouterLink>.
+        </p>
       </template>
 
       <ActionPlanDialog

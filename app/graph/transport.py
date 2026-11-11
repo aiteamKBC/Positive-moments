@@ -152,6 +152,17 @@ class GraphAppClient:
             self._token_expires_at = time.monotonic() + expires_in
             return token
 
+    def invalidate_token(self) -> None:
+        """
+        Drop the cached access token so the next request fetches a fresh one.
+
+        For a caller that saw HTTP 401 on a token the cache still believed was
+        valid (revoked, or a clock disagreement). Nothing calls this implicitly.
+        """
+        with self._lock:
+            self._token = None
+            self._token_expires_at = 0.0
+
     def request(
         self,
         method: str,

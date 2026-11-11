@@ -11,6 +11,7 @@ from app.transcripts.webvtt import PARSER_VERSION
 from app.config.settings import Settings
 from app.db.connection import database_connection, readonly_database_connection
 from app.db.repositories.aptem import AptemRepository
+from app.db.repositories.lms import LmsModuleRepository
 from app.db.repositories.discovery_runs import DiscoveryRunRepository
 from app.db.repositories.lecture_sessions import LectureSessionRepository
 from app.db.repositories.perfect_lectures import (
@@ -100,7 +101,13 @@ from app.db.repositories.qa_writer import (
     WriterOwnershipRepository,
 )
 from app.db.repositories.qa_writer import GenerationAttemptRepository
-from app.writer.modes import CANARY_NEW_ONLY, DRY_RUN, WRITE_ENABLED_MODES, WRITE_MODES
+from app.writer.modes import (
+    CANARY_NEW_ONLY,
+    DRY_RUN,
+    EXPLICIT_BACKFILL,
+    WRITE_ENABLED_MODES,
+    WRITE_MODES,
+)
 from app.qa.perfect import may_publish
 from app.rendering.evidence import RENDERER_VERSION
 from app.writer.perfect_service import PerfectLecturePlanner, plan_perfect_for_day
@@ -312,6 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_pipeline.add_argument("--no-graph", action="store_true",
                               help="refuse any action that would call Microsoft Graph")
     run_pipeline.add_argument("--max-passes", type=int, default=8)
+    run_pipeline.add_argument(
+        "--lecture-id", action="append", dest="lecture_ids",
+        help="narrow the run to this lecture (repeatable); the orchestrator, "
+             "locks, audit row and refusals are unchanged - e.g. a recording canary")
     run_pipeline.add_argument("--json", action="store_true")
 
     reconcile = commands.add_parser(
@@ -389,6 +400,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip the calendar read and report registry state only")
     backfill_preview.add_argument("--json", action="store_true")
 
+    recording_preview = commands.add_parser(
+        "recording-links-preview",
+        help="read-only: what the coded RECORDING_LINK stage would do for a date range")
+    recording_preview.add_argument("--from", dest="from_date", type=parse_date,
+                                   required=True)
+    recording_preview.add_argument("--to", dest="to_date", type=parse_date,
+                                   required=True)
+    recording_preview.add_argument(
+        "--live-graph", action="store_true",
+        help="query Microsoft Graph (GET recordings listings and DriveItem folders; "
+             "the read-only search POST only if a region is configured)")
+    recording_preview.add_argument(
+        "--offline-evidence",
+        help="JSON of previously captured, read-only evidence used ONLY where live "
+             "evidence is unavailable; results are labelled OFFLINE_VERIFIED")
+    recording_preview.add_argument("--json", action="store_true")
+
     scheduler_status = commands.add_parser(
         "scheduler-status", help="print the scheduler configuration and safety precheck")
     scheduler_status.add_argument("--json", action="store_true")
@@ -409,12 +437,50 @@ def build_parser() -> argparse.ArgumentParser:
                       help="the single lecture to reparse from its selected parts")
     seam.add_argument("--dry-run", action="store_true")
     seam.add_argument("--json", action="store_true")
+    withdraw = commands.add_parser(
+        "withdraw-legacy-qa",
+        help="withdraw ONE coded-owned legacy QA row contradicted by a coverage review")
+    withdraw.add_argument("--lecture-id", required=True,
+                          help="the single lecture whose coded-owned row is withdrawn")
+    withdraw.add_argument("--confirm-write", action="store_true",
+                          help="actually delete; without it the run only plans")
+    withdraw.add_argument("--json", action="store_true")
     select = commands.add_parser("select-lecture")
     select.add_argument("--date", required=True, type=parse_date)
     select.add_argument("--subject", required=True)
     select.add_argument("--start", type=parse_start)
     select.add_argument("--json", action="store_true")
     return parser
+
+
+def _recording_links_preview(settings, args) -> dict:
+    """
+    Read-only by construction: a PostgreSQL-enforced READ ONLY transaction,
+    asserted before the first query; no auto-prepared statements on what may
+    be a pooled connection; the resolver in observe mode (it never reads or
+    writes stage state); a service without a publisher, so no sharing link can
+    be created; and nothing is persisted.
+    """
+    from app.recordings.preview import build_preview
+
+    settings.require_database()
+    evidence = None
+    if args.offline_evidence:
+        with open(args.offline_evidence, encoding="utf-8") as handle:
+            evidence = json.load(handle)
+    preview = build_preview(
+        settings, resolver=build_resolver(recording_link_mode="observe"),
+        live_graph=bool(args.live_graph),
+        graph=build_graph_client(settings) if args.live_graph else None,
+        offline_evidence=evidence)
+    with readonly_database_connection(settings.database_url) as connection:
+        connection.prepare_threshold = None
+        read_only = connection.execute("SHOW transaction_read_only").fetchone()[0]
+        if read_only != "on":
+            raise RuntimeError("refusing to preview: transaction_read_only is not on")
+        summary = preview.run(connection, args.from_date, args.to_date)
+        summary["transaction_read_only"] = read_only
+    return summary
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -432,6 +498,8 @@ def main(argv: list[str] | None = None) -> int:
                 lecture_repository=LectureSessionRepository(),
                 run_repository=DiscoveryRunRepository(),
                 qa_validation_repository=QaValidationRepository(),
+                lms_repository=(LmsModuleRepository(settings.lms_database_url)
+                                if settings.lms_database_url else None),
             )
             with database_connection(settings.database_url) as kbc_connection:
                 with readonly_database_connection(settings.aptem_database_url) as aptem_connection:
@@ -581,6 +649,22 @@ def main(argv: list[str] | None = None) -> int:
             with database_connection(settings.database_url) as connection:
                 summary = service.render_day(connection, args.date)
                 if args.dry_run:
+                    connection.rollback()
+        elif args.command == "withdraw-legacy-qa":
+            # Plans by default. Only an explicit confirmation reaches a
+            # write-enabled mode, and the writer still refuses unless its own
+            # ownership ledger, the current evaluation and the other systems'
+            # columns all agree the row may go.
+            settings.require_database()
+            writer = LegacyQaWriter(
+                payload_repository=RenderedPayloadRepository(),
+                legacy_repository=LegacyQaTargetRepository(),
+                ownership_repository=WriterOwnershipRepository(),
+                mode=EXPLICIT_BACKFILL if args.confirm_write else DRY_RUN,
+                lecture_ids=[args.lecture_id], confirmed=args.confirm_write)
+            with database_connection(settings.database_url) as connection:
+                summary = writer.withdraw_contradicted_session(connection, args.lecture_id)
+                if not writer.writes_enabled:
                     connection.rollback()
         elif args.command == "rebuild-seam-document":
             # Phase 3C2.3B: reparse ONE lecture from its Phase 2B selected parts
@@ -768,7 +852,8 @@ def main(argv: list[str] | None = None) -> int:
                     run_type=RUN_TYPE_MANUAL, dry_run=args.dry_run,
                     discover=args.discover and not args.dry_run,
                     aptem_connection_factory=(
-                        _aptem if args.discover and not args.dry_run else None))
+                        _aptem if args.discover and not args.dry_run else None),
+                    lecture_ids=args.lecture_ids)
                 if args.dry_run:
                     connection.rollback()
                 else:
@@ -816,7 +901,9 @@ def main(argv: list[str] | None = None) -> int:
                         connection, [parse_date(day)
                                      for day in summary["window_days"]])
             else:
-                resolver = build_resolver(probe=args.probe_attendance)
+                resolver = build_resolver(
+                    probe=args.probe_attendance,
+                    recording_link_mode=settings.recording_link_mode)
                 with readonly_database_connection(settings.database_url) as connection:
                     days = [args.date - timedelta(days=offset)
                             for offset in range(args.lookback_days, -1, -1)]
@@ -824,7 +911,8 @@ def main(argv: list[str] | None = None) -> int:
                         connection, days)
         elif args.command == "pipeline-state":
             settings.require_database()
-            resolver = build_resolver(probe=args.probe_attendance)
+            resolver = build_resolver(probe=args.probe_attendance,
+                                      recording_link_mode=settings.recording_link_mode)
             with readonly_database_connection(settings.database_url) as connection:
                 summary = resolver.for_lecture(connection, args.lecture_id)
         elif args.command == "scheduler-cycle":
@@ -931,6 +1019,8 @@ def main(argv: list[str] | None = None) -> int:
                     connection, args.from_date, args.to_date,
                     aptem_connection_factory=_aptem if discover else None,
                     discover=discover).as_dict()
+        elif args.command == "recording-links-preview":
+            summary = _recording_links_preview(settings, args)
         elif args.command == "scheduler-status":
             scheduler = build_scheduler(settings, dry_run=True)
             from datetime import datetime as _dt
@@ -951,7 +1041,8 @@ def main(argv: list[str] | None = None) -> int:
                            "entrypoint": "app.cli.main scheduler-cycle"}}
         elif args.command == "operations":
             settings.require_database()
-            operations = build_operations()
+            operations = build_operations(
+                recording_link_mode=settings.recording_link_mode)
             with readonly_database_connection(settings.database_url) as connection:
                 if args.view == "recent-runs":
                     summary = {"runs": operations.recent_runs(connection, args.limit)}

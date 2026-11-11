@@ -48,6 +48,79 @@ ALLOWED_HOSTS = [value.strip() for value in os.getenv(
 DASHBOARD_USERNAME = os.getenv("DASHBOARD_USERNAME", "").strip()
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
+# "Clip" on a positive moment: the n8n flow that cuts one clip on demand.
+CLIP_ON_DEMAND_WEBHOOK_URL = os.getenv(
+    "CLIP_ON_DEMAND_WEBHOOK_URL",
+    "https://n8n.srv943390.hstgr.cloud/webhook/qa-clip-on-demand").strip()
+
+# Social Media management (positive_mentions/social_operations.py).
+# The secret n8n sends (Authorization: Bearer ...) to report run status and
+# OpenAI usage. Unset or shorter than 32 characters = those routes refuse.
+SOCIAL_MEDIA_SERVICE_TOKEN = os.getenv("SOCIAL_MEDIA_SERVICE_TOKEN", "").strip()
+
+# Continuous Bunny Publisher -> LMS backend delivery API (operations/lms_api.py, /api/publisher/v1/).
+# Service tokens: comma-separated so a rotation can overlap (old + new); each must be at least 32
+# characters. No token configured = every route answers 401. The library is the ONE Bunny library
+# recordings are delivered from (786045). Playback stays unavailable to every caller until
+# PUBLISHER_LMS_PLAYBACK_ENABLED is explicitly true, whatever has been released.
+PUBLISHER_LMS_SERVICE_TOKENS = [value.strip() for value in os.getenv(
+    "PUBLISHER_LMS_SERVICE_TOKENS", "").split(",") if value.strip()]
+_publisher_lms_library = os.getenv("PUBLISHER_LMS_LIBRARY_ID", "").strip()
+PUBLISHER_LMS_LIBRARY_ID = int(_publisher_lms_library) if _publisher_lms_library.isdigit() else None
+PUBLISHER_LMS_PLAYBACK_ENABLED = env_bool("PUBLISHER_LMS_PLAYBACK_ENABLED", False)
+PUBLISHER_LMS_RATE = os.getenv("PUBLISHER_LMS_RATE", "600/min").strip() or "600/min"
+PUBLISHER_LMS_CAPTION_LANGUAGE = os.getenv("PUBLISHER_LMS_CAPTION_LANGUAGE", "en").strip() or "en"
+# Swagger UI for the API above at /api/docs/ (+ /api/schema/), Django staff accounts only
+# (operations/api_docs.py). Off = every docs route answers 404.
+PUBLISHER_API_DOCS_ENABLED = env_bool("PUBLISHER_API_DOCS_ENABLED", False)
+# Origins whose form posts Django accepts, e.g. https://positive-moments.kentbusinesscollege.net.
+# Behind the TLS-terminating proxy Django sees plain HTTP, so an HTTPS sign-in form (the API docs)
+# fails the CSRF origin check unless its origin is listed here. Empty = Django's default.
+CSRF_TRUSTED_ORIGINS = [value.strip() for value in os.getenv(
+    "DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",") if value.strip()]
+# Historical Backfill in the Publishing Monitor (operations/publisher_backfill_views.py): the longest
+# inclusive range one run may cover. Every signed-in user of the Publishing page may preview, start,
+# cancel and retry a run (the default IsAuthenticated policy below); no extra role.
+_backfill_days = os.getenv("PUBLISHER_BACKFILL_MAX_DAYS", "").strip()
+PUBLISHER_BACKFILL_MAX_DAYS = int(_backfill_days) if _backfill_days.isdigit() and 1 <= int(_backfill_days) <= 366 else 31
+
+# Access log of the LMS delivery API (one JSON line per request; never a token or a URL).
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"publisher_lms_console": {"class": "logging.StreamHandler"}},
+    "loggers": {"publisher.lms_api": {"handlers": ["publisher_lms_console"], "level": "INFO",
+                                      "propagate": False}},
+}
+# USD prices per million tokens, by exact model name, as JSON:
+#   {"gpt-5.2": {"input": "...", "cached_input": "...", "output": "...",
+#                "source": "where and when the price was read"}}
+# A model without a complete price records its usage with cost "unknown".
+SOCIAL_MEDIA_MODEL_PRICES = os.getenv("SOCIAL_MEDIA_MODEL_PRICES", "").strip()
+# "Reanalyse Lecture": the n8n Social Media webhook (production /webhook/ URL,
+# no authentication on the n8n side). Server-side only, never sent to the
+# browser. Missing or not https = reanalysis is refused and no run is created.
+SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL = os.getenv("SOCIAL_MEDIA_REANALYSIS_WEBHOOK_URL", "").strip()
+
+# Sign in with Microsoft (positive_mentions/sso.py). By default it reuses the
+# app registration the platform already has for Graph; the redirect URI must
+# be registered on that app exactly as written here. Empty = SSO switched off.
+MICROSOFT_SSO_TENANT_ID = (os.getenv("MICROSOFT_SSO_TENANT_ID")
+                           or os.getenv("MICROSOFT_GRAPH_TENANT_ID", "")).strip()
+MICROSOFT_SSO_CLIENT_ID = (os.getenv("MICROSOFT_SSO_CLIENT_ID")
+                           or os.getenv("MICROSOFT_GRAPH_CLIENT_ID", "")).strip()
+MICROSOFT_SSO_CLIENT_SECRET = (os.getenv("MICROSOFT_SSO_CLIENT_SECRET")
+                               or os.getenv("MICROSOFT_GRAPH_CLIENT_SECRET", "")).strip()
+MICROSOFT_SSO_REDIRECT_URI = os.getenv("MICROSOFT_SSO_REDIRECT_URI", "").strip()
+# Only sign-in names on these domains are matched to accounts.
+MICROSOFT_SSO_EMAIL_DOMAINS = [value.strip().lower() for value in os.getenv(
+    "MICROSOFT_SSO_EMAIL_DOMAINS", "kentbusinesscollege.com,kentbusinesscollege.org"
+).split(",") if value.strip()]
+# The sign-in round trip keeps its state in the Django session cookie.
+SESSION_COOKIE_SECURE = env_bool("SESSION_COOKIE_SECURE",
+                                 MICROSOFT_SSO_REDIRECT_URI.startswith("https://"))
+SESSION_COOKIE_SAMESITE = "Lax"
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

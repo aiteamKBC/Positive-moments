@@ -16,7 +16,7 @@ from app.writer.legacy_identity import LegacyOccurrenceGuard
 
 
 RECORDING_LINK = """
-SELECT s.session_id, s.recording_url
+SELECT s.session_id, s.recording_url, s.cancelled_session
   FROM public.qa_doctors_sessions s
  WHERE s.session_id = %s
 """
@@ -64,7 +64,8 @@ class LegacyObservationRepository:
             raise PlatformError(DATABASE_ERROR, "legacy qa session read failed") from exc
         if row is None:
             return None
-        return {"legacy_session_id": row[0], "recording_url": row[1]}
+        return {"legacy_session_id": row[0], "recording_url": row[1],
+                "cancelled_session": row[2]}
 
     def recording_link(self, connection, legacy_session_id) -> dict | None:
         return self.legacy_qa_session(connection, legacy_session_id)

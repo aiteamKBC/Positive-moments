@@ -25,10 +25,11 @@ from rest_framework.response import Response
 
 from app.common.errors import PlatformError
 from app.common.time import CAIRO
+from app.orchestration.operations import pending_attendance_rows, review_required_rows
 
 from positive_mentions.utils import encode_session_id
 
-from .platform import operations, reading
+from .platform import day_report, operations, reading
 
 
 def _today() -> _date:
@@ -103,8 +104,7 @@ def day_view(request):
     audit but is not a lecture anybody has to process.
     """
     session_date = _date_param(request)
-    with reading() as connection:
-        report = operations().day_reconciliation(connection, session_date)
+    report = day_report(session_date)
     return Response({**report, **_navigation(session_date)})
 
 
@@ -135,8 +135,7 @@ def lectures_view(request):
     session_date = _date_param(request)
     include = request.query_params.get("include_suppressed", "").lower() in (
         "1", "true", "yes")
-    with reading() as connection:
-        report = operations().day_reconciliation(connection, session_date)
+    report = day_report(session_date)
     rows = report["lectures"]
     lectures = [row for row in rows if not row.get("is_suppressed_duplicate")]
     suppressed = [row for row in rows if row.get("is_suppressed_duplicate")]
@@ -270,8 +269,7 @@ def pending_attendance_view(request):
     non-authoritative source means the platform has not been told yet.
     """
     session_date = _date_param(request)
-    with reading() as connection:
-        rows = operations().pending_attendance(connection, session_date)
+    rows = pending_attendance_rows(day_report(session_date))
     return Response({"session_date": session_date.isoformat(),
                      "count": len(rows), "lectures": rows})
 
@@ -280,8 +278,7 @@ def pending_attendance_view(request):
 @_handle
 def review_required_view(request):
     session_date = _date_param(request)
-    with reading() as connection:
-        rows = operations().review_required(connection, session_date)
+    rows = review_required_rows(day_report(session_date))
     return Response({"session_date": session_date.isoformat(),
                      "count": len(rows), "lectures": rows})
 
@@ -299,8 +296,7 @@ def errors_view(request):
     successes is an error queue people stop reading.
     """
     session_date = _date_param(request)
-    with reading() as connection:
-        report = operations().day_reconciliation(connection, session_date)
+    report = day_report(session_date)
     rows = [row for row in report["lectures"] if row["bucket"] == "failed"]
     return Response({"session_date": session_date.isoformat(),
                      "count": len(rows), "lectures": rows})
