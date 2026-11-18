@@ -11,7 +11,7 @@
 #   sudo bash deploy/activate_auto_release.sh verify                     # read-only post-activation verification
 #   sudo bash deploy/activate_auto_release.sh rollback                   # PUBLISHER_AUTO_RELEASE=false, restart publisher ONLY
 #
-# apply sets PUBLISHER_AUTO_RELEASE=true in backend/config/publisher.env and removes a leftover
+# apply sets PUBLISHER_AUTO_RELEASE=true in backend/.env and removes a leftover
 # PUBLISHER_AUTO_RELEASE_FROM line (no longer used). Every other line (credentials included) is kept
 # byte for byte, and the script asserts it. The live file is replaced atomically (rename in the same
 # directory, same owner and mode) only after the candidate file passed `validate-config
@@ -30,7 +30,8 @@
 set -Eeuo pipefail
 umask 077
 readonly APP=/var/www/Positive-moments
-readonly PUB_ENV=$APP/backend/config/publisher.env
+# backend/.env: the one runtime env file since the env consolidation.
+readonly PUB_ENV=$APP/backend/.env
 readonly UNIT=bunny-publisher.service
 readonly OTHER_UNITS="positive-moments.service positive-moments-scheduler.service positive-moments-backfill.service positive-moments-media.service"
 readonly LIB=786045

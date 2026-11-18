@@ -205,7 +205,9 @@ class PublisherConfig:
         found = []
         if self.mode not in MODES:
             found.append(f"PUBLISHER_MODE must be one of {', '.join(MODES)}")
-        for name in ("database_url", "graph_tenant_id", "graph_client_id", "graph_client_secret"):
+        if not self.database_url:
+            found.append("PUBLISHER_DATABASE_URL is required (the publisher never falls back to DATABASE_URL)")
+        for name in ("graph_tenant_id", "graph_client_id", "graph_client_secret"):
             if not getattr(self, name):
                 found.append(f"{name} is required")
         if self.database_url and database_endpoint(self.database_url) == "neon-pooled":
@@ -335,8 +337,10 @@ class PublisherConfig:
                                "PUBLISHER_FULL_RECONCILE_AT HH:MM"]) from None
         return cls(
             mode=text("PUBLISHER_MODE", SHADOW).upper(),
-            # The publisher's own (direct) URL first; the generic name only as a fallback.
-            database_url=text("PUBLISHER_DATABASE_URL") or text("DATABASE_URL"),
+            # The publisher's own DIRECT URL only. Never DATABASE_URL: since the consolidation
+            # that name (the pooled QA URL) sits in the same backend/.env, and a silent fallback
+            # would point the publisher's advisory locks at the pooler.
+            database_url=text("PUBLISHER_DATABASE_URL"),
             aptem_database_url=text("APTEM_DATABASE_URL"),
             lms_database_url=text("LMS_DATABASE_URL"),
             graph_tenant_id=text("MICROSOFT_GRAPH_TENANT_ID"), graph_client_id=text("MICROSOFT_GRAPH_CLIENT_ID"),
@@ -383,11 +387,18 @@ class PublisherConfig:
     @classmethod
     def from_environment(cls, env_file: str | None = None) -> "PublisherConfig":
         """
-        Process environment first; then the given env file (the systemd
-        EnvironmentFile on the VPS). Exception: PUBLISHER_* names in the env file
-        win, so a pooled DATABASE_URL / PUBLISHER_* left in a shell can never
-        override the publisher's own file.
+        Process environment first (systemd EnvironmentFile=backend/.env on the VPS).
+
+        With no env_file, backend/.env - the one runtime env file - fills only the names
+        the process environment lacks, exactly as every other component does
+        (app/config/environment.py).
+
+        With an explicit --env-file, that file is read instead, and PUBLISHER_* names in
+        it win over the shell, so a PUBLISHER_* value left in a shell can never override
+        the file an operator named on the command line.
         """
+        from app.config.environment import canonical_values
+
         values = dict(os.environ)
         if env_file:
             from dotenv import dotenv_values
@@ -396,4 +407,7 @@ class PublisherConfig:
                     values[key] = value
                 else:
                     values.setdefault(key, value)
+        else:
+            for key, value in canonical_values().items():
+                values.setdefault(key, value)
         return cls.from_mapping(values)

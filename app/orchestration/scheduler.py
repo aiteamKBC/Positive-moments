@@ -100,6 +100,9 @@ class SchedulerConfig:
 
     @classmethod
     def from_environment(cls) -> "SchedulerConfig":
+        # backend/.env fills only names the process environment lacks (app/config/environment.py).
+        from app.config.environment import load_canonical_env
+        load_canonical_env()
         names = ENVIRONMENT_VARIABLES
         config = cls(
             enabled=_flag(names["enabled"], False),

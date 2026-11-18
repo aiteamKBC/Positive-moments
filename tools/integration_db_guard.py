@@ -70,12 +70,26 @@ TEST_NAME = re.compile(r"(^|[_\-.])test($|[_\-.])", re.IGNORECASE)
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 # Env files that may carry a production connection string. Read, never loaded.
-PRODUCTION_ENV_FILES = (
+# backend/.env is the one runtime env file since the consolidation; the pre-consolidation
+# files (and every operator copy under backend/config/) still exist on operator machines and
+# are treated as production for as long as they do.
+PRODUCTION_ENV_FILES = tuple(dict.fromkeys((
     REPO_ROOT / "backend" / ".env",
+    REPO_ROOT / "backend" / "config" / ".env",
     REPO_ROOT / "backend" / "qa-core.runtime.env",
+    REPO_ROOT / "backend" / "config" / "publisher.env",
     REPO_ROOT / "deploy" / "qa-core.env",
-)
-PRODUCTION_URL_KEYS = ("DATABASE_URL", "APTEM_DATABASE_URL")
+    *sorted((REPO_ROOT / "backend" / "config").glob("*.env")),
+)))
+# Every connection-string name the platform knows. Any other *DATABASE_URL name found in the
+# environment or an env file is treated the same way (see is_production_url_key).
+PRODUCTION_URL_KEYS = ("DATABASE_URL", "APTEM_DATABASE_URL", "PUBLISHER_DATABASE_URL",
+                       "LMS_DATABASE_URL")
+
+
+def is_production_url_key(key: str) -> bool:
+    """A connection-string name that is not the test harness's own TEST_DATABASE_URL."""
+    return key != TEST_URL_ENV and (key in PRODUCTION_URL_KEYS or key.endswith("DATABASE_URL"))
 
 # Anything that can reach an external service or a production database. The
 # gate blanks these for the whole pytest session so `load_dotenv(override=False)`
@@ -125,11 +139,11 @@ def parse_target(conninfo: str = "", **kwargs) -> Target:
 def production_urls(environ=None) -> list[str]:
     """Every connection string that must be treated as production."""
     environ = os.environ if environ is None else environ
-    found = [environ.get(key, "") for key in PRODUCTION_URL_KEYS]
+    found = [value for key, value in environ.items() if is_production_url_key(key)]
     for path in PRODUCTION_ENV_FILES:
         if path.is_file():
             values = dotenv_values(path)
-            found.extend(values.get(key) or "" for key in PRODUCTION_URL_KEYS)
+            found.extend(value or "" for key, value in values.items() if is_production_url_key(key))
     return [url.strip() for url in found if url and url.strip()]
 
 

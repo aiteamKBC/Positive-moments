@@ -4,8 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
-
+from app.config.environment import load_canonical_env
 from app.qa.prompt import LEGACY_QA_MODEL
 
 
@@ -76,7 +75,8 @@ class Settings:
 
     @classmethod
     def from_environment(cls) -> "Settings":
-        load_dotenv(ROOT / "backend" / ".env", override=False)
+        # backend/.env fills only names the process environment lacks (app/config/environment.py).
+        load_canonical_env()
         settings = cls(
             database_url=os.getenv("DATABASE_URL", "").strip(),
             aptem_database_url=os.getenv("APTEM_DATABASE_URL", "").strip(),
