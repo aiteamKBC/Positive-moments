@@ -14,7 +14,8 @@ Group=www-data
 
 WorkingDirectory=/var/www/Positive-moments
 
-EnvironmentFile=/var/www/Positive-moments/backend/config/.env
+# backend/.env is the one runtime env file for every backend unit (app/config/environment.py).
+EnvironmentFile=/var/www/Positive-moments/backend/.env
 Environment="PYTHONPATH=/var/www/Positive-moments"
 Environment="PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
 

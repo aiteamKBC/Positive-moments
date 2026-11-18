@@ -20,7 +20,7 @@
 #
 # Rollback (each is enough on its own):
 #   * per lecture, immediate, no restart:
-#     sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/config/publisher.env \
+#     sudo -u www-data backend/venv/bin/python -m app.cli.publisher --env-file backend/.env \
 #          withdraw --lecture-id <uuid> --actor "<name>" --reason "<why>"
 #   * all at once: restore the Django env backup printed by apply (or set the flag to false), then
 #     systemctl restart --no-block positive-moments.service   (the file alone changes nothing until then)
@@ -28,8 +28,9 @@
 set -Eeuo pipefail
 umask 077
 readonly APP=/var/www/Positive-moments
-readonly PUB_ENV=$APP/backend/config/publisher.env
-readonly DJANGO_ENV=$APP/backend/config/.env
+# Since the env consolidation both are backend/.env, the one runtime env file.
+readonly PUB_ENV=$APP/backend/.env
+readonly DJANGO_ENV=$APP/backend/.env
 readonly WEB_UNIT=positive-moments.service
 readonly LIB=786045
 readonly CODE_COMMIT=4ef80af

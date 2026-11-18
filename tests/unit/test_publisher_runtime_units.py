@@ -30,7 +30,7 @@ from tests.unit.test_bunny_client import KEY, Script, client
 from tests.unit.test_publisher_transcript_worker import JOB, LID, _Conn, _Queue
 
 REPO = Path(__file__).resolve().parents[2]
-BASE = {"DATABASE_URL": "postgresql://user:SECRET-DB-PASSWORD@db.invalid/x", "APTEM_DATABASE_URL": "postgresql://a",
+BASE = {"PUBLISHER_DATABASE_URL": "postgresql://user:SECRET-DB-PASSWORD@db.invalid/x", "APTEM_DATABASE_URL": "postgresql://a",
         "LMS_DATABASE_URL": "postgresql://l", "MICROSOFT_GRAPH_TENANT_ID": "t", "MICROSOFT_GRAPH_CLIENT_ID": "c",
         "MICROSOFT_GRAPH_CLIENT_SECRET": "SECRET-GRAPH", "KBC_LECTURE_CALENDAR_USER_UPN": "cal@example.invalid",
         "PUBLISHER_START_DATE": "2026-11-01"}
@@ -123,6 +123,9 @@ def test_validate_config_cli_prints_no_secret(capsys, monkeypatch):
             monkeypatch.delenv(key)
     for key, value in {**BASE, "PUBLISHER_MODE": "STAGING_WRITE", "BUNNY_STAGING_API_KEY": "SECRET-BUNNY"}.items():
         monkeypatch.setenv(key, value)
+    # No backend/.env: the operator machine's own file must not fill the names under test.
+    from app.config import environment
+    monkeypatch.setattr(environment, "CANONICAL_ENV_FILE", Path(os.devnull + ".absent"))
     code = cli.main(["validate-config"])
     out = capsys.readouterr().out
     assert code == 2 and "BUNNY_STAGING_LIBRARY_ID" in out
@@ -346,7 +349,7 @@ def test_the_service_unit_is_prepared_with_the_vps_conventions():
     assert "ExecStart=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.publisher run" in directives
     assert "ExecStartPre=/var/www/Positive-moments/backend/venv/bin/python -m app.cli.publisher validate-config" \
         in directives
-    assert "EnvironmentFile=/var/www/Positive-moments/backend/config/publisher.env" in directives
+    assert "EnvironmentFile=/var/www/Positive-moments/backend/.env" in directives      # the one runtime env file
     assert "User=www-data" in directives and "KillSignal=SIGTERM" in directives
     assert "RestartPreventExitStatus=2" in directives and "NoNewPrivileges=true" in directives
     assert "PUBLISHER_MODE" not in directives                    # the mode comes only from the env file
@@ -398,6 +401,30 @@ def test_the_publisher_url_wins_over_the_generic_pooled_name_and_the_shell(tmp_p
     monkeypatch.setenv("PUBLISHER_DATABASE_URL", POOLED)
     config = PublisherConfig.from_environment(str(env_file))
     assert config.database_url == DIRECT and config.start_date == date(2026, 10, 21)
+
+
+def test_the_publisher_never_falls_back_to_the_generic_database_url():
+    """backend/.env now holds both names: the pooled QA URL must never become the publisher's."""
+    env = {k: v for k, v in BASE.items() if k != "PUBLISHER_DATABASE_URL"}
+    config = PublisherConfig.from_mapping({**env, "DATABASE_URL": DIRECT})
+    assert config.database_url == ""
+    assert any("PUBLISHER_DATABASE_URL is required" in p for p in config.problems())
+    with pytest.raises(ConfigError):
+        config.validate()
+
+
+def test_without_an_env_file_backend_env_only_fills_names_the_process_lacks(tmp_path, monkeypatch):
+    from app.config import environment
+    canonical = tmp_path / ".env"
+    canonical.write_text(f"PUBLISHER_DATABASE_URL={DIRECT}\nPUBLISHER_START_DATE=2026-10-21\n"
+                         "PUBLISHER_MODE=PRODUCTION_WRITE\n", encoding="utf-8")
+    monkeypatch.setattr(environment, "CANONICAL_ENV_FILE", canonical)
+    for key in list(os.environ):
+        if key.startswith(("BUNNY_", "PUBLISHER_")) or key.endswith("DATABASE_URL"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("PUBLISHER_MODE", "SHADOW")                 # systemd / the shell wins
+    config = PublisherConfig.from_environment()
+    assert (config.database_url, config.start_date, config.mode) == (DIRECT, date(2026, 10, 21), "SHADOW")
 
 
 def test_end_date_scopes_the_planner_window_to_one_day():

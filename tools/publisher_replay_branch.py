@@ -6,7 +6,7 @@ Prepare a Neon BRANCH for the publisher replay - never production.
     python tools/publisher_replay_branch.py migrate --apply    apply 024 -> 028 to the BRANCH only
 
 Two env files, never mixed:
-    backend/config/publisher.env         production DIRECT URL (read here, read-only, never written to)
+    backend/.env                         production DIRECT URL (read here, read-only, never written to)
     backend/config/publisher.replay.env  the branch's DIRECT URL (the only database this tool may change)
 
 BRANCH IDENTITY (checked before anything is applied; any failure aborts):
@@ -34,7 +34,7 @@ from dotenv import dotenv_values  # noqa: E402
 
 from app.publisher.config import database_endpoint  # noqa: E402
 
-PROD_ENV = ROOT / "backend" / "config" / "publisher.env"
+PROD_ENV = ROOT / "backend" / ".env"
 REPLAY_ENV = ROOT / "backend" / "config" / "publisher.replay.env"
 PROPOSED = ROOT / "app" / "db" / "migrations_proposed"
 ORDER = ("024_create_bunny_stream_tables", "025_create_lms_matching_tables", "026_create_publisher_queue_tables",

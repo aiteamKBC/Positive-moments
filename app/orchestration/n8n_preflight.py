@@ -78,20 +78,12 @@ class N8nReadOnlyGateway:
         config = {"N8N_BASE_URL": os.environ.get("N8N_BASE_URL", "").strip(),
                   "N8N_API_KEY": os.environ.get("N8N_API_KEY", "").strip()}
         if not all(config.values()):
-            for candidate in ("backend/.env", ".env"):
-                path = ROOT / candidate
-                if not path.exists():
-                    continue
-                for line in path.read_text(encoding="utf-8",
-                                           errors="replace").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip().strip('"').strip("'")
-                    if key in config and not config[key] and value:
-                        config[key] = value
+            # The process environment first; backend/.env only fills what is missing.
+            from app.config.environment import canonical_values
+            file_values = canonical_values()
+            for key in config:
+                if not config[key]:
+                    config[key] = (file_values.get(key) or "").strip()
         return cls(base_url=config["N8N_BASE_URL"], api_key=config["N8N_API_KEY"],
                    timeout=timeout)
 

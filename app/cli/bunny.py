@@ -35,11 +35,8 @@ FORBIDDEN_LIBRARY_IDS = frozenset({785080})
 def _settings() -> dict:
     values = {name: (os.environ.get(name) or "").strip() or None for name in NAMES}
     if not all(values[n] for n in NAMES if n != "BUNNY_STAGING_ACCOUNT_API_KEY"):
-        try:
-            from dotenv import dotenv_values
-            file_values = dotenv_values(REPO_ROOT / "backend" / ".env")
-        except ImportError:
-            file_values = {}
+        from app.config.environment import canonical_values
+        file_values = canonical_values()
         for name in NAMES:
             values[name] = values[name] or (str(file_values.get(name) or "").strip() or None)
     return values
@@ -72,11 +69,8 @@ def _lms_settings() -> dict:
     names = ("LMS_DATABASE_URL", "PUBLISHER_LMS_TEST_PROGRAMMES")
     values = {name: (os.environ.get(name) or "").strip() or None for name in names}
     if not all(values.values()):
-        try:
-            from dotenv import dotenv_values
-            file_values = dotenv_values(REPO_ROOT / "backend" / ".env")
-        except ImportError:
-            file_values = {}
+        from app.config.environment import canonical_values
+        file_values = canonical_values()
         for name in names:
             values[name] = values[name] or (str(file_values.get(name) or "").strip() or None)
     return values

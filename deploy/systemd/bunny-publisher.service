@@ -10,7 +10,9 @@
 # PostgreSQL queue leases plus per-lecture advisory locks (Neon DIRECT endpoint) make a second
 # copy safe but pointless - do not run one anywhere else.
 #
-# Mode, database, Graph and Bunny settings come ONLY from the EnvironmentFile (root:www-data, 0640).
+# Mode, database, Graph and Bunny settings come ONLY from the EnvironmentFile (root:www-data, 0640):
+# backend/.env, the one runtime env file shared with every backend unit. The publisher still uses
+# only its own PUBLISHER_DATABASE_URL (never DATABASE_URL) and its own PUBLISHER_* safety switches.
 
 [Unit]
 Description=KBC Continuous Bunny Publisher
@@ -27,7 +29,7 @@ Group=www-data
 
 WorkingDirectory=/var/www/Positive-moments
 
-EnvironmentFile=/var/www/Positive-moments/backend/config/publisher.env
+EnvironmentFile=/var/www/Positive-moments/backend/.env
 Environment="PYTHONPATH=/var/www/Positive-moments"
 Environment="PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
 Environment="TZ=Africa/Cairo"

@@ -3,10 +3,7 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from dotenv import load_dotenv
-
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
 
 # The coded lecture platform (`app/`) lives one level above the Django
 # project. The Operations API reads every pipeline answer from it, so it has to
@@ -16,6 +13,12 @@ load_dotenv(BASE_DIR / ".env")
 REPO_ROOT = BASE_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# backend/.env is the one runtime env file. It fills only names the process environment
+# (systemd EnvironmentFile on the VPS) does not already set - see app/config/environment.py.
+from app.config.environment import load_canonical_env  # noqa: E402
+
+load_canonical_env()
 
 
 def env_bool(name: str, default: bool = False) -> bool:

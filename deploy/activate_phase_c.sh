@@ -28,7 +28,7 @@
 #   * Nothing secret is printed: no key, database URL, CDN host, token or full video GUID.
 #
 # Rollback (printed again at the end of apply)
-#   install -m 0640 -o root -g www-data <backup> /var/www/Positive-moments/backend/config/publisher.env
+#   install -m 0640 -o root -g www-data <backup> /var/www/Positive-moments/backend/.env
 #   systemctl restart --no-block bunny-publisher.service
 #   Restoring the file alone does NOTHING to the running daemon: systemd reads EnvironmentFile only
 #   at start, so the publisher stays in PRODUCTION_WRITE until it is restarted. No data rollback is
@@ -38,8 +38,9 @@ set -Eeuo pipefail
 umask 077
 
 readonly APP=/var/www/Positive-moments
-readonly ENV_FILE=$APP/backend/config/publisher.env
-readonly DJANGO_ENV=$APP/backend/config/.env
+# Since the env consolidation both are backend/.env, the one runtime env file.
+readonly ENV_FILE=$APP/backend/.env
+readonly DJANGO_ENV=$APP/backend/.env
 readonly UNIT=bunny-publisher.service
 readonly QA_UNITS="positive-moments.service positive-moments-scheduler.service positive-moments-backfill.service positive-moments-media.service"
 readonly LIB=786045
@@ -49,7 +50,7 @@ readonly BASELINE="010900eb 069df826 a1a8fc1d 456d51cf 04fe964d 550c9c30 5192022
 readonly VENV_PY=$APP/backend/venv/bin/python
 readonly TS=$(date -u +%Y%m%dT%H%M%SZ)
 readonly WORK=/root/kbc-phase-c/$TS
-readonly CANDIDATE=$APP/backend/config/.publisher.env.phase-c-candidate
+readonly CANDIDATE=$APP/backend/.env.phase-c-candidate
 MODE=${1:-}
 
 say()  { printf '\n== %s\n' "$*"; }
