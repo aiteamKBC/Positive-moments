@@ -15,6 +15,19 @@ from app.common.errors import DATABASE_ERROR, PlatformError
 CONTENT_NAMESPACE = uuid.UUID("b1c7d0ae-4a55-4a1d-9f3e-2d8b6c5a9e07")
 CANDIDATE_NAMESPACE = uuid.UUID("2c9f7b16-51a4-4c3f-9e08-7d6b4a2f1c85")
 
+MANUAL_UPLOAD = "MANUAL_UPLOAD"
+
+# The artifact's CURRENT content is an operator's manual upload (provenance lives on the
+# lecture <-> artifact row, app/db/repositories/manual_transcripts.py). Returns its version.
+MANUAL_CURRENT_CONTENT = """
+SELECT a.content_version
+  FROM public.lecture_transcript_artifacts a
+ WHERE a.artifact_id = %s AND a.content_version > 0
+   AND EXISTS (SELECT 1 FROM public.lecture_transcript_candidates c
+                WHERE c.artifact_id = a.artifact_id
+                  AND c.metadata -> 'manual_upload' ->> 'content_sha256' = a.content_sha256)
+"""
+
 
 class TranscriptArtifactRepository:
     def upsert(self, connection, artifact_id, lecture_id, *, provider, provider_transcript_id,
@@ -81,15 +94,36 @@ class TranscriptArtifactRepository:
             raise PlatformError(DATABASE_ERROR, "transcript artifact lookup failed") from exc
         return row[0] if row else None
 
+    def current_manual_version(self, connection, artifact_id) -> int | None:
+        """The current content version when it is a manual upload, else None."""
+        try:
+            row = connection.execute(MANUAL_CURRENT_CONTENT, (artifact_id,)).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "transcript content source lookup failed") from exc
+        return row[0] if row else None
+
     def store_content(self, connection, artifact_id, *, raw_text, content_sha256,
-                      content_bytes, content_format, speaker_attribution) -> dict:
+                      content_bytes, content_format, speaker_attribution,
+                      source: str | None = None) -> dict:
         """
         Append-only content storage.
 
         Identical bytes reuse the existing version - no duplicate evidence.
         Changed bytes append a NEW version; earlier versions are never modified
         or deleted, which is the whole provenance guarantee.
+
+        A MANUAL UPLOAD IS NOT REPLACED AUTOMATICALLY. When the current content
+        is an operator-confirmed manual upload, provider content (`source` other
+        than MANUAL_UPLOAD - every Graph caller) is not stored and the pointer
+        stays on the manual version: the bytes the lecture was processed from
+        do not change under it, and no paid re-analysis is triggered by a later
+        Graph recovery. Nothing else about Graph storage changes.
         """
+        if source != MANUAL_UPLOAD:
+            kept = self.current_manual_version(connection, artifact_id)
+            if kept is not None:
+                return {"version_number": kept, "version_created": False,
+                        "kept_manual_content": True}
         try:
             existing = connection.execute(
                 "SELECT content_id, version_number FROM public.lecture_transcript_artifact_contents "
@@ -137,13 +171,26 @@ class TranscriptArtifactRepository:
         return {"version_number": version_number, "version_created": created}
 
     def mark_content_failure(self, connection, artifact_id, artifact_status: str, reason: str | None) -> None:
-        """Record a content failure without inventing a successful transcript state."""
+        """
+        Record a content failure without inventing a successful transcript state.
+
+        An artifact whose current content is a manual upload keeps its stored
+        status: Graph failing to serve bytes the platform already holds from the
+        operator does not make that transcript failed. The reason is still
+        recorded.
+        """
         try:
             connection.execute("""
-            UPDATE public.lecture_transcript_artifacts
-               SET artifact_status = %s, last_seen_at = now(), updated_at = now(),
-                   metadata = metadata || jsonb_build_object('content_fetch_reason', %s::text)
-             WHERE artifact_id = %s
+            UPDATE public.lecture_transcript_artifacts a
+               SET artifact_status = CASE
+                       WHEN a.content_version > 0 AND EXISTS (
+                            SELECT 1 FROM public.lecture_transcript_candidates c
+                             WHERE c.artifact_id = a.artifact_id
+                               AND c.metadata -> 'manual_upload' ->> 'content_sha256' = a.content_sha256)
+                       THEN a.artifact_status ELSE %s END,
+                   last_seen_at = now(), updated_at = now(),
+                   metadata = a.metadata || jsonb_build_object('content_fetch_reason', %s::text)
+             WHERE a.artifact_id = %s
             """, (artifact_status, reason, artifact_id))
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "transcript artifact status update failed") from exc

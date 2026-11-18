@@ -26,6 +26,9 @@ export default tseslint.config(
         HTMLSelectElement: 'readonly',
         document: 'readonly',
         navigator: 'readonly',
+        // The manual transcript upload: the chosen .vtt and its multipart body.
+        File: 'readonly',
+        FormData: 'readonly',
       },
     },
     rules: {

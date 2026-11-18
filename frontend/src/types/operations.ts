@@ -169,6 +169,178 @@ export interface LectureDetail {
   recording_link?: RecordingLinkDetail
 }
 
+/* --- Manual transcript upload ---------------------------------------------
+ * The fallback when Microsoft Graph will not serve a Teams transcript. Every
+ * field is the server's: the page formats it and decides nothing.
+ */
+
+export interface UploadProblem {
+  code: string
+  message: string
+  [key: string]: unknown
+}
+
+export interface TranscriptPart {
+  part_index: number
+  artifact_id: string
+  is_primary: boolean
+  teams_started_at: string | null
+  teams_ended_at: string | null
+  duration_ms: number | null
+  has_content: boolean
+  content_source: 'MANUAL_UPLOAD' | 'MICROSOFT_GRAPH' | null
+  artifact_status: string | null
+  graph_failure_reason: string | null
+  uploaded_at: string | null
+  uploaded_by: string | null
+}
+
+export interface ManualUploadRecord {
+  upload_id: string
+  artifact_id: string
+  uploaded_at: string
+  uploaded_by: string | null
+  original_filename: string
+  content_sha256: string
+  content_bytes: number
+  is_current_content: boolean
+  processing?: { status?: string; item_status?: string; final_action?: string; finished_at?: string; error_code?: string | null } | null
+}
+
+export interface UploadLecture {
+  lecture_id: string
+  subject: string
+  module: string | null
+  session_date: string
+  scheduled_start: string | null
+  scheduled_end: string | null
+}
+
+export interface ProcessingPlan {
+  available: boolean
+  reason: string | null
+  reason_message: string | null
+  next_action: string
+  blocking_stage: string | null
+  stages_preserved: string[]
+  cost: Record<string, unknown>
+  /** The quality evaluation stage's state (COMPLETE, MISSING, REVIEW_REQUIRED ...). */
+  qa_state?: string | null
+  qa_runs_on_the_server?: boolean
+  server_command?: string
+}
+
+export type ProcessingJobStatus = 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+
+/** A background processing job (migration 030), run by the positive-moments-backfill service. */
+export interface ProcessingJob {
+  job_id: string
+  lecture_id: string
+  reason: string
+  status: ProcessingJobStatus
+  requested_by: string | null
+  attempt_count: number
+  max_attempts: number
+  next_attempt_after: string | null
+  pipeline_run_id: string | null
+  last_error_code: string | null
+  last_error_message: string | null
+  outcome: {
+    final_action?: string | null
+    final_blocking_stage?: string | null
+    qa_state?: string | null
+    provider_calls?: number
+  }
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  updated_at: string
+  /** Present in the recent-jobs list. */
+  subject?: string
+  session_date?: string
+}
+
+/** What queueing answered: the lecture's one active job, or why nothing was queued. */
+export interface ProcessingQueueResult {
+  queued: boolean
+  created: boolean
+  reason: string | null
+  reason_message: string | null
+  job: ProcessingJob | null
+}
+
+/** One lecture the server says an upload could complete now (GET transcript-recovery/). */
+export interface TranscriptRecoveryLecture extends UploadLecture {
+  part_count: number
+  missing_part_count: number
+  missing_parts: {
+    part_index: number
+    artifact_id: string
+    teams_started_at: string | null
+    duration_ms: number | null
+    artifact_status: string | null
+    graph_failure_reason: string | null
+  }[]
+  previous_upload_count: number
+}
+
+export interface TranscriptRecoveryQueue {
+  lectures: TranscriptRecoveryLecture[]
+  /** Recent background processing jobs, newest first. Empty before migration 030. */
+  jobs?: ProcessingJob[]
+  queue_installed?: boolean
+  count: number
+  truncated: boolean
+  date_from: string | null
+  date_to: string | null
+  limit: number
+}
+
+export interface TranscriptUploadStatus {
+  lecture: UploadLecture
+  parts: TranscriptPart[]
+  upload_allowed: boolean
+  refusal: UploadProblem | null
+  missing_part_count: number
+  all_parts_stored: boolean
+  uploads: ManualUploadRecord[]
+  limits: { max_bytes: number; extension: string }
+  processing: ProcessingPlan
+  /** The lecture's latest background processing job, if any. */
+  job?: ProcessingJob | null
+}
+
+export interface UploadFileFacts {
+  filename: string
+  content_bytes: number
+  content_sha256: string
+  cue_count: number
+  spoken_cue_count: number
+  first_cue_start_ms: number | null
+  last_cue_end_ms: number | null
+  speaker_label_count: number
+  speaker_attribution: boolean
+}
+
+export interface TranscriptUploadPreview {
+  ok: boolean
+  errors: UploadProblem[]
+  warnings: UploadProblem[]
+  lecture: UploadLecture
+  part: TranscriptPart | null
+  parts: TranscriptPart[]
+  file: UploadFileFacts | null
+  duplicate: boolean
+}
+
+export interface TranscriptUploadResult extends TranscriptUploadPreview {
+  status: 'STORED' | 'ALREADY_STORED'
+  stored: boolean
+  selection: { selection_status?: string; combine_error?: string | null }
+  /** The lecture's processing, queued in the same transaction as the store. */
+  queue?: ProcessingQueueResult
+}
+
 export interface PipelineRun {
   run_id: string
   [key: string]: unknown

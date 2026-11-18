@@ -23,6 +23,11 @@ import type {
   LectureListResponse,
   LectureListSlice,
   RunsResponse,
+  ProcessingQueueResult,
+  TranscriptRecoveryQueue,
+  TranscriptUploadPreview,
+  TranscriptUploadResult,
+  TranscriptUploadStatus,
 } from '../types/operations'
 
 const BASE = '/operations'
@@ -124,6 +129,57 @@ export async function recoverAttendance(lectureId: string) {
 
 export async function reconcileDay(date: string) {
   return (await api.post(`${BASE}/reconcile/`, { date })).data
+}
+
+/* --- Manual transcript upload ---------------------------------------------
+ *
+ * The lecture is in the URL; the server chooses the Teams transcript part from
+ * its own selection. Preview writes nothing. Store and process are separate
+ * calls so a stored transcript is never lost to a slow or failed processing run.
+ */
+
+const MULTIPART = { 'Content-Type': 'multipart/form-data' }
+
+function uploadForm(file: File, fields: Record<string, string | undefined>) {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  for (const [key, value] of Object.entries(fields)) {
+    if (value) form.append(key, value)
+  }
+  return form
+}
+
+/** Lectures (any date, unless bounded) whose transcript an upload could complete now. Read-only. */
+export async function getTranscriptRecoveryQueue(dateFrom?: string, dateTo?: string) {
+  const params: Record<string, string> = {}
+  if (dateFrom) params.from = dateFrom
+  if (dateTo) params.to = dateTo
+  return (await api.get<TranscriptRecoveryQueue>(`${BASE}/transcript-recovery/`, { params })).data
+}
+
+export async function getTranscriptUploadStatus(lectureId: string) {
+  return (await api.get<TranscriptUploadStatus>(`${BASE}/lectures/${lectureId}/transcript-upload/`)).data
+}
+
+export async function previewTranscriptUpload(lectureId: string, file: File, artifactId?: string) {
+  return (await api.post<TranscriptUploadPreview>(
+    `${BASE}/lectures/${lectureId}/transcript-upload/preview/`,
+    uploadForm(file, { artifact_id: artifactId }), { headers: MULTIPART })).data
+}
+
+export async function storeTranscriptUpload(lectureId: string, file: File, artifactId: string, sha256: string) {
+  return (await api.post<TranscriptUploadResult>(
+    `${BASE}/lectures/${lectureId}/transcript-upload/store/`,
+    uploadForm(file, { artifact_id: artifactId, expected_sha256: sha256 }), { headers: MULTIPART })).data
+}
+
+/**
+ * Queue this lecture's processing (QA included) for the background worker. Returns at once:
+ * nothing runs in the request, so the browser can be closed.
+ */
+export async function processTranscriptUpload(lectureId: string) {
+  return (await api.post<ProcessingQueueResult>(
+    `${BASE}/lectures/${lectureId}/transcript-upload/process/`, {})).data
 }
 
 /**

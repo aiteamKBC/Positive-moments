@@ -546,3 +546,65 @@ def test_a_preview_run_records_what_an_execute_run_would_face():
 
 def test_the_runner_version_is_recorded_for_traceability():
     assert BACKFILL_RUNNER_VERSION == "backfill_runner_v1"
+
+
+# --- the per-lecture processing queue rides on this service ----------------------------------
+
+class FakeLectureJobs:
+    """Records when the runner drained the lecture queue, relative to the days it ran."""
+
+    def __init__(self, orchestrator=None, on_drain=None):
+        self.drains = []
+        self.orchestrator = orchestrator
+        self.on_drain = on_drain
+
+    def drain(self, *, should_stop):
+        self.drains.append(len(self.orchestrator.calls) if self.orchestrator else None)
+        if self.on_drain is not None:
+            self.on_drain()
+        return 0
+
+
+def test_due_lecture_jobs_run_at_every_day_boundary_of_a_backfill():
+    repository, orchestrator = FakeRepository(a_run()), FakeOrchestrator()
+    jobs = FakeLectureJobs(orchestrator)
+    outcome = runner(repository, orchestrator, lecture_jobs=jobs).run_claimed("bf-1")
+    assert outcome["outcome"] == COMPLETED
+    # Before day 1, day 2 and day 3: a long backfill never starves a queued lecture.
+    assert jobs.drains == [0, 1, 2]
+    # The backfill days themselves are exactly as before.
+    assert [call["target_date"] for call in orchestrator.calls] == [
+        date(2026, 9, 1), date(2026, 9, 2), date(2026, 9, 3)]
+    assert all(call["discover"] is True and call["lookback_days"] == 0 for call in orchestrator.calls)
+
+
+def test_the_poll_loop_drains_lecture_jobs_before_looking_for_a_backfill_run():
+    repository = FakeRepository(a_run())
+    order = []
+    jobs = FakeLectureJobs(on_drain=lambda: order.append("drain"))
+    repository.claim = lambda _connection, **_kwargs: order.append("claim")
+    sleeps = []
+    the_runner = runner(repository, FakeOrchestrator(), lecture_jobs=jobs)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            the_runner.request_stop()
+
+    the_runner.run_forever(poll_seconds=5, sleep=sleep)
+    assert order == ["drain", "claim", "drain", "claim"]
+
+
+def test_without_a_lecture_queue_the_runner_behaves_exactly_as_before():
+    repository, orchestrator = FakeRepository(a_run()), FakeOrchestrator()
+    assert runner(repository, orchestrator).run_claimed("bf-1")["outcome"] == COMPLETED
+    assert len(orchestrator.calls) == 3
+
+
+def test_a_stop_during_the_lecture_drain_leaves_the_backfill_resumable():
+    repository, orchestrator = FakeRepository(a_run()), FakeOrchestrator()
+    holder = {}
+    jobs = FakeLectureJobs(orchestrator, on_drain=lambda: holder["runner"].request_stop())
+    holder["runner"] = runner(repository, orchestrator, lecture_jobs=jobs)
+    outcome = holder["runner"].run_claimed("bf-1")
+    assert outcome["outcome"] == "STOPPED" and orchestrator.calls == []

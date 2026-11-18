@@ -32,13 +32,21 @@ class SpeakerInventoryService:
         self.parser_version = parser_version
         self.log = logging.getLogger(__name__)
 
-    def build_day(self, connection, target_date: date, *, persist: bool = True) -> dict:
+    def build_day(self, connection, target_date: date, *, persist: bool = True,
+                  lecture_ids=None) -> dict:
+        """
+        `lecture_ids` narrows the day's documents to those lectures (a
+        lecture-scoped recovery); None means the whole day, as before.
+        """
         started = time.monotonic()
         run_id = (self.run_repository.start(connection, target_date, self.inventory_version)
                   if persist else uuid.uuid4())
 
         documents = self.speaker_repository.load_documents(
             connection, target_date, self.parser_version)
+        if lecture_ids is not None:
+            wanted = {str(item) for item in lecture_ids}
+            documents = [item for item in documents if str(item["lecture_id"]) in wanted]
         document_ids = [item["document_id"] for item in documents]
         aggregates = self.speaker_repository.aggregate_speakers(connection, document_ids)
         unassigned = self.speaker_repository.count_unassigned_cues(connection, document_ids)

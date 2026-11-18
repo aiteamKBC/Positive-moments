@@ -445,6 +445,23 @@ def build_parser() -> argparse.ArgumentParser:
     withdraw.add_argument("--confirm-write", action="store_true",
                           help="actually delete; without it the run only plans")
     withdraw.add_argument("--json", action="store_true")
+    manual = commands.add_parser(
+        "process-manual-transcript",
+        help="resume ONE lecture's pipeline after a manual transcript upload, QA included "
+             "(the console runs only the deterministic stages)")
+    manual.add_argument("--lecture-id", required=True)
+    manual.add_argument("--no-provider", action="store_true",
+                        help="refuse the paid quality evaluation, as the console does")
+    manual.add_argument("--plan", action="store_true",
+                        help="show the processing plan and change nothing")
+    manual.add_argument("--json", action="store_true")
+    queue_manual = commands.add_parser(
+        "queue-manual-transcript",
+        help="queue ONE lecture with a manual transcript for the background worker "
+             "(the positive-moments-backfill service runs it, QA included); runs nothing here")
+    queue_manual.add_argument("--lecture-id", required=True)
+    queue_manual.add_argument("--requested-by", default="cli")
+    queue_manual.add_argument("--json", action="store_true")
     select = commands.add_parser("select-lecture")
     select.add_argument("--date", required=True, type=parse_date)
     select.add_argument("--subject", required=True)
@@ -650,6 +667,44 @@ def main(argv: list[str] | None = None) -> int:
                 summary = service.render_day(connection, args.date)
                 if args.dry_run:
                     connection.rollback()
+        elif args.command == "process-manual-transcript":
+            # The same lecture-scoped recovery the console runs, with the QA provider allowed:
+            # a long model call here has no HTTP timeout to lose a paid answer to.
+            from app.orchestration.factory import build_manual_transcript_service
+            from app.orchestration.transcript_recovery import ProcessingRefused
+            settings.require_database()
+            service = build_manual_transcript_service(settings, allow_provider=not args.no_provider)
+            with database_connection(settings.database_url) as connection:
+                if args.plan:
+                    summary = service.plan_processing(connection, args.lecture_id)
+                    connection.rollback()
+                else:
+                    try:
+                        result = service.process(connection, args.lecture_id)
+                    except ProcessingRefused as exc:
+                        connection.rollback()
+                        print(json.dumps({"status": "REFUSED", "code": exc.code, "detail": exc.detail}))
+                        return 3
+                    connection.commit()
+                    summary = {"lecture_id": result["lecture_id"], "processing": result["processing"],
+                               "run_id": result["processing"]["run_id"]}
+        elif args.command == "queue-manual-transcript":
+            # Writes one queue row (or finds the active one). The paid work happens later in the
+            # backfill-runner service; nothing is processed by this command.
+            from app.orchestration.factory import build_manual_transcript_service
+            settings.require_database()
+            service = build_manual_transcript_service(settings, allow_provider=False)
+            with database_connection(settings.database_url) as connection:
+                summary = service.queue_processing(connection, args.lecture_id,
+                                                   requested_by=args.requested_by)
+                if summary["queued"]:
+                    connection.commit()
+                else:
+                    connection.rollback()
+            summary = {key: summary.get(key) for key in ("queued", "created", "reason", "reason_message", "job")}
+            if not summary["queued"]:
+                print(json.dumps(summary, default=str))
+                return 3
         elif args.command == "withdraw-legacy-qa":
             # Plans by default. Only an explicit confirmation reaches a
             # write-enabled mode, and the writer still refuses unless its own

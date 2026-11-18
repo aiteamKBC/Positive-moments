@@ -88,7 +88,8 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
                        perfect_eligibility_version=None,
                        provider_contract_version=None,
                        max_passes: int = DEFAULT_MAX_PASSES,
-                       probe_attendance: bool | None = None):
+                       probe_attendance: bool | None = None,
+                       lecture_scope=None):
     """
     Assemble the orchestrator.
 
@@ -97,6 +98,9 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
     non-required n8n precheck, and a runner with `persist=False`. Those are
     four independent reasons a dry run cannot write, which is the right number
     for a feature whose entire promise is that it does not.
+
+    `lecture_scope` narrows the runner's day-scoped transcript services to
+    those lectures (see StageRunner); every existing caller leaves it None.
     """
     if probe_attendance is None:
         probe_attendance = dry_run
@@ -108,7 +112,8 @@ def build_orchestrator(settings, *, dry_run: bool = False, allow_graph: bool = T
         allow_provider=allow_provider and not dry_run,
         allow_legacy_writes=allow_legacy_writes and not dry_run,
         perfect_eligibility_version=resolver.perfect_eligibility_version,
-        provider_contract_version=provider_contract_version, persist=not dry_run)
+        provider_contract_version=provider_contract_version, persist=not dry_run,
+        lecture_scope=lecture_scope)
     preflight = LegacyQaPreflight(gateway=N8nReadOnlyGateway.from_environment(),
                                   required=not dry_run)
     discovery = None
@@ -174,6 +179,36 @@ def build_guarded_actions(settings, *, perfect_eligibility_version=None):
             perfect_eligibility_version=perfect_eligibility_version,
             recording_link_mode=_recording_link_mode(settings)),
         orchestrator_factory=orchestrator_factory)
+
+
+def build_manual_transcript_service(settings, *, allow_provider: bool = False,
+                                    perfect_eligibility_version=None):
+    """
+    Manual transcript upload: validation, storage, and the lecture-scoped
+    recovery that resumes the pipeline for that ONE lecture.
+
+    The recovery orchestrator is the real one (run repository, lecture locks,
+    cycle lock, required n8n precheck), built per call with its runner narrowed
+    to the uploaded lecture. Discovery is off, as for a retry.
+
+    `allow_provider` is False for the web console (a request timeout must
+    never be able to discard a paid generation, see transcript_recovery.py)
+    and True only for the server-side CLI command.
+    """
+    from app.orchestration.transcript_recovery import ManualTranscriptRecovery
+    from app.transcripts.manual_upload import ManualTranscriptUploadService
+
+    def orchestrator_factory(lecture_id):
+        return build_orchestrator(
+            settings, dry_run=False, discover=False, allow_provider=allow_provider,
+            perfect_eligibility_version=perfect_eligibility_version,
+            lecture_scope=[str(lecture_id)])
+
+    return ManualTranscriptRecovery(
+        uploads=ManualTranscriptUploadService(),
+        resolver=build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                                recording_link_mode=_recording_link_mode(settings)),
+        orchestrator_factory=orchestrator_factory, allow_provider=allow_provider)
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +288,22 @@ def build_backfill_runner(settings, *, connection_factory,
     """
     from app.orchestration.backfill import BackfillRunner
 
+    from app.orchestration.lecture_jobs import LectureJobWorker, nightly_quiet_window
+
     orchestrator = build_orchestrator(
         settings, dry_run=False, discover=True,
         perfect_eligibility_version=perfect_eligibility_version)
+    # The same service works the per-lecture processing queue (migration 030): the lecture-scoped
+    # recovery with the QA provider allowed - what `process-manual-transcript` runs - outside any
+    # HTTP request, and never in the minutes before a nightly firing.
+    lecture_jobs = LectureJobWorker(
+        recovery=build_manual_transcript_service(
+            settings, allow_provider=True,
+            perfect_eligibility_version=perfect_eligibility_version),
+        connection_factory=connection_factory,
+        in_quiet_window=nightly_quiet_window())
     return BackfillRunner(
+        lecture_jobs=lecture_jobs,
         orchestrator=orchestrator,
         connection_factory=connection_factory,
         readonly_connection_factory=readonly_connection_factory,

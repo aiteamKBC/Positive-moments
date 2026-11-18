@@ -9,7 +9,10 @@
  * one this component imagined.
  *
  * There is no Force Reprocess here and there is no generic action runner. The
- * three guarded endpoints are the whole mutation surface.
+ * three guarded endpoints, plus the manual transcript upload (store, then
+ * process this lecture only), are the whole mutation surface. The upload is
+ * offered only when the server says Teams listed a transcript part for this
+ * lecture that holds no content.
  *
  * The Positive Moments tab is the lecture's Media view: analysis, recording
  * and every moment with its clip (components/media/LectureMomentsPanel.vue).
@@ -18,10 +21,12 @@
  * The full recording is opened through an authenticated API call on click;
  * its URL is never embedded in the page.
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import ActionPlanDialog from '../components/ActionPlanDialog.vue'
+import ProcessingJobStatus from '../components/operations/ProcessingJobStatus.vue'
+import TranscriptUploadDialog from '../components/operations/TranscriptUploadDialog.vue'
 import LectureMomentsPanel from '../components/media/LectureMomentsPanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import AttendanceCell from '../components/operations/AttendanceCell.vue'
@@ -36,12 +41,12 @@ import StatusBadge from '../components/StatusBadge.vue'
 import TabNav from '../components/TabNav.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import {
-  getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan,
+  getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan, getTranscriptUploadStatus,
   recoverAttendance, retryLecture,
 } from '../services/operations'
 import { openRecording } from '../services/media'
 import { errorMessage, openSafely } from '../utils/format'
-import type { DirectoryEntry, LectureDetail } from '../types/operations'
+import type { DirectoryEntry, LectureDetail, TranscriptUploadStatus } from '../types/operations'
 import { businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
 import {
   actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
@@ -60,6 +65,10 @@ const notice = ref('')
 const actionKind = ref<'Retry' | 'Recover attendance' | ''>('')
 const actionPlan = ref<Record<string, unknown> | null>(null)
 const actionBusy = ref(false)
+/** Manual transcript upload: the server's target and processing plan, or null when unavailable. */
+const uploadStatus = ref<TranscriptUploadStatus | null>(null)
+const uploadOpen = ref(false)
+const uploadProcessOnly = ref(false)
 
 const lectureId = computed(() => String(route.params.lectureId))
 const tab = computed(() => (typeof route.query.tab === 'string' ? route.query.tab : 'overview'))
@@ -75,13 +84,15 @@ async function load() {
     // The plan needs only the id, so it is asked for alongside the lecture
     // rather than after it; the directory needs the lecture's date.
     const plan = getRecoverAttendancePlan(lectureId.value).catch(() => null)
+    const upload = getTranscriptUploadStatus(lectureId.value).catch(() => null)
     const detail = await getLecture(lectureId.value)
     lecture.value = detail
-    const [directory, recover] = await Promise.all([
-      getDirectory(detail.session_date, detail.session_date), plan,
+    const [directory, recover, uploadState] = await Promise.all([
+      getDirectory(detail.session_date, detail.session_date), plan, upload,
     ])
     entry.value = directory.lectures.find((row) => row.lecture_id === detail.lecture_id) ?? null
     recoverPlan.value = recover
+    uploadStatus.value = uploadState
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'This lecture could not be loaded.'
   } finally {
@@ -90,6 +101,54 @@ async function load() {
 }
 onMounted(load)
 watch(lectureId, load)
+
+/** Re-read the lecture after an upload without the loading skeleton (which would close the dialog). */
+async function refreshAfterUpload() {
+  try {
+    const [detail, uploadState] = await Promise.all([
+      getLecture(lectureId.value), getTranscriptUploadStatus(lectureId.value).catch(() => null),
+    ])
+    lecture.value = detail
+    uploadStatus.value = uploadState
+  } catch {
+    // The dialog already reported the outcome; the page catches up on its next load.
+  }
+}
+
+// While the lecture's background job is queued or running, re-read its status every 20 s, and the
+// lecture once more when it settles. The worker does the work; this page only watches.
+const JOB_POLL_MS = 20_000
+let jobTimer: ReturnType<typeof setTimeout> | null = null
+const jobActive = computed(() => ['QUEUED', 'RUNNING'].includes(uploadStatus.value?.job?.status ?? ''))
+
+function scheduleJobPoll() {
+  if (jobTimer) clearTimeout(jobTimer)
+  jobTimer = null
+  if (!jobActive.value) return
+  jobTimer = setTimeout(async () => {
+    try {
+      const state = await getTranscriptUploadStatus(lectureId.value)
+      const settled = !['QUEUED', 'RUNNING'].includes(state.job?.status ?? '')
+      uploadStatus.value = state
+      if (settled) await refreshAfterUpload()
+    } catch {
+      // A missed poll is retried on the next tick.
+    }
+    scheduleJobPoll()
+  }, JOB_POLL_MS)
+}
+watch(() => uploadStatus.value?.job?.status, scheduleJobPoll)
+onBeforeUnmount(() => { if (jobTimer) clearTimeout(jobTimer) })
+
+function openUpload(processOnly: boolean) {
+  uploadProcessOnly.value = processOnly
+  uploadOpen.value = true
+  notice.value = ''
+}
+
+/** The current manual upload, when the stored transcript came from one. */
+const manualTranscript = computed(() =>
+  uploadStatus.value?.uploads.filter((item) => item.is_current_content).slice(-1)[0] ?? null)
 
 const stages = computed(() => lecture.value?.stages)
 const qa = computed(() => stages.value?.QA_EVALUATION ?? null)
@@ -228,6 +287,24 @@ async function confirmAction() {
           >
             <AppIcon name="users" :size="16" /> Recover attendance
           </button>
+          <button
+            v-if="uploadStatus?.upload_allowed"
+            type="button"
+            class="btn-secondary"
+            data-test="open-transcript-upload"
+            @click="openUpload(false)"
+          >
+            <AppIcon name="upload" :size="16" /> Upload transcript
+          </button>
+          <button
+            v-if="uploadStatus?.processing.available"
+            type="button"
+            class="btn-primary"
+            data-test="open-transcript-processing"
+            @click="openUpload(true)"
+          >
+            <AppIcon name="refresh" :size="16" /> Process uploaded transcript
+          </button>
         </template>
       </PageHeader>
 
@@ -337,6 +414,24 @@ async function confirmAction() {
                 <dt class="text-muted">Engagement measured</dt><dd><StageChip :state="stages!.ENGAGEMENT.state" /></dd>
               </div>
             </dl>
+            <p v-if="manualTranscript" class="mt-3 text-xs leading-5 text-muted" data-test="manual-transcript-source">
+              Transcript source: <strong class="font-semibold text-body">manual upload</strong>
+              <template v-if="manualTranscript.uploaded_by"> by {{ manualTranscript.uploaded_by }}</template>
+              on {{ cairoDateTime(manualTranscript.uploaded_at) }}
+              ({{ manualTranscript.original_filename }}), because Microsoft Graph could not retrieve it.
+            </p>
+            <div v-if="uploadStatus?.job" class="mt-3" data-test="manual-transcript-job">
+              <p class="eyebrow mb-1">Background processing</p>
+              <ProcessingJobStatus :job="uploadStatus.job" />
+            </div>
+            <p
+              v-else-if="manualTranscript && uploadStatus?.processing.available"
+              class="mt-2 text-xs leading-5 text-muted"
+              data-test="manual-transcript-qa-pending"
+            >
+              Processing of the uploaded transcript is not queued yet. Use <strong>Process uploaded transcript</strong>
+              to queue it; it then runs in the background, quality evaluation included.
+            </p>
           </SectionPanel>
 
           <SectionPanel title="Recording and reporting">
@@ -571,6 +666,15 @@ async function confirmAction() {
         :busy="actionBusy"
         @close="actionKind = ''"
         @confirm="confirmAction"
+      />
+
+      <TranscriptUploadDialog
+        :open="uploadOpen"
+        :lecture-id="lecture.lecture_id"
+        :status="uploadStatus"
+        :process-only="uploadProcessOnly"
+        @close="uploadOpen = false"
+        @changed="refreshAfterUpload"
       />
     </template>
   </div>

@@ -33,8 +33,14 @@ import SectionPanel from '../components/SectionPanel.vue'
 import StageChip from '../components/operations/StageChip.vue'
 import StatTile from '../components/StatTile.vue'
 import StatusBadge from '../components/StatusBadge.vue'
-import { getCalendar, getDay, getDirectory, getRuns, reconcileDay } from '../services/operations'
-import type { DayReport, DirectoryEntry, LectureRow, PipelineRun } from '../types/operations'
+import TranscriptRecoveryPanel from '../components/operations/TranscriptRecoveryPanel.vue'
+import TranscriptUploadDialog from '../components/operations/TranscriptUploadDialog.vue'
+import {
+  getCalendar, getDay, getDirectory, getRuns, getTranscriptRecoveryQueue, getTranscriptUploadStatus, reconcileDay,
+} from '../services/operations'
+import type {
+  DayReport, DirectoryEntry, LectureRow, PipelineRun, TranscriptUploadStatus,
+} from '../types/operations'
 import { businessDate, businessDateLong, cairoTimeRange, shiftBusinessDate } from '../utils/datetime'
 import { actionLabel, actionTone, bucketLabel, bucketTone } from '../utils/labels'
 
@@ -52,12 +58,23 @@ const reconciling = ref(false)
 const notice = ref('')
 const expandedRun = ref<string | null>(null)
 
+// Manual transcript recovery. Which lectures may take an upload is the server's
+// answer (transcript-recovery/), never inferred here from a stage or a bucket.
+const uploadableToday = ref<Set<string>>(new Set())
+const recoveryOpen = ref(false)
+const recoveryRefreshKey = ref(0)
+const uploadOpen = ref(false)
+const uploadLectureId = ref('')
+const uploadStatus = ref<TranscriptUploadStatus | null>(null)
+const openingUpload = ref<string | null>(null)
+
 const selectedDate = computed(() => (typeof route.query.date === 'string' ? route.query.date : undefined))
 
-async function load() {
-  loading.value = true
+/** `quiet` refreshes in place, without the skeleton, e.g. after an upload. */
+async function load(quiet = false) {
+  if (!quiet) loading.value = true
   error.value = ''
-  notice.value = ''
+  if (!quiet) notice.value = ''
   try {
     // The day report resolves fifteen stages per lecture and is the slow read.
     // The cheap ones run beside it rather than after it.
@@ -66,17 +83,47 @@ async function load() {
     runs.value = recent.runs
     // "Today" comes from the server, in Africa/Cairo, never from this browser.
     const today = report.navigation.today
-    const [entries, calendar] = await Promise.all([
+    const [entries, calendar, recovery] = await Promise.all([
       getDirectory(report.session_date, report.session_date),
       getCalendar(shiftBusinessDate(today, -365), today),
+      // Optional: the day is still useful if this read fails; rows just offer no upload.
+      getTranscriptRecoveryQueue(report.session_date, report.session_date).catch(() => null),
     ])
     directory.value = Object.fromEntries(entries.lectures.map((row) => [row.lecture_id, row]))
     latestLectureDate.value = calendar.latest_lecture_date
+    uploadableToday.value = new Set(recovery?.lectures.map((row) => row.lecture_id) ?? [])
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'The day could not be loaded.'
   } finally {
     loading.value = false
   }
+}
+
+/** Open the one upload dialog for exactly this lecture, with the server's current target. */
+async function openUpload(lectureId: string) {
+  openingUpload.value = lectureId
+  try {
+    const status = await getTranscriptUploadStatus(lectureId)
+    if (!status.upload_allowed) {
+      notice.value = status.refusal?.message ?? 'This lecture no longer needs a transcript upload.'
+      recoveryRefreshKey.value += 1
+      await load(true)
+      return
+    }
+    uploadLectureId.value = lectureId
+    uploadStatus.value = status
+    uploadOpen.value = true
+  } catch {
+    notice.value = 'The lecture\'s transcript status could not be loaded. Nothing was uploaded.'
+  } finally {
+    openingUpload.value = null
+  }
+}
+
+/** A transcript was stored or processed: re-read the statuses the dialog may have changed. */
+async function afterUploadChanged() {
+  recoveryRefreshKey.value += 1
+  await load(true)
 }
 
 function navigate(date: string) {
@@ -97,8 +144,8 @@ async function reconcile() {
   }
 }
 
-onMounted(load)
-watch(selectedDate, load)
+onMounted(() => load())
+watch(selectedDate, () => load())
 
 // The server owns the classification. The UI only places the rows carrying its
 // explicit suppression flag somewhere other than the lecture table.
@@ -131,6 +178,15 @@ function timeOf(row: LectureRow) {
       lede="Pipeline health, exceptions and guarded actions for one Kent Business College teaching day."
     >
       <template #actions>
+        <button
+          type="button"
+          class="btn-primary"
+          data-test="open-transcript-recovery"
+          title="Lectures on any date whose Teams transcript Microsoft Graph has not delivered."
+          @click="recoveryOpen = true"
+        >
+          <AppIcon name="upload" :size="16" /> Manual Transcript Recovery
+        </button>
         <RouterLink class="btn-secondary" :to="{ name: 'operations-media' }">
           <AppIcon name="video" :size="16" /> Positive Moments Media
         </RouterLink>
@@ -162,7 +218,7 @@ function timeOf(row: LectureRow) {
       <LoadingSkeleton variant="tiles" />
       <LoadingSkeleton />
     </template>
-    <ErrorState v-else-if="error" :message="error" @retry="load" />
+    <ErrorState v-else-if="error" :message="error" @retry="load()" />
 
     <template v-else-if="day">
       <!-- An empty day is a normal answer, not an unfinished page. -->
@@ -294,6 +350,7 @@ function timeOf(row: LectureRow) {
                 <th scope="col">Current step</th>
                 <th scope="col">What happens next</th>
                 <th scope="col">Attendance</th>
+                <th v-if="uploadableToday.size" scope="col"><span class="sr-only">Transcript</span></th>
               </tr>
             </thead>
             <tbody>
@@ -320,6 +377,20 @@ function timeOf(row: LectureRow) {
                     :not-delivered="row.not_delivered"
                     :coverage-status="row.attendance_coverage_status"
                   />
+                </td>
+                <td v-if="uploadableToday.size" class="text-right">
+                  <button
+                    v-if="uploadableToday.has(row.lecture_id)"
+                    type="button"
+                    class="btn-secondary whitespace-nowrap"
+                    :disabled="Boolean(openingUpload)"
+                    :data-test="`attention-upload-${row.lecture_id}`"
+                    title="Microsoft Graph has not delivered this lecture's Teams transcript."
+                    @click="openUpload(row.lecture_id)"
+                  >
+                    <AppIcon name="upload" :size="16" />
+                    {{ openingUpload === row.lecture_id ? 'Opening…' : 'Upload transcript' }}
+                  </button>
                 </td>
               </tr>
             </tbody>
@@ -437,5 +508,22 @@ function timeOf(row: LectureRow) {
         </SectionPanel>
       </template>
     </template>
+
+    <!-- Outside the loading branches: a refresh never unmounts an open dialog. -->
+    <TranscriptRecoveryPanel
+      :open="recoveryOpen"
+      :refresh-key="recoveryRefreshKey"
+      :opening-lecture-id="openingUpload"
+      @close="recoveryOpen = false"
+      @upload="openUpload"
+    />
+    <TranscriptUploadDialog
+      v-if="uploadLectureId"
+      :open="uploadOpen"
+      :lecture-id="uploadLectureId"
+      :status="uploadStatus"
+      @close="uploadOpen = false"
+      @changed="afterUploadChanged"
+    />
   </div>
 </template>
