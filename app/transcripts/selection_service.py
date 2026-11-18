@@ -46,7 +46,14 @@ class TranscriptSelectionService:
         self.selection_version = selection_version
         self.log = logging.getLogger(__name__)
 
-    def select_day(self, connection, target_date: date, *, persist: bool = True) -> dict:
+    def select_day(self, connection, target_date: date, *, persist: bool = True,
+                   lecture_ids=None) -> dict:
+        """
+        `lecture_ids` narrows the day to those lectures and changes nothing
+        else: the same body runs for each of them. A lecture-scoped recovery
+        (a manual transcript upload) uses it so that recovering one lecture
+        never re-selects the rest of its day. None means the whole day.
+        """
         started = time.monotonic()
         run_id = (
             self.run_repository.start(connection, target_date, self.selection_version)
@@ -54,9 +61,15 @@ class TranscriptSelectionService:
         )
         inputs = self.lecture_repository.load_day(connection, target_date)
         ready, skipped = inputs["ready"], inputs["skipped"]
+        considered = inputs["considered"]
+        if lecture_ids is not None:
+            wanted = {str(item) for item in lecture_ids}
+            ready = [lecture for lecture in ready if str(lecture.lecture_id) in wanted]
+            skipped = [item for item in skipped if str(item["lecture_id"]) in wanted]
+            considered = len(ready) + len(skipped)
 
         counters = {
-            "lectures_considered": inputs["considered"],
+            "lectures_considered": considered,
             "lectures_ready": len(ready),
             "lectures_skipped_not_ready": len(skipped),
             "selections_created": 0, "selections_updated": 0, "selections_unchanged": 0,
@@ -85,6 +98,8 @@ class TranscriptSelectionService:
             "duration_ms": round((time.monotonic() - started) * 1000),
             "metadata": {
                 "selection_version": self.selection_version,
+                "lecture_scope": sorted({str(item) for item in lecture_ids})
+                if lecture_ids is not None else None,
                 "source": "PERSISTED_PHASE_2A_ARTIFACTS_ONLY",
                 "graph_calls": 0,
                 "legacy_reference":

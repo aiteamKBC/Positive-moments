@@ -238,7 +238,8 @@ class StageRunner:
                  allow_provider: bool = True, allow_legacy_writes: bool = True,
                  parser_version: str = PARSER_VERSION,
                  perfect_eligibility_version: str = DEFAULT_PERFECT_ELIGIBILITY_VERSION,
-                 provider_contract_version=None, persist: bool = True):
+                 provider_contract_version=None, persist: bool = True,
+                 lecture_scope=None):
         self.settings = settings
         self.allow_graph = allow_graph
         self.allow_provider = allow_provider
@@ -247,13 +248,26 @@ class StageRunner:
         self.perfect_eligibility_version = perfect_eligibility_version
         self.provider_contract_version = provider_contract_version
         self.persist = persist
+        # LECTURE-SCOPED RECOVERY. When set, the day-scoped transcript services
+        # (selection, canonical cues, speakers) run for these lectures only, so
+        # recovering one lecture never re-derives its siblings; and the
+        # day-wide Graph transcript sweep is refused outright, because it cannot
+        # be narrowed without changing how Graph is asked. None = the normal,
+        # whole-day behaviour every existing caller gets.
+        self.lecture_scope = (frozenset(str(item) for item in lecture_scope)
+                              if lecture_scope is not None else None)
         self.log = logging.getLogger(__name__)
 
     def scope_of(self, action: str) -> str:
         return ACTION_SCOPE.get(action, LECTURE_SCOPE)
 
+    def _scoped_ids(self):
+        return sorted(self.lecture_scope) if self.lecture_scope is not None else None
+
     def can_run(self, action: str) -> bool:
         if action not in ACTION_SCOPE:
+            return False
+        if action == ACQUIRE_TRANSCRIPT and self.lecture_scope is not None:
             return False
         if action in GRAPH_ACTIONS and not self.allow_graph:
             return False
@@ -273,6 +287,8 @@ class StageRunner:
     def refusal_reason(self, action: str) -> str:
         if action not in ACTION_SCOPE:
             return "ACTION_NOT_AUTOMATED"
+        if action == ACQUIRE_TRANSCRIPT and self.lecture_scope is not None:
+            return "DAY_WIDE_TRANSCRIPT_SWEEP_NOT_IN_LECTURE_SCOPE"
         if action in GRAPH_ACTIONS and not self.allow_graph:
             return "GRAPH_CALLS_DISABLED_FOR_THIS_RUN"
         if action in PROVIDER_ACTIONS and not self.allow_provider:
@@ -319,14 +335,16 @@ class StageRunner:
             run_repository=TranscriptSelectionRunRepository(),
             qa_evidence_repository=LegacyQaEvidenceRepository())
         return _outcome(service.select_day(connection, session_date,
-                                           persist=self.persist))
+                                           persist=self.persist,
+                                           lecture_ids=self._scoped_ids()))
 
     def _build_canonical_cues(self, connection, session_date) -> dict:
         service = CanonicalTranscriptService(
             document_repository=TranscriptDocumentRepository(),
             run_repository=TranscriptParseRunRepository())
         return _outcome(service.parse_day(connection, session_date,
-                                          persist=self.persist))
+                                          persist=self.persist,
+                                          lecture_ids=self._scoped_ids()))
 
     def _resolve_speakers(self, connection, session_date) -> dict:
         service = SpeakerInventoryService(
@@ -335,7 +353,8 @@ class StageRunner:
             legacy_diagnostic_repository=None,
             parser_version=self.parser_version)
         return _outcome(service.build_day(connection, session_date,
-                                          persist=self.persist))
+                                          persist=self.persist,
+                                          lecture_ids=self._scoped_ids()))
 
     # -- lecture-scoped stages ----------------------------------------------
 

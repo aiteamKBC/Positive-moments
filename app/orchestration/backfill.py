@@ -324,9 +324,13 @@ class BackfillRunner:
     def __init__(self, *, orchestrator, connection_factory,
                  aptem_connection_factory=None, repository=None,
                  preview_service=None, readonly_connection_factory=None,
-                 recording_report=None,
+                 recording_report=None, lecture_jobs=None,
                  runner_version: str = BACKFILL_RUNNER_VERSION, now=None):
         self.orchestrator = orchestrator
+        # Durable per-lecture processing jobs (app/orchestration/lecture_jobs.py), e.g. a manual
+        # transcript upload's QA. This service is their worker: it drains due jobs before each
+        # poll and at every backfill day boundary, so a long backfill never starves them.
+        self.lecture_jobs = lecture_jobs
         # Recording Links (app/recordings/coverage.py). A PREVIEW day asks it
         # for a live, read-only verdict per lecture; an EXECUTE day asks it
         # what the orchestrator's RECORDING_LINK stage left behind. Either
@@ -349,6 +353,12 @@ class BackfillRunner:
     def request_stop(self, *_args) -> None:
         """Finish the day in flight, then exit. Never kill one mid-write."""
         self._stopping = True
+
+    def _drain_lecture_jobs(self) -> int:
+        """Run every due lecture job, one at a time. Never raises into the backfill loop."""
+        if self.lecture_jobs is None:
+            return 0
+        return self.lecture_jobs.drain(should_stop=lambda: self._stopping)
 
     # -- one run -------------------------------------------------------------
 
@@ -380,6 +390,8 @@ class BackfillRunner:
 
         days_done = 0
         for index, day in enumerate(remaining):
+            # A day boundary is the runner's safe point; lecture jobs queued meanwhile run here.
+            self._drain_lecture_jobs()
             with self.connection_factory() as connection:
                 if self.repository.cancel_requested(connection, run_id):
                     self.repository.record_day(
@@ -678,6 +690,9 @@ class BackfillRunner:
         handled = 0
         while not self._stopping:
             if max_runs is not None and handled >= max_runs:
+                break
+            self._drain_lecture_jobs()
+            if self._stopping:
                 break
             try:
                 with self.connection_factory() as connection:

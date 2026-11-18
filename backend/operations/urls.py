@@ -8,7 +8,8 @@ there is no route here that will perform an action named by the caller.
 from django.urls import path
 
 from . import (
-    actions, backfill_views, media_views, publisher_backfill_views, publisher_views, publishing_monitor_views, views,
+    actions, backfill_views, media_views, publisher_backfill_views, publisher_views, publishing_monitor_views,
+    transcript_upload_views, views,
 )
 
 urlpatterns = [
@@ -43,6 +44,23 @@ urlpatterns = [
     path("lectures/<uuid:lecture_id>/recover-attendance/",
          actions.recover_attendance_view, name="operations-recover-attendance"),
     path("reconcile/", actions.reconcile_view, name="operations-reconcile"),
+
+    # --- Manual transcript upload: the fallback when Graph will not serve a transcript -----------
+    # The lecture is in the URL; the target transcript is the platform's own selection for it.
+    path("transcript-recovery/", transcript_upload_views.transcript_recovery_view,
+         name="operations-transcript-recovery"),
+    path("lectures/<uuid:lecture_id>/transcript-upload/",
+         transcript_upload_views.transcript_upload_status_view,
+         name="operations-transcript-upload-status"),
+    path("lectures/<uuid:lecture_id>/transcript-upload/preview/",
+         transcript_upload_views.transcript_upload_preview_view,
+         name="operations-transcript-upload-preview"),
+    path("lectures/<uuid:lecture_id>/transcript-upload/store/",
+         transcript_upload_views.transcript_upload_view,
+         name="operations-transcript-upload"),
+    path("lectures/<uuid:lecture_id>/transcript-upload/process/",
+         transcript_upload_views.transcript_upload_process_view,
+         name="operations-transcript-upload-process"),
 
     # --- QA Core RC2: Operations Backfill ---------------------------------
     # Both POSTs queue a durable run and return immediately; the

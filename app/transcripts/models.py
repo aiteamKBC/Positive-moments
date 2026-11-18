@@ -30,6 +30,12 @@ PROVIDER_ERROR = "PROVIDER_ERROR"
 PROVIDER_MICROSOFT_GRAPH = "MICROSOFT_GRAPH"
 VTT = "text/vtt"
 
+# Where an artifact's stored content came from. Graph is the default and the norm; a manual
+# upload is an operator-confirmed Teams VTT stored on the SAME Graph artifact when Graph will
+# not serve its content (app/transcripts/manual_upload.py).
+CONTENT_SOURCE_MICROSOFT_GRAPH = PROVIDER_MICROSOFT_GRAPH
+CONTENT_SOURCE_MANUAL_UPLOAD = "MANUAL_UPLOAD"
+
 
 @dataclass(frozen=True)
 class ReadyLecture:

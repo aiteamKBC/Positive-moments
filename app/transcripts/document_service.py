@@ -35,11 +35,19 @@ class CanonicalTranscriptService:
         self.parser_version = parser_version
         self.log = logging.getLogger(__name__)
 
-    def parse_day(self, connection, target_date: date, *, persist: bool = True) -> dict:
+    def parse_day(self, connection, target_date: date, *, persist: bool = True,
+                  lecture_ids=None) -> dict:
+        """
+        `lecture_ids` narrows the day's combined transcripts to those lectures
+        (a lecture-scoped recovery); None means the whole day, as before.
+        """
         started = time.monotonic()
         run_id = (self.run_repository.start(connection, target_date, self.parser_version)
                   if persist else uuid.uuid4())
         sources = self.document_repository.load_combined_for_date(connection, target_date)
+        if lecture_ids is not None:
+            wanted = {str(item) for item in lecture_ids}
+            sources = [source for source in sources if str(source["lecture_id"]) in wanted]
 
         counters = {
             "combined_transcripts_considered": len(sources),
