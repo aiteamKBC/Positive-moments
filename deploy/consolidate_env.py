@@ -32,10 +32,17 @@ the value is identical before and after - including "unset stays unset".
       reader; the per-unit check then still lists what it changes.)
     * A name only a non-reader holds a different value for  -> resolved automatically
       to the readers' value (non-readers never look at it).
-    * A unit would newly see a name it reads                -> refused unless
-      --accept-change UNIT:NAME.
-    * A critical name would be missing or empty             -> refused unless
-      --accept-missing UNIT:NAME.
+    * A unit would newly see a name it NEVER reads           -> "visible only", listed by
+      name, harmless (UNIT_VARIABLES is per process, from each process's real imports).
+    * A unit would newly see a name it reads                -> PENDING; proven name by
+      name with the application-loading probe below. Identical loaded configuration (e.g.
+      a blank value equal to the default) -> "VERIFIED no effect". Otherwise refused:
+      --accept-change UNIT:NAME (take the new behaviour) or --keep-unset UNIT:NAME (keep
+      today's behaviour: the unit's drop-in adds UnsetEnvironment=NAME and
+      KBC_ENV_KEEP_UNSET=NAME, so neither systemd nor the in-process gap filler sets it).
+    * A critical name absent today and after                -> MISSING, with a names-only
+      diagnosis (running process environment, ExecStart); --accept-missing UNIT:NAME
+      keeps today's behaviour. A critical name set today is never dropped (LOST).
 
 It then PROVES it, twice:
     1. round trip: the candidate parsed by systemd AND by python-dotenv must both give
@@ -43,8 +50,9 @@ It then PROVES it, twice:
     2. application loading: for each unit, the real config classes (Settings,
        SchedulerConfig, the n8n gateway, Django settings, PublisherConfig and its
        problems()) are built in a child process from the BEFORE and the AFTER
-       environment; every field is compared as a salted hash. Any difference refuses.
-       No database or network connection is opened.
+       environment and compared as salted hashes - only the fields that unit consumes
+       (UNIT_PROBES); a probe that raises always counts. Any unexplained difference
+       refuses. No database or network connection is opened.
 
 APPLY
 -----
@@ -150,6 +158,17 @@ class Systemd:
     def daemon_reload(self) -> None:
         self._out("systemctl", "daemon-reload")
 
+    def running_names(self, unit: str) -> set[str] | None:
+        """NAMES (never values) in the running main process's environment; None if not running."""
+        try:
+            pid = self.show(unit, "MainPID").strip()
+            if not pid.isdigit() or pid == "0":
+                return None
+            raw = Path(f"/proc/{pid}/environ").read_bytes()
+        except (OSError, Refused):
+            return None
+        return {item.partition(b"=")[0].decode("utf-8", "replace") for item in raw.split(b"\0") if b"=" in item}
+
 
 class Host:
     """File ownership and identity. Separate so the plan logic can be tested anywhere."""
@@ -252,6 +271,12 @@ class Plan:
     sources: dict[str, set[str]]                  # name -> source file paths
     issues: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # unit -> [(name, kind)]: a name the unit READS changes; refused unless the unit's loaded
+    # configuration is proven identical (check_loading) or the operator accepted it.
+    pending: dict[str, list[tuple[str, str]]] = field(default_factory=dict)
+    visible_only: dict[str, list[str]] = field(default_factory=dict)   # newly visible, never read
+    accepted: set[str] = field(default_factory=set)                    # "unit:NAME"
+    keep_unset: dict[str, list[str]] = field(default_factory=dict)     # unit -> names kept unset
 
     @property
     def canonical(self) -> Path:
@@ -259,7 +284,7 @@ class Plan:
 
 
 def build_plan(sd: Systemd, app: Path, prefer: dict[str, str], accept_change: set[str],
-               accept_missing: set[str]) -> Plan:
+               accept_missing: set[str], keep_unset: dict[str, set[str]] | None = None) -> Plan:
     canonical = app / "backend" / ".env"
     units = {name: read_unit(sd, name) for name in UNITS}
     issues, notes = [], []
@@ -320,35 +345,58 @@ def build_plan(sd: Systemd, app: Path, prefer: dict[str, str], accept_change: se
         issues.append(f"CONFLICT {key}: different values in {', '.join(sorted(sources[key]))} "
                       f"(read by {', '.join(sorted(readers)) or 'no unit'}); resolve with --prefer {key}=<unit>")
 
+    # --keep-unset UNIT:NAME - a unit that does not have NAME today keeps not having it:
+    # its drop-in adds UnsetEnvironment=NAME (applied by systemd after the env files) and
+    # KBC_ENV_KEEP_UNSET, which stops the in-process gap filling from re-adding it.
+    kept: dict[str, list[str]] = {}
+    for unit_name, names in sorted((keep_unset or {}).items()):
+        if unit_name not in live:
+            issues.append(f"--keep-unset {unit_name}:...: no such installed unit")
+            continue
+        for key in sorted(names):
+            if key in before[unit_name]:
+                issues.append(f"--keep-unset {unit_name}:{key}: the unit HAS {key} today; "
+                              "keep-unset only preserves a name that is absent today")
+            else:
+                kept.setdefault(unit_name, []).append(key)
     after = {}
     for unit in live.values():
         effective = dict(unit.environment)
+        if unit.name in kept:
+            effective[registry.KEEP_UNSET_VARIABLE] = ",".join(kept[unit.name])
         effective.update(candidate)
+        for key in kept.get(unit.name, ()):
+            effective.pop(key, None)
         after[unit.name] = effective
 
+    pending, visible_only, accepted = {}, {}, set()
     for name in live:
         reads = registry.UNIT_VARIABLES[name] | set(registry.CRITICAL_VARIABLES.get(name, ()))
-        for key in sorted(reads):
+        for key in sorted(set(before[name]) | set(after[name])):
             old, new = before[name].get(key), after[name].get(key)
-            if old == new:
+            if old == new or key == registry.KEEP_UNSET_VARIABLE:
                 continue
             kind = ("unset -> set" if old is None else "set -> unset" if new is None else "value differs")
             label = f"{name}:{key}"
-            if label in accept_change:
-                notes.append(f"{label}: {kind} (accepted)")
+            if key not in reads:
+                visible_only.setdefault(name, []).append(key)     # the unit never reads it
+            elif label in accept_change:
+                accepted.add(label)
+                notes.append(f"{label}: {kind} (accepted by the operator)")
             else:
-                issues.append(f"CHANGE {label}: {kind}; accept only after review with --accept-change {label}")
+                pending.setdefault(name, []).append((key, kind))
         for key in registry.CRITICAL_VARIABLES.get(name, ()):
-            if not (after[name].get(key) or "").strip():
-                label = f"{name}:{key}"
-                if label in accept_missing:
-                    notes.append(f"{label}: critical name empty (accepted)")
-                else:
-                    issues.append(f"MISSING {label}: critical name absent or empty "
-                                  f"(--accept-missing {label} to proceed anyway)")
-        unread = set(candidate) - set(before[name]) - registry.UNIT_VARIABLES[name]
-        if unread:
-            notes.append(f"{name}: {len(unread)} name(s) newly visible that it never reads")
+            if (after[name].get(key) or "").strip():
+                continue
+            label = f"{name}:{key}"
+            had = bool((before[name].get(key) or "").strip())
+            if had:                                               # never acceptable
+                issues.append(f"LOST {label}: set today, absent after consolidation")
+            elif label in accept_missing:
+                notes.append(f"{label}: absent today and after - unchanged (accepted by the operator)")
+            else:
+                issues.append(f"MISSING {label}: {_diagnose_missing(sd, live[name], key)} "
+                              f"(--accept-missing {label} keeps today's behaviour)")
     publisher = after.get(registry.PUBLISHER_UNIT)
     if publisher is not None and not (publisher.get("PUBLISHER_DATABASE_URL") or "").strip():
         issues.append("bunny-publisher: PUBLISHER_DATABASE_URL would be empty - it never falls back")
@@ -356,7 +404,28 @@ def build_plan(sd: Systemd, app: Path, prefer: dict[str, str], accept_change: se
         render(candidate, "check")
     except Refused as exc:
         issues.append(str(exc))
-    return Plan(app, units, before, after, candidate, sources, issues, notes)
+    for unit_name, names in kept.items():
+        notes.append(f"{unit_name}: keeps {', '.join(names)} unset (UnsetEnvironment= + "
+                     f"{registry.KEEP_UNSET_VARIABLE} in its drop-in) - unchanged from today")
+    return Plan(app, units, before, after, candidate, sources, issues, notes, pending, visible_only,
+                accepted, kept)
+
+
+def _diagnose_missing(sd: Systemd, unit: Unit, key: str) -> str:
+    """Where else could the value come from? Names only - a running process is never read for values."""
+    running = sd.running_names(unit.name)
+    if running is not None and key in running:
+        return (f"absent from every EnvironmentFile/Environment= line and backend/.env, YET the running "
+                f"process has it - supplied by a mechanism this tool does not model; find it before migrating")
+    hints = []
+    if key in unit.exec_text:
+        hints.append("ExecStart mentions it")
+    if re.search(r"(^|\s)(--env|-e|--config|-c)(\s|=)", unit.exec_text):
+        hints.append("ExecStart passes --env/--config: check that file")
+    where = "; ".join(hints) or "no other source found"
+    state = ("the running process does not have it either" if running is not None
+             else "the unit is not running, so its live environment could not be checked")
+    return f"absent today and after consolidation ({state}; {where})"
 
 
 # --- proofs --------------------------------------------------------------------------------
@@ -425,23 +494,68 @@ def run_probe(app: Path, unit: str, env: dict[str, str], salt: str) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+def loading_differences(old: dict, new: dict, unit: str) -> list[str]:
+    """`label.field` entries that differ, limited to what this unit consumes; errors always count."""
+    wanted = registry.UNIT_PROBES[unit]
+    found = []
+    for label, fields in wanted.items():
+        a, b = old.get(label, {}), new.get(label, {})
+        keys = set(a) | set(b)
+        if fields is not None:
+            keys = {k for k in keys if k in fields or k == "__error__"}
+        found += [f"{label}.{k}" for k in sorted(keys) if a.get(k) != b.get(k)]
+        if (label in old) != (label in new):
+            found.append(f"{label}.<missing>")
+    return found
+
+
 def check_loading(plan: Plan, probe=run_probe) -> list[str]:
+    """
+    Build every unit's real configuration from the BEFORE and the AFTER environment and
+    compare what that unit consumes. A pending change to a name the unit reads is accepted
+    as harmless only when the consumed configuration is identical (e.g. the newly visible
+    value equals the code default); otherwise it stays refused.
+    """
     problems, salt = [], secrets.token_hex(16)
-    accepted_units = {n.split(":")[0] for n in plan.notes if "(accepted)" in n}
+    accepted_units = {label.split(":")[0] for label in plan.accepted}
     for name in plan.before:
-        old = probe(plan.app, name, plan.before[name], salt)
-        new = probe(plan.app, name, plan.after[name], salt)
-        for label in sorted(set(old) | set(new)):
-            fields = sorted(f for f in set(old.get(label, {})) | set(new.get(label, {}))
-                            if old.get(label, {}).get(f) != new.get(label, {}).get(f))
-            if not fields:
-                continue
-            message = f"{name}: {label} differs after consolidation in field(s) {', '.join(fields)}"
-            if name in accepted_units:
-                plan.notes.append(message + " (unit has accepted changes)")
+        before_config = probe(plan.app, name, plan.before[name], salt)
+        diffs = loading_differences(before_config, probe(plan.app, name, plan.after[name], salt), name)
+        pending = plan.pending.get(name, [])
+        harmless = []
+        for key, kind in pending:
+            # Prove each name on its own: today's environment with ONLY this name changed.
+            trial = dict(plan.before[name])
+            if key in plan.after[name]:
+                trial[key] = plan.after[name][key]
             else:
-                problems.append("LOADING " + message)
+                trial.pop(key, None)
+            own = diffs and loading_differences(before_config, probe(plan.app, name, trial, salt), name)
+            if own:
+                problems.append(f"CHANGE {name}:{key}: {kind} changes what {name} loads "
+                                f"({', '.join(own)}); review, then --accept-change {name}:{key} or "
+                                f"--keep-unset {name}:{key}" if kind == "unset -> set" else
+                                f"CHANGE {name}:{key}: {kind} changes what {name} loads ({', '.join(own)})")
+            else:
+                harmless.append(key)
+                plan.notes.append(f"{name}:{key}: {kind}, VERIFIED no effect - the configuration "
+                                  f"{name} loads is identical")
+        if not diffs:
+            continue
+        message = f"{name}: loaded configuration differs in {', '.join(diffs)}"
+        if any(p.startswith(f"CHANGE {name}:") for p in problems):
+            continue                                   # already refused, name by name
+        if name in accepted_units:
+            plan.notes.append(message + " (from changes the operator accepted)")
+        else:
+            problems.append("LOADING " + message)     # a difference no single name explains
     return problems
+
+
+def pending_unverified(plan: Plan) -> list[str]:
+    """Pending changes when the loading proof could not run (another refusal came first)."""
+    return [f"CHANGE {unit}:{key}: {kind} (not verified: resolve the other refusals first)"
+            for unit, items in plan.pending.items() for key, kind in items]
 
 
 # --- report ---------------------------------------------------------------------------------
@@ -456,9 +570,16 @@ def report(plan: Plan, extra: list[str]) -> bool:
     print(f"names in the consolidated file: {len(plan.candidate)}; held by more than one file: {len(shared)}")
     for key in sorted(shared):
         print(f"  {key}: {', '.join(sorted(shared[key]))}")
+    for unit, names in sorted(plan.visible_only.items()):
+        print(f"visible only (harmless: {unit} never reads these): {len(names)} - {', '.join(sorted(names))}")
     for note in plan.notes:
         print(f"note: {note}")
     issues = plan.issues + extra
+    kinds = {}
+    for issue in issues:
+        kinds[issue.split(" ", 1)[0]] = kinds.get(issue.split(" ", 1)[0], 0) + 1
+    print("summary: " + (", ".join(f"{k} {v}" for k, v in sorted(kinds.items())) or "no refusals")
+          + f"; harmless visibility {sum(len(v) for v in plan.visible_only.values())}")
     for issue in issues:
         print(f"REFUSED: {issue}")
     print("VERDICT: " + ("READY" if not issues else f"REFUSED ({len(issues)} issue(s))"))
@@ -539,6 +660,10 @@ def apply(plan: Plan, sd: Systemd, host: Host, systemd_dir: Path, backup_root: P
             path.parent.mkdir(parents=True, exist_ok=True)
             text = (f"{MARKER} {stamp}\n# Remove this file and run `systemctl daemon-reload` to roll back.\n"
                     f"[Service]\nEnvironmentFile=\nEnvironmentFile={plan.canonical}\n")
+            kept = plan.keep_unset.get(unit.name)
+            if kept:
+                text += (f"Environment={registry.KEEP_UNSET_VARIABLE}={','.join(kept)}\n"
+                         f"UnsetEnvironment={' '.join(kept)}\n")
             os.replace(_write_atomic(path, text, 0o644, None, host), path)
         sd.daemon_reload()
         for unit in live:
@@ -548,6 +673,8 @@ def apply(plan: Plan, sd: Systemd, host: Host, systemd_dir: Path, backup_root: P
         for unit in live:                                    # the live configuration, re-modelled
             effective = dict(read_unit(sd, unit.name).environment)
             effective.update(sd.parse_env_file(plan.canonical))
+            for key in sd.show(unit.name, "UnsetEnvironment").split():
+                effective.pop(key, None)
             if effective != plan.after[unit.name]:
                 raise Refused(f"{unit.name}: live environment differs from the plan")
     except Exception as exc:
@@ -629,6 +756,8 @@ def main(argv=None, *, sd: Systemd | None = None, host: Host | None = None, prob
     parser.add_argument("--prefer", action="append", default=[], metavar="NAME=UNIT")
     parser.add_argument("--accept-change", action="append", default=[], metavar="UNIT:NAME")
     parser.add_argument("--accept-missing", action="append", default=[], metavar="UNIT:NAME")
+    parser.add_argument("--keep-unset", action="append", default=[], metavar="UNIT:NAME",
+                        help="keep NAME unset for UNIT exactly as today (UnsetEnvironment= in its drop-in)")
     parser.add_argument("--ignore-window", action="store_true")
     parser.add_argument("--systemd-dir", type=Path, default=SYSTEMD_DIR, help=argparse.SUPPRESS)
     parser.add_argument("--backup-root", type=Path, default=BACKUP_ROOT, help=argparse.SUPPRESS)
@@ -643,10 +772,18 @@ def main(argv=None, *, sd: Systemd | None = None, host: Host | None = None, prob
             if not args.backup:
                 raise SystemExit("rollback needs --backup <dir>")
             return rollback(args.backup, sd, host, args.systemd_dir)
+        keep: dict[str, set[str]] = {}
+        for unit_name, key in _pairs(args.keep_unset, ":", "--keep-unset"):
+            keep.setdefault(unit_name, set()).add(key)
         plan = build_plan(sd, args.app, dict(_pairs(args.prefer, "=", "--prefer")),
-                          set(args.accept_change), set(args.accept_missing))
+                          set(args.accept_change), set(args.accept_missing), keep)
         extra = []
-        if not plan.issues:
+        # Only an incomplete candidate (a conflict, an unrenderable value) stops the proofs; a
+        # missing critical name does not, so every other change is still verified and reported.
+        blocking = [i for i in plan.issues if i.startswith(("CONFLICT", "--prefer")) or "value contains" in i]
+        if blocking:
+            extra += pending_unverified(plan)
+        else:
             with_tmp = args.backup_root / f".plan-{secrets.token_hex(4)}"
             with_tmp.mkdir(parents=True, mode=0o700)
             try:

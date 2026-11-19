@@ -45,21 +45,47 @@ LEGACY_ENV_FILES = (
 )
 
 
-def load_canonical_env(path: Path | None = None) -> None:
-    """Fill names missing from os.environ from backend/.env. Never overrides a set name."""
-    from dotenv import load_dotenv
+# Per-unit exception, set by the VPS migration's systemd drop-in together with
+# `UnsetEnvironment=` for the same names: a comma-separated list of names this process must
+# keep UNSET even though backend/.env holds them (a unit that never had the name before the
+# consolidation keeps not having it). systemd removes them from the environment; this stops
+# the in-process gap filling below from putting them back.
+KEEP_UNSET_VARIABLE = "KBC_ENV_KEEP_UNSET"
 
-    load_dotenv(path or CANONICAL_ENV_FILE, override=False)
+
+def keep_unset_names(environ=None) -> frozenset[str]:
+    import os
+
+    raw = (os.environ if environ is None else environ).get(KEEP_UNSET_VARIABLE, "")
+    return frozenset(name.strip() for name in raw.split(",") if name.strip())
+
+
+def load_canonical_env(path: Path | None = None) -> None:
+    """
+    Fill names missing from os.environ from backend/.env. Never overrides a set name, and
+    never fills a name this unit keeps unset (KBC_ENV_KEEP_UNSET). Same semantics as
+    python-dotenv's load_dotenv(override=False) otherwise.
+    """
+    import os
+
+    for key, value in canonical_values(path).items():
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 def canonical_values(path: Path | None = None) -> dict[str, str]:
-    """The names and values in backend/.env (empty if the file is absent). Never printed."""
+    """
+    The names and values in backend/.env (empty if the file is absent), minus the names this
+    unit keeps unset. Never printed.
+    """
     path = path or CANONICAL_ENV_FILE
     if not path.is_file():
         return {}
     from dotenv import dotenv_values
 
-    return {key: value for key, value in dotenv_values(path).items() if value is not None}
+    skip = keep_unset_names()
+    return {key: value for key, value in dotenv_values(path).items()
+            if value is not None and key not in skip}
 
 
 # --- who reads what ---------------------------------------------------------------------------
@@ -77,19 +103,48 @@ DJANGO_VARIABLES = frozenset({
     "SOCIAL_MEDIA_SERVICE_TOKEN",
 })
 
-QA_CORE_VARIABLES = frozenset({          # app.config.settings.Settings (QA, Graph, media, recordings)
-    "APTEM_DATABASE_URL", "CREATOMATE_API_KEY", "DATABASE_URL", "DJANGO_SECRET_KEY",
-    "KBC_LECTURE_CALENDAR_USER_UPN", "LMS_DATABASE_URL", "MEDIA_POSITIVE_MOMENTS_FOLDER_ITEM_ID",
-    "MEDIA_RENDER_FPS", "MEDIA_RENDER_MAX_HEIGHT", "MEDIA_RENDER_MAX_WIDTH",
-    "MEDIA_RENDER_PROVIDER", "MEDIA_RUNNER_CONCURRENCY", "MEDIA_SHAREPOINT_DRIVE_ID",
-    "MEDIA_WEBHOOK_BASE_URL", "MEDIA_WEBHOOK_SECRET", "MICROSOFT_GRAPH_BASE_URL",
-    "MICROSOFT_GRAPH_CLIENT_ID", "MICROSOFT_GRAPH_CLIENT_SECRET", "MICROSOFT_GRAPH_SCOPE",
-    "MICROSOFT_GRAPH_TENANT_ID", "POSITIVE_MOMENTS_MODEL_NAME",
-    "POSITIVE_MOMENT_PADDING_AFTER_SECONDS", "POSITIVE_MOMENT_PADDING_BEFORE_SECONDS",
+# app.config.settings.Settings is built by every QA process, but its fields fall into two groups
+# with different consumers (verified 2026-11-19 by grepping every `settings.<field>` read):
+#   * the core fields - databases, Graph, the QA model, recording links - feed the pipeline,
+#     the Operations API, the scheduler and the backfill runner;
+#   * the media fields are read ONLY by app/media/factory.py, which only the media runner
+#     (app.cli.media) and Django's media views import. DJANGO_SECRET_KEY reaches Settings
+#     only as the media webhook HMAC fallback, so it belongs to the media group there.
+SETTINGS_CORE_VARIABLES = frozenset({
+    "APTEM_DATABASE_URL", "DATABASE_URL", "KBC_LECTURE_CALENDAR_USER_UPN", "LMS_DATABASE_URL",
+    "MICROSOFT_GRAPH_BASE_URL", "MICROSOFT_GRAPH_CLIENT_ID", "MICROSOFT_GRAPH_CLIENT_SECRET",
+    "MICROSOFT_GRAPH_SCOPE", "MICROSOFT_GRAPH_TENANT_ID",
     "QA_MODEL_API_KEY", "QA_MODEL_BASE_URL", "QA_MODEL_NAME",
     "RECORDING_FULL_MIN_EXPECTED_DURATION_RATIO", "RECORDING_LINK_CREATE_ORG_LINKS",
     "RECORDING_LINK_MODE", "RECORDING_LINK_SEARCH_REGION",
     "RECORDING_SHORT_FRAGMENT_MAX_EXPECTED_RATIO", "RECORDING_SIZE_DOMINANCE_RATIO",
+})
+
+MEDIA_VARIABLES = frozenset({
+    "CREATOMATE_API_KEY", "DJANGO_SECRET_KEY", "MEDIA_POSITIVE_MOMENTS_FOLDER_ITEM_ID",
+    "MEDIA_RENDER_FPS", "MEDIA_RENDER_MAX_HEIGHT", "MEDIA_RENDER_MAX_WIDTH",
+    "MEDIA_RENDER_PROVIDER", "MEDIA_RUNNER_CONCURRENCY", "MEDIA_SHAREPOINT_DRIVE_ID",
+    "MEDIA_WEBHOOK_BASE_URL", "MEDIA_WEBHOOK_SECRET", "POSITIVE_MOMENTS_MODEL_NAME",
+    "POSITIVE_MOMENT_PADDING_AFTER_SECONDS", "POSITIVE_MOMENT_PADDING_BEFORE_SECONDS",
+})
+
+QA_CORE_VARIABLES = SETTINGS_CORE_VARIABLES | MEDIA_VARIABLES     # every name Settings reads
+
+# Settings dataclass fields per group, for the migration's application-loading comparison.
+SETTINGS_CORE_FIELDS = frozenset({
+    "database_url", "aptem_database_url", "graph_tenant_id", "graph_client_id",
+    "graph_client_secret", "graph_scope", "graph_base_url", "calendar_user_upn",
+    "lms_database_url", "qa_model_api_key", "qa_model_name", "qa_model_base_url",
+    "recording_link_mode", "recording_link_search_region", "recording_link_create_org_links",
+    "recording_full_min_expected_duration_ratio", "recording_short_fragment_max_expected_ratio",
+    "recording_size_dominance_ratio",
+})
+SETTINGS_MEDIA_FIELDS = frozenset({
+    "creatomate_api_key", "media_render_provider", "media_render_max_width",
+    "media_render_max_height", "media_render_fps", "positive_moment_padding_before_seconds",
+    "positive_moment_padding_after_seconds", "media_runner_concurrency",
+    "media_sharepoint_drive_id", "media_positive_moments_folder_item_id",
+    "media_webhook_base_url", "media_webhook_secret", "positive_moments_model_name",
 })
 
 SCHEDULER_VARIABLES = frozenset({        # app.orchestration.scheduler.ENVIRONMENT_VARIABLES
@@ -137,17 +192,38 @@ COMPONENT_VARIABLES = {
     "bunny_cli": BUNNY_CLI_VARIABLES,
 }
 
-# The VPS units and the components each one runs. The four QA units share one
-# process image and import graph, so each is treated as reading every QA-side name
-# (conservative: a change to any of them is checked for every QA unit).
 QA_SIDE_VARIABLES = DJANGO_VARIABLES | QA_CORE_VARIABLES | SCHEDULER_VARIABLES | N8N_VARIABLES
 
+# The VPS units and exactly what each process reads, from its real import graph
+# (verified 2026-11-19; tests/unit/test_environment_consolidation.py keeps it honest):
+#   positive-moments            gunicorn + Django: Django settings, Settings via the
+#                               Operations API (core) and the media views (media), the n8n
+#                               precheck endpoint. Never SchedulerConfig.
+#   positive-moments-media      app.cli.media media-runner: Settings core + media. No Django,
+#                               no n8n, no scheduler.
+#   positive-moments-scheduler  app.cli.main scheduler daemon: Settings core, SchedulerConfig,
+#   positive-moments-backfill   n8n preflight (the backfill runner reads SCHEDULER_CRON /
+#                               _TIMEZONE for its quiet window). Never Django, never media.
+#   bunny-publisher             PublisherConfig only (it must not import app.config.settings).
+# Every name a unit reads is compared strictly before/after; a name it does NOT read may
+# become visible to it - that is reported, never silently accepted as a change it reads.
 UNIT_VARIABLES = {
-    "positive-moments": QA_SIDE_VARIABLES,
-    "positive-moments-media": QA_SIDE_VARIABLES,
-    "positive-moments-scheduler": QA_SIDE_VARIABLES,
-    "positive-moments-backfill": QA_SIDE_VARIABLES,
+    "positive-moments": DJANGO_VARIABLES | SETTINGS_CORE_VARIABLES | MEDIA_VARIABLES | N8N_VARIABLES,
+    "positive-moments-media": SETTINGS_CORE_VARIABLES | MEDIA_VARIABLES,
+    "positive-moments-scheduler": SETTINGS_CORE_VARIABLES | SCHEDULER_VARIABLES | N8N_VARIABLES,
+    "positive-moments-backfill": SETTINGS_CORE_VARIABLES | SCHEDULER_VARIABLES | N8N_VARIABLES,
     "bunny-publisher": PUBLISHER_VARIABLES,
+}
+
+# What the migration's application-loading probe compares per unit: probe label -> the
+# fields that matter (None = every field). A probe that RAISES is always a difference.
+UNIT_PROBES = {
+    "positive-moments": {"settings": SETTINGS_CORE_FIELDS | SETTINGS_MEDIA_FIELDS,
+                         "n8n": None, "django": None},
+    "positive-moments-media": {"settings": SETTINGS_CORE_FIELDS | SETTINGS_MEDIA_FIELDS},
+    "positive-moments-scheduler": {"settings": SETTINGS_CORE_FIELDS, "scheduler": None, "n8n": None},
+    "positive-moments-backfill": {"settings": SETTINGS_CORE_FIELDS, "scheduler": None, "n8n": None},
+    "bunny-publisher": {"publisher": None, "publisher_problems": None},
 }
 
 # Units whose Python code ALSO fills gaps from backend/.env (load_dotenv, override=False).
