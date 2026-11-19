@@ -185,8 +185,9 @@ class FakeSystemd:
 
     def __init__(self, units, systemd_dir, canonical):
         self.units, self.systemd_dir, self.canonical = units, systemd_dir, canonical
-        self.original = {name: list(unit["files"]) for name, unit in units.items()}
+        self.original = {name: (list(unit["files"]), unit.get("environment", "")) for name, unit in units.items()}
         self.tamper = None
+        self.running = {}                   # unit -> set of NAMES in the running process
 
     def show(self, unit, prop):
         u = self.units.get(unit)
@@ -195,7 +196,11 @@ class FakeSystemd:
         if prop == "EnvironmentFiles":
             return "\n".join(f"{p} (ignore_errors={'yes' if i else 'no'})" for p, i in u["files"])
         return {"Environment": u.get("environment", ""), "User": "www-data",
-                "ExecStart": "python -m app.cli.x run", "ExecStartPre": ""}[prop]
+                "ExecStart": u.get("exec", "python -m app.cli.x run"), "ExecStartPre": "",
+                "UnsetEnvironment": u.get("unset", ""), "MainPID": "0"}[prop]
+
+    def running_names(self, unit):
+        return self.running.get(unit)
 
     def parse_env_file(self, path):
         values = consolidate.dotenv_parse(Path(path))
@@ -203,12 +208,17 @@ class FakeSystemd:
 
     def daemon_reload(self):
         for name, unit in self.units.items():
+            files, environment_line = self.original[name]
             dropin = self.systemd_dir / f"{name}.service.d" / consolidate.DROPIN_NAME
-            if dropin.is_file() and "EnvironmentFile=\n" in dropin.read_text(encoding="utf-8"):
-                path = dropin.read_text(encoding="utf-8").split("EnvironmentFile=\nEnvironmentFile=")[1].strip()
-                unit["files"] = [(Path(path), False)]
+            text = dropin.read_text(encoding="utf-8") if dropin.is_file() else ""
+            if "EnvironmentFile=\n" in text:
+                lines = text.splitlines()
+                unit["files"] = [(Path(lines[lines.index("EnvironmentFile=") + 1].split("=", 1)[1]), False)]
+                extra = [l.split("=", 1)[1] for l in lines if l.startswith("Environment=")]
+                unit["environment"] = " ".join(filter(None, [environment_line, *extra]))
+                unit["unset"] = " ".join(l.split("=", 1)[1] for l in lines if l.startswith("UnsetEnvironment="))
             else:
-                unit["files"] = list(self.original[name])
+                unit["files"], unit["environment"], unit["unset"] = list(files), environment_line, ""
 
 
 SHARED = {"DATABASE_URL": f"postgresql://u:{SECRET}@pool.example.invalid/qa",
@@ -257,9 +267,21 @@ def vps(tmp_path):
 
 
 def identical_probe(app, unit, env, salt):
-    """Stands in for the child-process probe: a digest of exactly the names the unit reads."""
-    reads = environment.UNIT_VARIABLES[unit]
-    return {"config": {k: str(hash((salt, env.get(k)))) for k in sorted(reads)}}
+    """
+    Stands in for the child-process probe: every name the unit reads, under each label the unit
+    compares (as the always-compared __error__ key where the label filters fields).
+    """
+    reads = sorted(environment.UNIT_VARIABLES[unit])
+    out = {}
+    for label, fields in environment.UNIT_PROBES[unit].items():
+        out[label] = ({k: str(hash((salt, env.get(k)))) for k in reads} if fields is None
+                      else {"__error__": str(hash((salt, tuple(env.get(k) for k in reads))))})
+    return out
+
+
+def real_probe(app, unit, env, salt):
+    """The real child-process probe, run against this checkout's code."""
+    return consolidate.run_probe(REPO, unit, env, salt)
 
 
 def run(vps, *args, host=None, probe=identical_probe):
@@ -302,7 +324,7 @@ def test_rollback_restores_the_previous_file_and_every_units_original_files(vps,
     assert run(vps, "rollback", "--backup", str(backup)) == consolidate.EXIT_OK
     assert vps["canonical"].read_bytes() == original
     for name, unit in vps["sd"].units.items():
-        assert unit["files"] == vps["sd"].original[name]
+        assert unit["files"] == vps["sd"].original[name][0]
         assert not (vps["systemd_dir"] / f"{name}.service.d" / consolidate.DROPIN_NAME).exists()
     assert "ROLLED BACK" in capsys.readouterr().out
 
@@ -426,3 +448,231 @@ def test_the_real_probe_builds_every_config_without_files_network_or_database():
     assert changed["settings"]["qa_model_name"] != qa["settings"]["qa_model_name"]
     publisher = consolidate.run_probe(REPO, "bunny-publisher", env, salt)
     assert set(publisher) == {"publisher", "publisher_problems"}
+
+
+# --- the production layout (names as on the VPS; every value synthetic) ---------------------------
+
+PROD_WEB = """APTEM_DATABASE_URL BUNNY_STAGING_ACCOUNT_API_KEY BUNNY_STAGING_API_KEY BUNNY_STAGING_CDN_HOSTNAME
+BUNNY_STAGING_LIBRARY_ID COMMUNICATION_CENTRE_DATABASE_URL CORS_ALLOWED_ORIGINS CREATOMATE_API_KEY
+DASHBOARD_PASSWORD DASHBOARD_USERNAME DATABASE_URL DJANGO_ALLOWED_HOSTS INITIAL_TEST_MODE
+KBC_LECTURE_CALENDAR_USER_UPN LMS_DATABASE_URL MEDIA_POSITIVE_MOMENTS_FOLDER_ITEM_ID MEDIA_SHAREPOINT_DRIVE_ID
+MICROSOFT_CLIENT_ID_2 MICROSOFT_CLIENT_SECRET_2 MICROSOFT_GRAPH_BASE_URL MICROSOFT_GRAPH_CLIENT_ID
+MICROSOFT_GRAPH_CLIENT_SECRET MICROSOFT_GRAPH_SCOPE MICROSOFT_GRAPH_TENANT_ID N8N_API_KEY N8N_BASE_URL
+PUBLISHER_LMS_LIBRARY_ID PUBLISHER_LMS_PLAYBACK_ENABLED QA_MODEL_API_KEY SOCIAL_MEDIA_SERVICE_TOKEN
+PUBLISHER_LMS_SERVICE_TOKENS MICROSOFT_SSO_REDIRECT_URI MICROSOFT_SSO_EMAIL_DOMAINS""".split()
+PROD_RUNTIME = """APTEM_DATABASE_URL DATABASE_URL KBC_LECTURE_CALENDAR_USER_UPN MICROSOFT_GRAPH_BASE_URL
+MICROSOFT_GRAPH_CLIENT_ID MICROSOFT_GRAPH_CLIENT_SECRET MICROSOFT_GRAPH_SCOPE MICROSOFT_GRAPH_TENANT_ID
+N8N_API_KEY N8N_BASE_URL QA_MODEL_API_KEY SCHEDULER_ALLOW_GRAPH SCHEDULER_ALLOW_LEGACY_WRITES
+SCHEDULER_ALLOW_PROVIDER SCHEDULER_CRON SCHEDULER_DISCOVER SCHEDULER_ENABLED SCHEDULER_LOOKBACK_DAYS
+SCHEDULER_TIMEZONE""".split()
+PROD_PUBLISHER = """APTEM_DATABASE_URL BUNNY_PRODUCTION_ACCOUNT_API_KEY BUNNY_PRODUCTION_API_KEY
+BUNNY_PRODUCTION_LIBRARY_ID BUNNY_STAGING_ACCOUNT_API_KEY BUNNY_STAGING_API_KEY BUNNY_STAGING_CDN_HOSTNAME
+BUNNY_STAGING_LIBRARY_ID KBC_LECTURE_CALENDAR_USER_UPN LMS_DATABASE_URL MICROSOFT_GRAPH_BASE_URL
+MICROSOFT_GRAPH_CLIENT_ID MICROSOFT_GRAPH_CLIENT_SECRET MICROSOFT_GRAPH_SCOPE MICROSOFT_GRAPH_TENANT_ID
+PUBLISHER_ALERT_DELIVERY_ENABLED PUBLISHER_ALERT_DESTINATION PUBLISHER_DATABASE_URL
+PUBLISHER_DISCOVERY_INTERVAL_SECONDS PUBLISHER_DISCOVER_CALENDAR PUBLISHER_ENCODING_STALL_HOURS
+PUBLISHER_END_DATE PUBLISHER_FULL_RECONCILE_AT PUBLISHER_JOB_LEASE_SECONDS PUBLISHER_LIGHT_RECONCILE_HOURS
+PUBLISHER_LMS_TEST_PROGRAMMES PUBLISHER_LOOKBACK_DAYS PUBLISHER_MAX_IMPORTS_IN_FLIGHT
+PUBLISHER_MAX_IMPORT_GENERATIONS PUBLISHER_MODE PUBLISHER_POLL_SECONDS PUBLISHER_PRODUCTION_WRITE_ENABLED
+PUBLISHER_START_DATE PUBLISHER_WORKERS RECORDING_LINK_SEARCH_REGION""".split()
+PROD_VALUES = {
+    "SCHEDULER_CRON": "0 21,23 * * *", "SCHEDULER_TIMEZONE": "Africa/Cairo", "SCHEDULER_LOOKBACK_DAYS": "3",
+    "SCHEDULER_ENABLED": "true", "SCHEDULER_DISCOVER": "true", "SCHEDULER_ALLOW_GRAPH": "true",
+    "SCHEDULER_ALLOW_PROVIDER": "true", "SCHEDULER_ALLOW_LEGACY_WRITES": "true",
+    "MICROSOFT_GRAPH_SCOPE": "https://graph.microsoft.com/.default",
+    "MICROSOFT_GRAPH_BASE_URL": "https://graph.microsoft.com/v1.0",
+    "PUBLISHER_MODE": "PRODUCTION_WRITE", "PUBLISHER_PRODUCTION_WRITE_ENABLED": "true",
+    "PUBLISHER_START_DATE": "2026-10-23", "PUBLISHER_END_DATE": "", "PUBLISHER_FULL_RECONCILE_AT": "05:00",
+    "PUBLISHER_DISCOVERY_INTERVAL_SECONDS": "300", "PUBLISHER_ENCODING_STALL_HOURS": "6",
+    "PUBLISHER_JOB_LEASE_SECONDS": "900", "PUBLISHER_LIGHT_RECONCILE_HOURS": "6", "PUBLISHER_LOOKBACK_DAYS": "3",
+    "PUBLISHER_MAX_IMPORTS_IN_FLIGHT": "2", "PUBLISHER_MAX_IMPORT_GENERATIONS": "3", "PUBLISHER_POLL_SECONDS": "5",
+    "PUBLISHER_WORKERS": "2", "PUBLISHER_DISCOVER_CALENDAR": "true", "PUBLISHER_ALERT_DELIVERY_ENABLED": "false",
+    "BUNNY_STAGING_LIBRARY_ID": "786045", "BUNNY_PRODUCTION_LIBRARY_ID": "786045",
+    "PUBLISHER_LMS_LIBRARY_ID": "786045", "PUBLISHER_LMS_PLAYBACK_ENABLED": "true",
+    "RECORDING_LINK_SEARCH_REGION": "",                      # blank on the VPS: the platform default
+    "CORS_ALLOWED_ORIGINS": "https://positive-moments.example.invalid",
+    "DJANGO_ALLOWED_HOSTS": "positive-moments.example.invalid",
+    "MICROSOFT_SSO_REDIRECT_URI": "https://positive-moments.example.invalid/api/auth/sso/callback",
+    "MICROSOFT_SSO_EMAIL_DOMAINS": "example.invalid",
+}
+
+
+def _prod_value(name):
+    if name in PROD_VALUES:
+        return PROD_VALUES[name]
+    if name.endswith("DATABASE_URL"):
+        return f"postgresql://u:{SECRET}@{name.lower().replace('_', '-')}.example.invalid/db"
+    return f"{SECRET}-{name.lower()}"
+
+
+@pytest.fixture
+def prod(tmp_path):
+    app = tmp_path / "app"
+    files = {}
+    for key, names in (("web", PROD_WEB), ("runtime", PROD_RUNTIME), ("publisher", PROD_PUBLISHER)):
+        path = {"web": app / "backend" / "config" / ".env", "runtime": app / "backend" / "qa-core.runtime.env",
+                "publisher": app / "backend" / "config" / "publisher.env"}[key]
+        files[key] = _write(path, {name: _prod_value(name) for name in names})
+    canonical = app / "backend" / ".env"
+    _write(canonical, {"KBC_UNRELATED_FLAG": "1"})              # the VPS's small backend/.env
+    base = "PYTHONPATH=/var/www/Positive-moments PATH=/var/www/Positive-moments/backend/venv/bin:/usr/bin:/bin"
+    units = {
+        "positive-moments": {"files": [(files["web"], False)], "environment": base},
+        "positive-moments-media": {"files": [(files["web"], False)], "environment": base},
+        "positive-moments-scheduler": {"files": [(files["runtime"], False)], "environment": base},
+        "positive-moments-backfill": {"files": [(files["runtime"], False)], "environment": base},
+        "bunny-publisher": {"files": [(files["publisher"], False)], "environment": base + " TZ=Africa/Cairo"},
+    }
+    systemd_dir = tmp_path / "systemd"
+    sd = FakeSystemd(units, systemd_dir, canonical)
+    sd.running["positive-moments"] = set(PROD_WEB) | {"PATH", "PYTHONPATH"}   # no DJANGO_SECRET_KEY live
+    return {"app": app, "sd": sd, "systemd_dir": systemd_dir, "backups": tmp_path / "backups",
+            "canonical": canonical, "old": tuple(files.values())}
+
+
+def _refusals(out):
+    return [line for line in out.splitlines() if line.startswith("REFUSED: ")]
+
+
+def test_production_layout_refuses_only_the_genuine_changes(prod, capsys):
+    snapshot = {p: p.read_bytes() for p in (*prod["old"], prod["canonical"])}
+    assert run(prod, "plan", probe=real_probe) == consolidate.EXIT_REFUSED
+    out = capsys.readouterr().out
+    refused = _refusals(out)
+    assert len(refused) == 3, refused
+    assert any(r.startswith("REFUSED: MISSING positive-moments:DJANGO_SECRET_KEY: absent today and after "
+                            "consolidation (the running process does not have it either") for r in refused)
+    for unit in ("positive-moments-scheduler", "positive-moments-backfill"):
+        assert any(r.startswith(f"REFUSED: CHANGE {unit}:LMS_DATABASE_URL: unset -> set changes what") and
+                   "settings.lms_database_url" in r for r in refused)
+    # Harmless: blank RECORDING_LINK_SEARCH_REGION equals the default; proven, not assumed.
+    assert "positive-moments-scheduler:RECORDING_LINK_SEARCH_REGION: unset -> set, VERIFIED no effect" in out
+    # The false positives of the deployed version are now harmless visibility, listed by name.
+    assert re.search(r"visible only \(harmless: positive-moments-scheduler never reads these\).*DASHBOARD_PASSWORD", out)
+    assert re.search(r"visible only \(harmless: positive-moments never reads these\).*SCHEDULER_CRON", out)
+    assert not any("SCHEDULER_" in r or "DASHBOARD" in r or "CORS" in r for r in refused)
+    assert SECRET not in out and "postgresql://" not in out
+    assert {p: p.read_bytes() for p in snapshot} == snapshot and not prod["systemd_dir"].exists()
+
+
+def test_a_non_default_recording_region_is_a_real_change_and_stays_refused(prod, capsys):
+    publisher = prod["old"][2]
+    publisher.write_text(publisher.read_text(encoding="utf-8").replace(
+        "RECORDING_LINK_SEARCH_REGION=\n", "RECORDING_LINK_SEARCH_REGION=EUR\n"), encoding="utf-8")
+    assert run(prod, "plan", probe=real_probe) == consolidate.EXIT_REFUSED
+    refused = _refusals(capsys.readouterr().out)
+    for unit in ("positive-moments", "positive-moments-media", "positive-moments-scheduler",
+                 "positive-moments-backfill"):
+        assert any(r.startswith(f"REFUSED: CHANGE {unit}:RECORDING_LINK_SEARCH_REGION") for r in refused), unit
+
+
+def test_keep_unset_preserves_every_units_exact_configuration_through_apply_and_rollback(prod, capsys):
+    before = consolidate.build_plan(prod["sd"], prod["app"], {}, set(), set()).before
+    original = {p: p.read_bytes() for p in (*prod["old"], prod["canonical"])}
+    args = ["--keep-unset", "positive-moments-scheduler:LMS_DATABASE_URL",
+            "--keep-unset", "positive-moments-backfill:LMS_DATABASE_URL",
+            "--accept-missing", "positive-moments:DJANGO_SECRET_KEY"]
+    assert run(prod, "apply", *args, probe=real_probe) == consolidate.EXIT_OK
+    out = capsys.readouterr().out
+    assert "VERDICT: READY" in out and "APPLIED" in out and SECRET not in out and "postgresql://" not in out
+    dropin = (prod["systemd_dir"] / "positive-moments-scheduler.service.d" / consolidate.DROPIN_NAME).read_text()
+    assert "UnsetEnvironment=LMS_DATABASE_URL" in dropin and "KBC_ENV_KEEP_UNSET=LMS_DATABASE_URL" in dropin
+    canonical_values = consolidate.dotenv_parse(prod["canonical"])
+    for unit, reads in environment.UNIT_VARIABLES.items():          # exact, value by value
+        live = dict(consolidate.read_unit(prod["sd"], unit).environment)
+        live.update(canonical_values)
+        for key in prod["sd"].show(unit, "UnsetEnvironment").split():
+            live.pop(key, None)
+        # Exact for every name the unit reads, except names the plan PROVED have no effect
+        # (here: a blank RECORDING_LINK_SEARCH_REGION, identical to the code default).
+        proven = set(re.findall(rf"^note: {re.escape(unit)}:([A-Z0-9_]+): unset -> set, VERIFIED no effect",
+                                out, re.MULTILINE))
+        assert proven <= {"RECORDING_LINK_SEARCH_REGION"}, proven
+        assert {k: live.get(k) for k in reads - proven} == {k: before[unit].get(k) for k in reads - proven}, unit
+    assert canonical_values["PUBLISHER_DATABASE_URL"] != canonical_values["DATABASE_URL"]
+    assert canonical_values["PUBLISHER_MODE"] == "PRODUCTION_WRITE"
+    assert {p: p.read_bytes() for p in prod["old"]} == {p: original[p] for p in prod["old"]}
+    backup = next(p for p in prod["backups"].iterdir() if not p.name.startswith("."))
+    if os.name != "nt":
+        assert oct(backup.stat().st_mode & 0o777) == "0o700"
+    assert run(prod, "rollback", "--backup", str(backup)) == consolidate.EXIT_OK
+    assert prod["canonical"].read_bytes() == original[prod["canonical"]]
+    for unit in environment.UNIT_VARIABLES:
+        assert prod["sd"].show(unit, "UnsetEnvironment") == ""
+        assert not (prod["systemd_dir"] / f"{unit}.service.d" / consolidate.DROPIN_NAME).exists()
+
+
+def test_keep_unset_is_refused_for_a_name_the_unit_has_today(prod, capsys):
+    assert run(prod, "plan", "--keep-unset", "positive-moments:LMS_DATABASE_URL") == consolidate.EXIT_REFUSED
+    assert "the unit HAS LMS_DATABASE_URL today" in capsys.readouterr().out
+
+
+def test_a_secret_supplied_by_an_unmodelled_mechanism_is_called_out(prod, capsys):
+    prod["sd"].running["positive-moments"].add("DJANGO_SECRET_KEY")
+    assert run(prod, "plan") == consolidate.EXIT_REFUSED
+    assert "YET the running process has it" in capsys.readouterr().out
+
+
+def test_a_secret_from_the_units_environment_line_is_modelled_and_kept(prod, capsys):
+    """Environment= stays in the unit, so a secret supplied there is present before AND after."""
+    web = prod["sd"].units["positive-moments"]
+    web["environment"] += f" DJANGO_SECRET_KEY={SECRET}"
+    prod["sd"].original["positive-moments"] = (web["files"], web["environment"])
+    plan = consolidate.build_plan(prod["sd"], prod["app"], {}, set(), set())
+    assert plan.before["positive-moments"]["DJANGO_SECRET_KEY"] == plan.after["positive-moments"]["DJANGO_SECRET_KEY"]
+    assert not any("DJANGO_SECRET_KEY" in issue for issue in plan.issues)
+    assert "DJANGO_SECRET_KEY" not in plan.candidate          # never copied into backend/.env
+
+
+def test_keep_unset_names_are_never_refilled_from_backend_env(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("LMS_DATABASE_URL=postgresql://u:p@lms.example.invalid/x\nOTHER_NAME=1\n", encoding="utf-8")
+    monkeypatch.setattr(environment, "CANONICAL_ENV_FILE", path)
+    monkeypatch.delenv("LMS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("OTHER_NAME", raising=False)
+    monkeypatch.setenv(environment.KEEP_UNSET_VARIABLE, "LMS_DATABASE_URL")
+    environment.load_canonical_env()
+    assert "LMS_DATABASE_URL" not in os.environ and os.environ["OTHER_NAME"] == "1"
+    assert "LMS_DATABASE_URL" not in environment.canonical_values()
+
+
+# --- the per-unit registry matches the real consumers -------------------------------------------
+
+def test_settings_fields_split_exactly_into_core_and_media():
+    from dataclasses import fields
+
+    from app.config.settings import Settings
+    names = {f.name for f in fields(Settings)}
+    assert environment.SETTINGS_CORE_FIELDS | environment.SETTINGS_MEDIA_FIELDS == names
+    assert not environment.SETTINGS_CORE_FIELDS & environment.SETTINGS_MEDIA_FIELDS
+
+
+def test_media_settings_are_consumed_only_by_the_media_runner_and_django_media_views():
+    users = set()
+    for path in [*REPO.joinpath("app").rglob("*.py"), *REPO.joinpath("backend").rglob("*.py")]:
+        rel = path.relative_to(REPO).as_posix()
+        if "/tests/" in rel or rel.startswith("backend/venv") or rel == "app/config/settings.py":
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if any(re.search(rf"\.{f}\b", text) for f in environment.SETTINGS_MEDIA_FIELDS):
+            users.add(rel)
+    assert users <= {"app/media/factory.py", "backend/operations/media_views.py"}, users
+    importers = {p.relative_to(REPO).as_posix() for p in [*REPO.joinpath("app").rglob("*.py"),
+                                                         *REPO.joinpath("backend").rglob("*.py")]
+                 if "/tests/" not in p.as_posix() and "venv" not in p.as_posix()
+                 and "app.media.factory" in p.read_text(encoding="utf-8", errors="replace")}
+    assert importers <= {"app/cli/media.py", "backend/operations/media_views.py"}, importers
+
+
+def test_the_web_process_never_reads_the_scheduler_config_and_the_media_runner_no_n8n_or_scheduler():
+    backend = [p for p in REPO.joinpath("backend").rglob("*.py") if "tests" not in p.parts and "venv" not in p.parts]
+    for path in backend:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert "SchedulerConfig" not in text and "nightly_quiet_window" not in text \
+            and "build_scheduler" not in text and "build_backfill_runner" not in text, path
+    media = (REPO / "app" / "cli" / "media.py").read_text(encoding="utf-8")
+    imports = "\n".join(l for l in media.splitlines() if re.match(r"\s*(from|import)\s", l))
+    assert "n8n" not in imports and "scheduler" not in imports and "config.settings import Settings" in imports
+    assert not environment.DJANGO_VARIABLES & (environment.UNIT_VARIABLES["positive-moments-scheduler"]
+                                               - environment.SETTINGS_CORE_VARIABLES - environment.N8N_VARIABLES)
+    assert "DATABASE_URL" not in environment.UNIT_VARIABLES["bunny-publisher"]
