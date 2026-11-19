@@ -771,6 +771,10 @@ def main(argv: list[str] | None = None) -> int:
             # No Graph call, no provider call, no transcript read, and nothing
             # is ever written to public.kbc_attendance.
             settings.require_database()
+            # The same source selection the orchestrator uses: kbc_attendance first, the
+            # LMS register (lms_sync foreign tables on this connection) for lectures it
+            # does not answer.
+            from app.attendance.lms_source import LmsAttendanceSource
             resolution = SpeakerResolutionService(
                 inventory_repository=SpeakerInventoryReadRepository(),
                 attendance_repository=AttendanceSourceRepository(),
@@ -778,7 +782,8 @@ def main(argv: list[str] | None = None) -> int:
                 identity_repository=SpeakerIdentityRepository(),
                 role_repository=SpeakerRoleRepository(),
                 run_repository=SpeakerResolutionRunRepository(),
-                legacy_diagnostic_repository=None)
+                legacy_diagnostic_repository=None,
+                lms_attendance_source=LmsAttendanceSource())
             engagement = EngagementService(
                 input_repository=EngagementInputRepository(),
                 engagement_repository=EngagementRepository(),

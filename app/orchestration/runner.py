@@ -36,6 +36,7 @@ instructed not to.
 import logging
 
 from app.attendance.coverage import classify, is_authoritative
+from app.attendance.lms_source import LmsAttendanceSource
 from app.attendance.recovery import AttendanceRecoveryService
 from app.attendance.resolver import RESOLVER_VERSION
 from app.attendance.roles import ROLE_ALGORITHM_VERSION
@@ -607,6 +608,8 @@ class StageRunner:
     # -- service construction -----------------------------------------------
 
     def _resolution_service(self):
+        # The LMS register (lms_sync foreign tables on this same connection) answers only
+        # lectures kbc_attendance does not.
         return SpeakerResolutionService(
             inventory_repository=SpeakerInventoryReadRepository(),
             attendance_repository=AttendanceSourceRepository(),
@@ -614,7 +617,8 @@ class StageRunner:
             identity_repository=SpeakerIdentityRepository(),
             role_repository=SpeakerRoleRepository(),
             run_repository=SpeakerResolutionRunRepository(),
-            legacy_diagnostic_repository=None)
+            legacy_diagnostic_repository=None,
+            lms_attendance_source=LmsAttendanceSource())
 
     def _engagement_service(self):
         return EngagementService(

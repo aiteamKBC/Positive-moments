@@ -12,7 +12,9 @@ import logging
 import time
 import uuid
 
+from app.attendance.coverage import classify, is_authoritative
 from app.attendance.legacy_matching import LEGACY_MATCHER_VERSION
+from app.attendance.lms_source import LMS_ATTENDANCE_RULE_VERSION, LMS_ATTENDANCE_SOURCE
 from app.attendance.resolver import (
     AMBIGUOUS,
     EXACT_MATCH,
@@ -65,6 +67,9 @@ class AttendanceScopeError(RuntimeError):
     """A lecture-scoped attendance operation cannot be performed as asked."""
 
 
+KBC_ATTENDANCE_SOURCE = "public.kbc_attendance"
+
+
 class SpeakerResolutionService:
     def __init__(self, *, inventory_repository, attendance_repository,
                  snapshot_repository, identity_repository, role_repository,
@@ -73,8 +78,12 @@ class SpeakerResolutionService:
                  resolver_version: str = RESOLVER_VERSION,
                  role_algorithm_version: str = ROLE_ALGORITHM_VERSION,
                  inventory_version: str = SPEAKER_INVENTORY_VERSION,
-                 parser_version: str = PARSER_VERSION):
+                 parser_version: str = PARSER_VERSION,
+                 lms_attendance_source=None):
         self.inventory_repository = inventory_repository
+        # Optional (app.attendance.lms_source). None = exactly the kbc_attendance-only
+        # behaviour.
+        self.lms_attendance_source = lms_attendance_source
         self.attendance_repository = attendance_repository
         self.snapshot_repository = snapshot_repository
         self.identity_repository = identity_repository
@@ -109,7 +118,9 @@ class SpeakerResolutionService:
         external source again through the SAME validated contract
         (`AttendanceSourceRepository`, exact date + exact normalized module +
         `Attendance = 1`) and nothing else: no Graph call, no calendar lookup,
-        no transcript work.
+        no transcript work. When that source does not answer and the LMS
+        attendance source is supplied, the LMS register is read instead (see
+        `_lms_decision` and app/attendance/lms_source.py).
 
         Snapshots are content-addressed on the roster fingerprint, so an
         unchanged source produces the SAME snapshot id and the write is a
@@ -237,6 +248,13 @@ class SpeakerResolutionService:
         # every existing snapshot id stays exactly what it was.
         unfiltered = self.attendance_repository.count_rows_any_status(
             connection, lecture["session_date"], module_normalized)
+        source = KBC_ATTENDANCE_SOURCE
+        lms = self._lms_decision(connection, lecture, roster, unfiltered)
+        if lms is not None and lms.used:
+            source = LMS_ATTENDANCE_SOURCE
+            roster = build_roster(list(lms.rows), version=self.attendance_resolution_version)
+            unfiltered = {"source_rows_any_status": lms.source_rows_any_status,
+                          "source_rows_present": lms.source_rows_present}
         members = roster["members"]
 
         fingerprint = roster_fingerprint(
@@ -259,9 +277,12 @@ class SpeakerResolutionService:
             **{key: roster[key] for key in (
                 "source_row_count", "present_row_count", "excluded_bot_count",
                 "excluded_no_name_count", "deduplicated_count", "effective_member_count")},
-            "metadata": {"attendance_source": "public.kbc_attendance",
-                         "query_contract": "exact session_date + exact normalized module "
-                                           "+ Attendance = 1",
+            "metadata": {"attendance_source": source,
+                         "query_contract": (
+                             "VERIFIED meeting_key_start_v2 occurrence links + final "
+                             "attendance_status (" + LMS_ATTENDANCE_RULE_VERSION + ")"
+                             if source == LMS_ATTENDANCE_SOURCE else
+                             "exact session_date + exact normalized module + Attendance = 1"),
                          "bot_filter_version": BOT_FILTER_VERSION,
                          "roster_rule": roster_rule(self.attendance_resolution_version),
                          "excluded_makeup_count": roster["excluded_makeup_count"],
@@ -269,6 +290,9 @@ class SpeakerResolutionService:
                          "source_rows_any_status": unfiltered["source_rows_any_status"],
                          "source_rows_present": unfiltered["source_rows_present"]},
         }
+        if lms is not None:
+            # Ids, statuses and counts only: which occurrences, which match, which rows.
+            snapshot["metadata"]["lms_attendance"] = lms.provenance()
 
         speakers = lecture["speakers"]
         counters["speakers_considered"] += len(speakers)
@@ -368,6 +392,8 @@ class SpeakerResolutionService:
             "attendance_present_row_count": roster["present_row_count"],
             "attendance_source_rows_any_status": unfiltered["source_rows_any_status"],
             "attendance_resolution_version": self.attendance_resolution_version,
+            "attendance_source": source,
+            "lms_attendance": lms.provenance() if lms is not None else None,
             "excluded_makeup_count": roster["excluded_makeup_count"],
             "excluded_bot_count": roster["excluded_bot_count"],
             "excluded_no_name_count": roster["excluded_no_name_count"],
@@ -394,6 +420,29 @@ class SpeakerResolutionService:
             # Kept out of the report body; the label itself is never logged.
             "_trainer_label": trainer_label,
         }
+
+    def _lms_decision(self, connection, lecture, kbc_roster, kbc_unfiltered):
+        """
+        Ask the LMS register ONLY when kbc_attendance does not answer for this lecture.
+
+          * kbc_attendance answers (members, or a confirmed zero) -> kbc, LMS not asked:
+            exactly the behaviour, and the snapshot id, every lecture had before.
+          * otherwise -> the LMS decision. The caller uses it only when it says USED; any
+            other decision leaves the kbc result, i.e. the lecture keeps waiting.
+
+        Lectures that already hold an authoritative snapshot are not re-resolved by the
+        pipeline (their ATTENDANCE stage is COMPLETE), so their history is untouched.
+        """
+        if self.lms_attendance_source is None:
+            return None
+        kbc_status = classify(
+            source_row_count=kbc_roster["source_row_count"],
+            present_row_count=kbc_roster["present_row_count"],
+            effective_member_count=kbc_roster["effective_member_count"],
+            source_rows_any_status=kbc_unfiltered["source_rows_any_status"])
+        if is_authoritative(kbc_status):
+            return None
+        return self.lms_attendance_source.decide(connection, lecture["lecture_id"])
 
     def _legacy_trainer_parity(self, connection, target_date, results) -> dict:
         """
