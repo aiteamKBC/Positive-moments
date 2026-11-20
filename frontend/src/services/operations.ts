@@ -27,6 +27,7 @@ import type {
   TranscriptRecoveryQueue,
   TranscriptUploadPreview,
   TranscriptUploadResult,
+  TeamsTranscriptRetryStatus,
   TranscriptUploadStatus,
 } from '../types/operations'
 
@@ -171,6 +172,20 @@ export async function storeTranscriptUpload(lectureId: string, file: File, artif
   return (await api.post<TranscriptUploadResult>(
     `${BASE}/lectures/${lectureId}/transcript-upload/store/`,
     uploadForm(file, { artifact_id: artifactId, expected_sha256: sha256 }), { headers: MULTIPART })).data
+}
+
+/** Retry Teams transcript: whether it is offered for this lecture, its plan and latest job. Read-only. */
+export async function getTeamsTranscriptRetry(lectureId: string) {
+  return (await api.get<TeamsTranscriptRetryStatus>(`${BASE}/lectures/${lectureId}/teams-transcript-retry/`)).data
+}
+
+/**
+ * Queue "fetch this lecture's transcript from Teams again, then finish its pipeline" for the
+ * background worker. Returns at once; repeating it while a job is active returns that job.
+ */
+export async function queueTeamsTranscriptRetry(lectureId: string) {
+  return (await api.post<ProcessingQueueResult>(
+    `${BASE}/lectures/${lectureId}/teams-transcript-retry/queue/`, {})).data
 }
 
 /**

@@ -211,6 +211,46 @@ def build_manual_transcript_service(settings, *, allow_provider: bool = False,
         orchestrator_factory=orchestrator_factory, allow_provider=allow_provider)
 
 
+def build_teams_transcript_retry(settings, *, worker: bool = False,
+                                 perfect_eligibility_version=None):
+    """
+    Retry Teams transcript (app/orchestration/teams_transcript_retry.py).
+
+    The console (`worker=False`) only plans and queues: no Graph client, no orchestrator. The
+    background worker (`worker=True`) gets the Publisher's lecture-scoped Teams transcript worker
+    on its own autocommit connection, and the same lecture-scoped orchestrator the manual
+    transcript worker uses, with the QA provider allowed.
+    """
+    from app.orchestration.teams_transcript_retry import TeamsTranscriptRetry
+
+    resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
+                              recording_link_mode=_recording_link_mode(settings))
+    if not worker:
+        return TeamsTranscriptRetry(resolver=resolver)
+
+    import psycopg
+
+    from app.graph.auth import build_graph_client
+    from app.publisher.config import DB_CONNECT_KWARGS
+    from app.publisher.transcripts import TranscriptWorker
+    from app.transcripts.graph import TranscriptGateway
+
+    graph = build_graph_client(settings)
+    teams = TranscriptWorker(
+        connect=lambda: psycopg.connect(settings.database_url, prepare_threshold=None,
+                                        **DB_CONNECT_KWARGS),
+        gateway=TranscriptGateway(graph), graph_client=graph)
+
+    def orchestrator_factory(lecture_id):
+        return build_orchestrator(
+            settings, dry_run=False, discover=False, allow_provider=True,
+            perfect_eligibility_version=perfect_eligibility_version,
+            lecture_scope=[str(lecture_id)])
+
+    return TeamsTranscriptRetry(resolver=resolver, orchestrator_factory=orchestrator_factory,
+                                fetch_transcript=teams.run)
+
+
 # ---------------------------------------------------------------------------
 # QA Core RC2: Operations Backfill
 # ---------------------------------------------------------------------------
@@ -296,10 +336,14 @@ def build_backfill_runner(settings, *, connection_factory,
     # The same service works the per-lecture processing queue (migration 030): the lecture-scoped
     # recovery with the QA provider allowed - what `process-manual-transcript` runs - outside any
     # HTTP request, and never in the minutes before a nightly firing.
+    from app.db.repositories.lecture_processing_jobs import REASON_TEAMS_TRANSCRIPT_RETRY
+
     lecture_jobs = LectureJobWorker(
         recovery=build_manual_transcript_service(
             settings, allow_provider=True,
             perfect_eligibility_version=perfect_eligibility_version),
+        recoveries={REASON_TEAMS_TRANSCRIPT_RETRY: build_teams_transcript_retry(
+            settings, worker=True, perfect_eligibility_version=perfect_eligibility_version)},
         connection_factory=connection_factory,
         in_quiet_window=nightly_quiet_window())
     return BackfillRunner(

@@ -41,12 +41,14 @@ import StatusBadge from '../components/StatusBadge.vue'
 import TabNav from '../components/TabNav.vue'
 import TechnicalDetails from '../components/TechnicalDetails.vue'
 import {
-  getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan, getTranscriptUploadStatus,
-  recoverAttendance, retryLecture,
+  getDirectory, getLecture, getRecoverAttendancePlan, getRetryPlan, getTeamsTranscriptRetry,
+  getTranscriptUploadStatus, queueTeamsTranscriptRetry, recoverAttendance, retryLecture,
 } from '../services/operations'
 import { openRecording } from '../services/media'
 import { errorMessage, openSafely } from '../utils/format'
-import type { DirectoryEntry, LectureDetail, TranscriptUploadStatus } from '../types/operations'
+import type {
+  DirectoryEntry, LectureDetail, ProcessingJob, TeamsTranscriptRetryStatus, TranscriptUploadStatus,
+} from '../types/operations'
 import { businessDateLong, cairoDateTime, cairoTimeRange } from '../utils/datetime'
 import {
   actionLabel, actionTone, bucketLabel, bucketTone, humanise, perfectReason,
@@ -62,13 +64,15 @@ const recoverPlan = ref<Record<string, unknown> | null>(null)
 const loading = ref(true)
 const error = ref('')
 const notice = ref('')
-const actionKind = ref<'Retry' | 'Recover attendance' | ''>('')
+const actionKind = ref<'Retry' | 'Recover attendance' | 'Retry Teams transcript' | ''>('')
 const actionPlan = ref<Record<string, unknown> | null>(null)
 const actionBusy = ref(false)
 /** Manual transcript upload: the server's target and processing plan, or null when unavailable. */
 const uploadStatus = ref<TranscriptUploadStatus | null>(null)
 const uploadOpen = ref(false)
 const uploadProcessOnly = ref(false)
+/** Retry Teams transcript: the server's plan for this lecture and its latest job, or null. */
+const teamsRetry = ref<TeamsTranscriptRetryStatus | null>(null)
 
 const lectureId = computed(() => String(route.params.lectureId))
 const tab = computed(() => (typeof route.query.tab === 'string' ? route.query.tab : 'overview'))
@@ -85,14 +89,16 @@ async function load() {
     // rather than after it; the directory needs the lecture's date.
     const plan = getRecoverAttendancePlan(lectureId.value).catch(() => null)
     const upload = getTranscriptUploadStatus(lectureId.value).catch(() => null)
+    const teams = getTeamsTranscriptRetry(lectureId.value).catch(() => null)
     const detail = await getLecture(lectureId.value)
     lecture.value = detail
-    const [directory, recover, uploadState] = await Promise.all([
-      getDirectory(detail.session_date, detail.session_date), plan, upload,
+    const [directory, recover, uploadState, teamsState] = await Promise.all([
+      getDirectory(detail.session_date, detail.session_date), plan, upload, teams,
     ])
     entry.value = directory.lectures.find((row) => row.lecture_id === detail.lecture_id) ?? null
     recoverPlan.value = recover
     uploadStatus.value = uploadState
+    teamsRetry.value = teamsState
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'This lecture could not be loaded.'
   } finally {
@@ -105,11 +111,13 @@ watch(lectureId, load)
 /** Re-read the lecture after an upload without the loading skeleton (which would close the dialog). */
 async function refreshAfterUpload() {
   try {
-    const [detail, uploadState] = await Promise.all([
+    const [detail, uploadState, teamsState] = await Promise.all([
       getLecture(lectureId.value), getTranscriptUploadStatus(lectureId.value).catch(() => null),
+      getTeamsTranscriptRetry(lectureId.value).catch(() => null),
     ])
     lecture.value = detail
     uploadStatus.value = uploadState
+    teamsRetry.value = teamsState
   } catch {
     // The dialog already reported the outcome; the page catches up on its next load.
   }
@@ -119,7 +127,9 @@ async function refreshAfterUpload() {
 // lecture once more when it settles. The worker does the work; this page only watches.
 const JOB_POLL_MS = 20_000
 let jobTimer: ReturnType<typeof setTimeout> | null = null
-const jobActive = computed(() => ['QUEUED', 'RUNNING'].includes(uploadStatus.value?.job?.status ?? ''))
+/** The lecture's latest background job, whichever request made it (upload or Teams retry). */
+const latestJob = computed<ProcessingJob | null>(() => uploadStatus.value?.job ?? teamsRetry.value?.job ?? null)
+const jobActive = computed(() => ['QUEUED', 'RUNNING'].includes(latestJob.value?.status ?? ''))
 
 function scheduleJobPoll() {
   if (jobTimer) clearTimeout(jobTimer)
@@ -127,17 +137,26 @@ function scheduleJobPoll() {
   if (!jobActive.value) return
   jobTimer = setTimeout(async () => {
     try {
-      const state = await getTranscriptUploadStatus(lectureId.value)
-      const settled = !['QUEUED', 'RUNNING'].includes(state.job?.status ?? '')
+      const [state, teamsState] = await Promise.all([
+        getTranscriptUploadStatus(lectureId.value).catch(() => null),
+        getTeamsTranscriptRetry(lectureId.value).catch(() => null),
+      ])
+      const job = state?.job ?? teamsState?.job ?? null
+      const settled = !['QUEUED', 'RUNNING'].includes(job?.status ?? '')
       uploadStatus.value = state
-      if (settled) await refreshAfterUpload()
+      teamsRetry.value = teamsState
+      if (settled) {
+        // The job's own status now says how it ended; a "queued" notice would be stale.
+        notice.value = ''
+        await refreshAfterUpload()
+      }
     } catch {
       // A missed poll is retried on the next tick.
     }
     scheduleJobPoll()
   }, JOB_POLL_MS)
 }
-watch(() => uploadStatus.value?.job?.status, scheduleJobPoll)
+watch(() => latestJob.value?.status, scheduleJobPoll)
 onBeforeUnmount(() => { if (jobTimer) clearTimeout(jobTimer) })
 
 function openUpload(processOnly: boolean) {
@@ -147,6 +166,32 @@ function openUpload(processOnly: boolean) {
 }
 
 /** The current manual upload, when the stored transcript came from one. */
+/** Plain words for the transcript fault the server reports. */
+const TRANSCRIPT_PROBLEMS: Record<string, string> = {
+  EMPTY_TRANSCRIPT_FOR_OCCURRENCE:
+    'Teams only had a transcript too short or empty to use, so the lecture was closed as not delivered.',
+  NO_TRANSCRIPT_FOR_OCCURRENCE: 'Teams had no transcript for this lecture, so it was closed as not delivered.',
+  TRANSCRIPT_LISTING_NOT_SETTLED:
+    'Teams was last asked before the meeting had finished, so its full transcript may not have existed yet.',
+}
+const teamsRetryAvailable = computed(() => teamsRetry.value?.plan.available === true)
+const transcriptProblem = computed(() => {
+  const code = teamsRetry.value?.plan.problem
+  return code ? (TRANSCRIPT_PROBLEMS[code] ?? `The transcript step stopped: ${humanise(code)}.`) : null
+})
+const TEAMS_RETRY_SUMMARY = 'Microsoft Teams is asked again for this lecture\u2019s transcript only. If Teams now '
+  + 'has a usable transcript, it is selected with the platform\u2019s normal rules and the lecture continues '
+  + 'through its pipeline: attendance, engagement, the quality evaluation (one model call), Perfect and the '
+  + 'recording link. Nothing already complete is redone and no other lecture is touched. It runs in the '
+  + 'background: you can leave this page and come back.'
+
+function openTeamsRetry() {
+  if (!teamsRetry.value) return
+  actionKind.value = 'Retry Teams transcript'
+  actionPlan.value = teamsRetry.value.plan as unknown as Record<string, unknown>
+  notice.value = ''
+}
+
 const manualTranscript = computed(() =>
   uploadStatus.value?.uploads.filter((item) => item.is_current_content).slice(-1)[0] ?? null)
 
@@ -210,6 +255,17 @@ async function confirmAction() {
   if (!actionKind.value || !actionPlan.value) return
   actionBusy.value = true
   try {
+    if (actionKind.value === 'Retry Teams transcript') {
+      const result = await queueTeamsTranscriptRetry(lectureId.value)
+      actionKind.value = ''
+      actionPlan.value = null
+      await refreshAfterUpload()
+      notice.value = result.created
+        ? 'Queued. The background worker will ask Microsoft Teams for this lecture\u2019s transcript and '
+          + 'continue its processing. Progress is shown under Meeting and transcript.'
+        : (result.reason_message ?? 'Processing is already queued or running for this lecture.')
+      return
+    }
     if (actionKind.value === 'Retry') {
       await retryLecture(lectureId.value, String(actionPlan.value.action ?? ''))
     } else {
@@ -220,9 +276,12 @@ async function confirmAction() {
     await load()
     notice.value = 'The action completed and this lecture has been re-read from persisted state.'
   } catch (caught) {
-    notice.value = caught instanceof Error
-      ? caught.message
-      : 'The guarded action was refused. Nothing was changed.'
+    notice.value = errorMessage(caught, 'The guarded action was refused. Nothing was changed.')
+    if (actionKind.value === 'Retry Teams transcript') {
+      actionKind.value = ''
+      actionPlan.value = null
+      await refreshAfterUpload()
+    }
   } finally {
     actionBusy.value = false
   }
@@ -286,6 +345,15 @@ async function confirmAction() {
             @click="openAction('Recover attendance')"
           >
             <AppIcon name="users" :size="16" /> Recover attendance
+          </button>
+          <button
+            v-if="teamsRetryAvailable"
+            type="button"
+            class="btn-primary"
+            data-test="open-teams-transcript-retry"
+            @click="openTeamsRetry"
+          >
+            <AppIcon name="refresh" :size="16" /> Retry Teams transcript
           </button>
           <button
             v-if="uploadStatus?.upload_allowed"
@@ -420,9 +488,23 @@ async function confirmAction() {
               on {{ cairoDateTime(manualTranscript.uploaded_at) }}
               ({{ manualTranscript.original_filename }}), because Microsoft Graph could not retrieve it.
             </p>
-            <div v-if="uploadStatus?.job" class="mt-3" data-test="manual-transcript-job">
+            <div
+              v-if="transcriptProblem && (teamsRetryAvailable || !latestJob)"
+              class="notice-warn mt-3"
+              role="note"
+              data-test="transcript-problem"
+            >
+              <AppIcon name="info" :size="16" class="mt-0.5" />
+              <span>
+                {{ transcriptProblem }}
+                <template v-if="teamsRetryAvailable">
+                  Use <strong class="font-semibold">Retry Teams transcript</strong> to ask Teams again.
+                </template>
+              </span>
+            </div>
+            <div v-if="latestJob" class="mt-3" data-test="manual-transcript-job">
               <p class="eyebrow mb-1">Background processing</p>
-              <ProcessingJobStatus :job="uploadStatus.job" />
+              <ProcessingJobStatus :job="latestJob" />
             </div>
             <p
               v-else-if="manualTranscript && uploadStatus?.processing.available"
@@ -664,6 +746,9 @@ async function confirmAction() {
         :title="actionKind"
         :plan="actionPlan"
         :busy="actionBusy"
+        :summary="actionKind === 'Retry Teams transcript' ? TEAMS_RETRY_SUMMARY : undefined"
+        :confirm-label="actionKind === 'Retry Teams transcript' ? 'Queue the retry' : undefined"
+        :busy-label="actionKind === 'Retry Teams transcript' ? 'Queuing\u2026' : undefined"
         @close="actionKind = ''"
         @confirm="confirmAction"
       />

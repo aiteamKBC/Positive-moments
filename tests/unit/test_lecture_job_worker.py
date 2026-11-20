@@ -196,3 +196,55 @@ def test_the_backfill_service_is_built_with_the_lecture_job_worker():
     assert orchestrator.runner.allow_provider is True
     assert orchestrator.runner.lecture_scope == frozenset({"5695cdfd-027c-5cc2-8a70-eddcc4b0e893"})
     assert orchestrator.discovery_service is None          # no calendar discovery for a lecture job
+
+
+# --- job reasons: a manual upload's processing, or a Teams transcript retry --------------------------
+
+def _dispatching_worker(queue, manual, teams):
+    from app.db.repositories.lecture_processing_jobs import REASON_TEAMS_TRANSCRIPT_RETRY
+
+    @contextmanager
+    def factory():
+        yield Conn()
+    return LectureJobWorker(recovery=manual, recoveries={REASON_TEAMS_TRANSCRIPT_RETRY: teams},
+                            connection_factory=factory, repository=queue,
+                            in_quiet_window=lambda: False, worker_id="w")
+
+
+def test_a_teams_retry_job_goes_to_the_teams_retry_and_never_to_the_manual_recovery():
+    manual, teams = Recovery(processed()), Recovery(processed())
+    teams.result["processing"]["teams"] = {"kind": "READY", "reason": "TRANSCRIPT_STORED", "graph_calls": 2}
+    queue = Queue({**job(), "reason": "TEAMS_TRANSCRIPT_RETRY"})
+    assert _dispatching_worker(queue, manual, teams).run_next()["status"] == "COMPLETED"
+    assert manual.calls == [] and teams.calls == [("L1", ENTRY_POINT)]
+    assert queue.settled[0][2]["outcome"]["teams"]["kind"] == "READY"
+
+
+def test_a_job_with_no_reason_or_the_manual_reason_keeps_the_manual_path_unchanged():
+    for reason in (None, "MANUAL_TRANSCRIPT_UPLOAD"):
+        manual, teams = Recovery(processed()), Recovery(processed())
+        queue = Queue({**job(), **({"reason": reason} if reason else {})})
+        _dispatching_worker(queue, manual, teams).run_next()
+        assert manual.calls == [("L1", ENTRY_POINT)] and teams.calls == []
+        assert "teams" not in queue.settled[0][2]["outcome"]
+
+
+def test_a_job_reason_with_no_processor_fails_without_running_anything():
+    manual = Recovery(processed())
+    queue = Queue({**job(), "reason": "SOMETHING_ELSE"})
+    worker(queue, manual).run_next()
+    assert manual.calls == [] and queue.settled[0][0] == "FAILED"
+    assert queue.settled[0][2]["error_code"] == "UNKNOWN_JOB_REASON"
+
+
+def test_teams_still_without_a_transcript_fails_with_its_answer_kept_for_the_console():
+    teams = Recovery(raises=ProcessingRefused(
+        "TEAMS_TRANSCRIPT_UNAVAILABLE", {"qa_state": "NOT_APPLICABLE", "next_action": "NOTHING_TO_DO",
+                                         "teams": {"kind": "REVIEW", "reason": "TRANSCRIPT_UNUSABLE"}},
+        detail="Teams only has a transcript too short or empty to use."))
+    queue = Queue({**job(), "reason": "TEAMS_TRANSCRIPT_RETRY"})
+    _dispatching_worker(queue, Recovery(processed()), teams).run_next()
+    verdict, _, detail = queue.settled[0]
+    assert verdict == "FAILED" and detail["error_code"] == "TEAMS_TRANSCRIPT_UNAVAILABLE"
+    assert detail["error_message"].startswith("Teams only has")
+    assert detail["outcome"]["teams"]["reason"] == "TRANSCRIPT_UNUSABLE"

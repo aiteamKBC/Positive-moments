@@ -9,7 +9,7 @@ from django.urls import path
 
 from . import (
     actions, backfill_views, media_views, publisher_backfill_views, publisher_views, publishing_monitor_views,
-    transcript_upload_views, views,
+    transcript_retry_views, transcript_upload_views, views,
 )
 
 urlpatterns = [
@@ -61,6 +61,13 @@ urlpatterns = [
     path("lectures/<uuid:lecture_id>/transcript-upload/process/",
          transcript_upload_views.transcript_upload_process_view,
          name="operations-transcript-upload-process"),
+    # --- Retry Teams transcript: ask Teams again for this lecture, then finish its pipeline -------
+    path("lectures/<uuid:lecture_id>/teams-transcript-retry/",
+         transcript_retry_views.teams_transcript_retry_status_view,
+         name="operations-teams-transcript-retry"),
+    path("lectures/<uuid:lecture_id>/teams-transcript-retry/queue/",
+         transcript_retry_views.teams_transcript_retry_queue_view,
+         name="operations-teams-transcript-retry-queue"),
 
     # --- QA Core RC2: Operations Backfill ---------------------------------
     # Both POSTs queue a durable run and return immediately; the

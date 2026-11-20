@@ -462,6 +462,13 @@ def build_parser() -> argparse.ArgumentParser:
     queue_manual.add_argument("--lecture-id", required=True)
     queue_manual.add_argument("--requested-by", default="cli")
     queue_manual.add_argument("--json", action="store_true")
+    queue_teams = commands.add_parser(
+        "queue-teams-transcript-retry",
+        help="queue ONE lecture to fetch its transcript from Teams again and finish its pipeline "
+             "(the positive-moments-backfill service runs it); runs nothing here")
+    queue_teams.add_argument("--lecture-id", required=True)
+    queue_teams.add_argument("--requested-by", default="cli")
+    queue_teams.add_argument("--json", action="store_true")
     select = commands.add_parser("select-lecture")
     select.add_argument("--date", required=True, type=parse_date)
     select.add_argument("--subject", required=True)
@@ -697,6 +704,22 @@ def main(argv: list[str] | None = None) -> int:
             with database_connection(settings.database_url) as connection:
                 summary = service.queue_processing(connection, args.lecture_id,
                                                    requested_by=args.requested_by)
+                if summary["queued"]:
+                    connection.commit()
+                else:
+                    connection.rollback()
+            summary = {key: summary.get(key) for key in ("queued", "created", "reason", "reason_message", "job")}
+            if not summary["queued"]:
+                print(json.dumps(summary, default=str))
+                return 3
+        elif args.command == "queue-teams-transcript-retry":
+            # The console's "Retry Teams transcript", from the server: one queue row (or the active
+            # one). Teams is asked, and QA run, later by the backfill-runner service.
+            from app.orchestration.factory import build_teams_transcript_retry
+            settings.require_database()
+            service = build_teams_transcript_retry(settings, worker=False)
+            with database_connection(settings.database_url) as connection:
+                summary = service.queue(connection, args.lecture_id, requested_by=args.requested_by)
                 if summary["queued"]:
                     connection.commit()
                 else:

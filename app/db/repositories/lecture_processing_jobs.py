@@ -19,6 +19,15 @@ FAILED = "FAILED"
 ACTIVE = (QUEUED, RUNNING)
 
 REASON_MANUAL_TRANSCRIPT_UPLOAD = "MANUAL_TRANSCRIPT_UPLOAD"
+# An operator asked for the lecture's transcript to be fetched from Teams again (PROPOSED migration 031).
+REASON_TEAMS_TRANSCRIPT_RETRY = "TEAMS_TRANSCRIPT_RETRY"
+
+REASON_CONSTRAINT = """
+SELECT pg_get_constraintdef(c.oid)
+  FROM pg_constraint c
+ WHERE c.conrelid = to_regclass('public.lecture_processing_jobs')
+   AND c.conname = 'lecture_processing_jobs_reason_known'
+"""
 
 DEFAULT_MAX_ATTEMPTS = 3
 
@@ -77,6 +86,16 @@ class LectureProcessingJobRepository:
         except Exception as exc:
             raise PlatformError(DATABASE_ERROR, "processing queue lookup failed") from exc
         return bool(row and row[0])
+
+    def accepts_reason(self, connection, reason: str) -> bool:
+        """Whether the table exists and its reason constraint admits `reason` (031 for a Teams retry)."""
+        if not self.available(connection):
+            return False
+        try:
+            row = connection.execute(REASON_CONSTRAINT).fetchone()
+        except Exception as exc:
+            raise PlatformError(DATABASE_ERROR, "processing queue lookup failed") from exc
+        return row is None or f"'{reason}'" in (row[0] or "")
 
     # -- the console's side ----------------------------------------------------------------------
     def enqueue(self, connection, lecture_id, *, reason=REASON_MANUAL_TRANSCRIPT_UPLOAD,

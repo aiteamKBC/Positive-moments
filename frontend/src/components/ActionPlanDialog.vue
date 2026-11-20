@@ -20,6 +20,11 @@ const props = defineProps<{
   title: string
   plan: Record<string, unknown> | null
   busy?: boolean
+  /** Optional: one plain sentence on what confirming starts, shown above the plan. */
+  summary?: string
+  /** Optional: the confirm button's own words, and its words while the request is in flight. */
+  confirmLabel?: string
+  busyLabel?: string
 }>()
 const emit = defineEmits<{ close: []; confirm: [] }>()
 
@@ -86,6 +91,7 @@ const nextAction = computed(() => {
         <p v-if="!plan" class="text-sm text-muted">Reading the current plan from the server…</p>
 
         <template v-else>
+          <p v-if="summary" class="mb-3 text-sm leading-6 text-body" data-test="plan-summary">{{ summary }}</p>
           <p class="text-sm leading-6 text-muted">
             The server generated this plan from the lecture’s persisted state. Confirming performs only the
             named action — it never reprocesses anything that is already done.
@@ -134,7 +140,7 @@ const nextAction = computed(() => {
       <div class="flex justify-end gap-2 border-t border-line px-5 py-3">
         <button type="button" class="btn-secondary" :disabled="busy" @click="emit('close')">Cancel</button>
         <button type="button" class="btn-primary" :disabled="!plan || busy" @click="emit('confirm')">
-          {{ busy ? 'Running…' : `Confirm ${title.toLowerCase()}` }}
+          {{ busy ? (busyLabel ?? 'Running…') : (confirmLabel ?? `Confirm ${title.toLowerCase()}`) }}
         </button>
       </div>
     </section>
