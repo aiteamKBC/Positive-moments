@@ -187,6 +187,7 @@ ROUTES = (
     ("attempts", "lecture_qa_generation_attempts"),
     ("rendered", "lecture_qa_rendered_sessions"),
     ("acquisition", "lecture_transcript_acquisition_runs"),
+    ("transcript_listing", "SELECT max(c.last_seen_at)"),
     ("artifacts", "lecture_transcript_candidates"),
     ("selection", "lecture_transcript_selections"),
     ("documents", "lecture_transcript_documents"),

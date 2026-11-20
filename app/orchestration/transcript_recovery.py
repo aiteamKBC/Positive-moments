@@ -81,10 +81,11 @@ PROCESSING_MESSAGES = {
 
 
 class ProcessingRefused(RuntimeError):
-    def __init__(self, code: str, plan: dict | None = None):
-        super().__init__(PROCESSING_MESSAGES.get(code, code))
+    def __init__(self, code: str, plan: dict | None = None, detail: str | None = None):
+        message = detail or PROCESSING_MESSAGES.get(code, code)
+        super().__init__(message)
         self.code = code
-        self.detail = PROCESSING_MESSAGES.get(code, code)
+        self.detail = message
         self.plan = plan or {}
 
 

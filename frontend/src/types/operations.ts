@@ -250,6 +250,8 @@ export interface ProcessingJob {
     final_blocking_stage?: string | null
     qa_state?: string | null
     provider_calls?: number
+    /** Retry Teams transcript: what Teams answered (codes and counts only). */
+    teams?: { kind: string; reason: string; graph_calls: number } | null
   }
   created_at: string
   started_at: string | null
@@ -258,6 +260,32 @@ export interface ProcessingJob {
   /** Present in the recent-jobs list. */
   subject?: string
   session_date?: string
+}
+
+/** Retry Teams transcript: the server's plan for one lecture (GET teams-transcript-retry/). */
+export interface TeamsTranscriptRetryPlan {
+  available: boolean
+  reason: string | null
+  reason_message: string | null
+  lecture_id: string
+  subject?: string | null
+  session_date?: string
+  /** The transcript fault the lecture's own state reports, e.g. EMPTY_TRANSCRIPT_FOR_OCCURRENCE. */
+  problem: string | null
+  not_delivered?: boolean
+  action: string
+  resume_stage?: string | null
+  next_action?: string
+  qa_state?: string | null
+  stages_preserved?: string[]
+  scope?: string
+  cost?: Record<string, boolean>
+}
+
+export interface TeamsTranscriptRetryStatus {
+  lecture_id: string
+  plan: TeamsTranscriptRetryPlan
+  job: ProcessingJob | null
 }
 
 /** What queueing answered: the lecture's one active job, or why nothing was queued. */

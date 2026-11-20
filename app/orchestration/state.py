@@ -165,6 +165,17 @@ NO_TRANSCRIPT_FOR_OCCURRENCE = "NO_TRANSCRIPT_FOR_OCCURRENCE"
 EMPTY_TRANSCRIPT_FOR_OCCURRENCE = "EMPTY_TRANSCRIPT_FOR_OCCURRENCE"
 NOT_DELIVERED_SELECTION_REASONS = (NO_TRANSCRIPT_FOR_OCCURRENCE,
                                    EMPTY_TRANSCRIPT_FOR_OCCURRENCE)
+# An unusable transcript proves nothing about delivery unless Teams was asked
+# for the meeting's transcripts after the real one could have appeared.
+# 2026-11-17 "Marketing Impact and Planning": the only listing ran 3 minutes
+# after the scheduled end, while the class was still live. Teams then held a
+# 52-second pre-class test and nothing else; the 2-hour transcript appeared
+# minutes later, nobody asked again, and after the grace the lecture was closed
+# as not delivered. A listing counts once it is this long past the scheduled
+# end - beyond Teams' four-hour recording cap - and an earlier one is redone
+# with a single transcript sweep of the day.
+TRANSCRIPT_LISTING_SETTLE = _timedelta(hours=6)
+TRANSCRIPT_LISTING_NOT_SETTLED = "TRANSCRIPT_LISTING_NOT_SETTLED"
 # Everything downstream of the transcript. Attendance is included because the
 # platform resolves it against the transcript's speaker inventory
 # (app/attendance/service.py), so with no transcript it is not owed - running
@@ -254,6 +265,15 @@ SELECT max(r.completed_at)
    AND r.status = 'COMPLETED'
    AND r.error_count = 0
    AND r.admin_blocked_count = 0
+"""
+
+# When Teams was last asked for this lecture's transcripts. Every successful
+# listing - the nightly sweep or the Publisher - refreshes last_seen_at on each
+# of the lecture's candidates; a listing that failed refreshes nothing.
+LAST_TRANSCRIPT_LISTING = """
+SELECT max(c.last_seen_at)
+  FROM public.lecture_transcript_candidates c
+ WHERE c.lecture_id = %s
 """
 
 # The schedule the selector judged this occurrence against. Separate from
@@ -744,6 +764,12 @@ class PipelineStateResolver:
                    "combined_duration_seconds": row[10]}
         if row[1] != "SELECTED":
             reason = self._not_delivered_selection_reason(lecture, row)
+            if reason == EMPTY_TRANSCRIPT_FOR_OCCURRENCE:
+                pending = self._unsettled_listing_action(connection, lecture, row)
+                if pending is not None:
+                    return _stage(MISSING, action=pending,
+                                  reason=TRANSCRIPT_LISTING_NOT_SETTLED,
+                                  **selection), lineage
             if reason is not None:
                 lecture["_not_delivered"] = reason
                 return _stage(NOT_APPLICABLE, reason=reason, **selection), lineage
@@ -775,6 +801,27 @@ class PipelineStateResolver:
         else:
             return None
         return reason if self._after_no_transcript_grace(lecture, row) else None
+
+    def _unsettled_listing_action(self, connection, lecture, row):
+        """
+        What must happen before an unusable transcript may close the lecture.
+
+        ACQUIRE_TRANSCRIPT when Teams has not been asked since the meeting
+        settled (one day sweep; the cycle's day memo stops it repeating), and
+        SELECT_TRANSCRIPT when it has but the selection predates that answer.
+        None means the evidence is sufficient.
+        """
+        occurrence = lecture.get("_occurrence")
+        scheduled_end = occurrence[1] if occurrence else None
+        if scheduled_end is None:
+            return None              # the grace check already refused this case
+        rows = _fetch(connection, LAST_TRANSCRIPT_LISTING, (lecture["lecture_id"],))
+        listed_at = rows[0][0] if rows else None
+        if listed_at is None or listed_at < scheduled_end + TRANSCRIPT_LISTING_SETTLE:
+            return ACQUIRE_TRANSCRIPT
+        if row[4] is None or row[4] < listed_at:
+            return SELECT_TRANSCRIPT
+        return None
 
     def _after_no_transcript_grace(self, lecture, row) -> bool:
         occurrence = lecture.get("_occurrence")

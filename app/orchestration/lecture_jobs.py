@@ -45,7 +45,10 @@ import socket
 from datetime import datetime, timedelta
 
 from app.common.errors import PlatformError
-from app.db.repositories.lecture_processing_jobs import LectureProcessingJobRepository
+from app.db.repositories.lecture_processing_jobs import (
+    REASON_MANUAL_TRANSCRIPT_UPLOAD,
+    LectureProcessingJobRepository,
+)
 from app.orchestration.locks import LectureBusy, SchedulerCycleBusy
 from app.orchestration.runner import PROVIDER_ACTIONS
 from app.orchestration.stages import COMPLETE, NOT_APPLICABLE
@@ -68,6 +71,7 @@ ENTRY_POINT = "QUEUE"
 QA_NOT_COMPLETED = "QA_NOT_COMPLETED"
 QA_SETTLED = (COMPLETE, NOT_APPLICABLE)
 ATTEMPTS_EXHAUSTED = "ATTEMPTS_EXHAUSTED"
+UNKNOWN_JOB_REASON = "UNKNOWN_JOB_REASON"
 
 
 def nightly_quiet_window(*, quiet_minutes: int = QUIET_MINUTES_BEFORE_CYCLE, now=None):
@@ -97,8 +101,11 @@ class LectureJobWorker:
     def __init__(self, *, recovery, connection_factory, repository=None, in_quiet_window=None,
                  worker_id: str | None = None, lease_seconds: int = LEASE_SECONDS,
                  busy_retry_seconds: int = BUSY_RETRY_SECONDS,
-                 retry_backoff_seconds: int = RETRY_BACKOFF_SECONDS):
+                 retry_backoff_seconds: int = RETRY_BACKOFF_SECONDS, recoveries=None):
         self.recovery = recovery                    # ManualTranscriptRecovery, allow_provider=True
+        # Which service processes a job, by the job's reason. A manual upload is the default; a
+        # Teams transcript retry (app/orchestration/teams_transcript_retry.py) is the other.
+        self.recoveries = {REASON_MANUAL_TRANSCRIPT_UPLOAD: recovery, **(recoveries or {})}
         self.connection_factory = connection_factory
         self.repository = repository or LectureProcessingJobRepository()
         self.in_quiet_window = in_quiet_window or (lambda: False)
@@ -150,10 +157,14 @@ class LectureJobWorker:
     # -- one job -----------------------------------------------------------------------------------
     def _process(self, job: dict) -> dict:
         lecture_id = job["lecture_id"]
+        recovery = self.recoveries.get(job.get("reason") or REASON_MANUAL_TRANSCRIPT_UPLOAD)
+        if recovery is None:
+            return self._settle(job, "fail", error_code=UNKNOWN_JOB_REASON,
+                                error_message=f"no processor for job reason {job.get('reason')}")
         try:
             with self.connection_factory() as connection:
                 try:
-                    result = self.recovery.process(connection, lecture_id, entry_point=ENTRY_POINT)
+                    result = recovery.process(connection, lecture_id, entry_point=ENTRY_POINT)
                 except BaseException:
                     connection.rollback()
                     raise
@@ -166,9 +177,12 @@ class LectureJobWorker:
                                                               "reason": exc.code, "provider_calls": 0})
             # Nothing a retry can change (no upload, parts missing, manual review).
             # Or nothing can run before QA (a stage is waiting or needs review).
+            outcome = {"final_action": exc.plan.get("next_action"),
+                       "qa_state": exc.plan.get("qa_state"), "reason": exc.code}
+            if exc.plan.get("teams"):
+                outcome["teams"] = exc.plan["teams"]
             return self._settle(job, "fail", error_code=exc.code, error_message=exc.detail,
-                                outcome={"final_action": exc.plan.get("next_action"),
-                                         "qa_state": exc.plan.get("qa_state"), "reason": exc.code})
+                                outcome=outcome)
         except (SchedulerCycleBusy, LectureBusy) as exc:
             code = "SCHEDULER_CYCLE_RUNNING" if isinstance(exc, SchedulerCycleBusy) else "LECTURE_LOCKED"
             return self._settle(job, "defer", error_code=code, delay=self.busy_retry_seconds,
@@ -184,6 +198,8 @@ class LectureJobWorker:
         outcome = {key: processing.get(key) for key in (
             "status", "item_status", "final_action", "final_blocking_stage", "qa_state", "error_code",
             "provider_calls", "graph_calls", "actions")}
+        if processing.get("teams"):
+            outcome["teams"] = processing["teams"]
         run_id = processing.get("run_id")
         if processing.get("qa_state") in QA_SETTLED:
             # The job's purpose is met. Later stages that wait on an external source (attendance,
