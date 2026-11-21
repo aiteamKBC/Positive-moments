@@ -19,6 +19,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from app.config.settings import Settings
@@ -36,7 +37,7 @@ from app.db.repositories.transcript_selections import (
     TranscriptSelectionRepository, TranscriptSelectionRunRepository,
 )
 from app.orchestration.lecture_jobs import LectureJobWorker
-from app.orchestration.locks import LectureLockManager, SchedulerCycleLock
+from app.orchestration.locks import LOCK_NAMESPACE, LectureLockManager, SchedulerCycleLock, lock_key
 from app.orchestration.orchestrator import PipelineOrchestrator
 from app.orchestration.runner import StageRunner
 from app.orchestration.stages import ACQUIRE_TRANSCRIPT, COMPLETE, RUN_QA, SELECTION
@@ -48,7 +49,9 @@ from app.orchestration.state import (
 from app.orchestration.teams_transcript_retry import (
     QA_ALREADY_COMPLETE,
     TEAMS_TRANSCRIPT_UNAVAILABLE,
+    LockHeldByCaller,
     TeamsTranscriptRetry,
+    lock_for_transaction,
 )
 from app.orchestration.transcript_recovery import ALREADY_QUEUED, QUEUE_UNAVAILABLE
 from app.publisher.transcripts import TranscriptWorker
@@ -61,6 +64,7 @@ from app.transcripts.models import (
 from app.transcripts.selection_service import TranscriptSelectionService
 from tests.integration.seeding import TRAINER, graph_id, insert, webvtt
 from tests.integration.test_lecture_processing_queue import _body, factory  # noqa: F401  (fixture)
+from tools.integration_db_guard import assert_isolated
 from tests.integration.test_manual_transcript_upload import (  # noqa: F401  (fixtures)
     CountingProvider,
     StubPreflight,
@@ -184,8 +188,12 @@ def _resolver():
     return PipelineStateResolver(legacy_observations=LegacyObservationRepository())
 
 
-def _service(db, teams: FakeTeams | None = None):
-    """build_teams_transcript_retry(worker=True), with the stubs and the real locks."""
+def _service(db, teams: FakeTeams | None = None, *, teams_locks=None, lock_lecture=None):
+    """
+    build_teams_transcript_retry(worker=True), with the stubs and the real locks: the Teams fetch
+    gets LockHeldByCaller, the job takes the lecture's transaction lock. `teams_locks` and
+    `lock_lecture` override them to reproduce the wiring production ran on 2026-11-20.
+    """
     settings = dataclasses.replace(Settings.from_environment(), qa_model_api_key="not-a-real-key",
                                    qa_model_base_url="https://provider.invalid/v1")
     resolver = _resolver()
@@ -200,9 +208,10 @@ def _service(db, teams: FakeTeams | None = None):
 
     fetch = None
     if teams is not None:
-        fetch = TranscriptWorker(connect=lambda: SharedConnection(db), gateway=teams).run
+        fetch = TranscriptWorker(connect=lambda: SharedConnection(db), gateway=teams,
+                                 lock_manager=teams_locks or LockHeldByCaller()).run
     return TeamsTranscriptRetry(resolver=resolver, orchestrator_factory=orchestrator_factory,
-                                fetch_transcript=fetch)
+                                fetch_transcript=fetch, lock_lecture=lock_lecture)
 
 
 def _worker(service, factory):
@@ -311,3 +320,134 @@ def test_031_rollback_refuses_while_teams_retry_jobs_exist(db, queue):
     with pytest.raises(Exception, match="031 rollback refused"):
         db.execute(_body(rollback))
     db.execute("ROLLBACK TO SAVEPOINT rollback_031")
+
+
+# =================================================================================================
+# The lecture lock (production job 0f25407b, 2026-11-20). Real second sessions stand in for the
+# pooled backends: production's lock was taken on one backend, its unlock ran on another, and the
+# lock stayed on the first (pid 1099, idle) holding the lecture.
+
+@pytest.fixture
+def sessions():
+    """Extra real sessions on the approved test database, each closed (locks released) at the end."""
+    opened = []
+
+    def open_session(*, autocommit=True):
+        connection = psycopg.connect(Settings.from_environment().database_url, autocommit=autocommit)
+        assert_isolated(connection)
+        opened.append(connection)
+        return connection
+    yield open_session
+    for connection in opened:
+        connection.close()
+
+
+class PooledLocks:
+    """
+    The pooler's effect on the Publisher worker's session lock: the lock lands on one backend and
+    the unlock on another, which holds nothing - so the lock stays where it was taken.
+    """
+
+    def __init__(self, lock_backend, unlock_backend):
+        self.lock_backend, self.unlock_backend = lock_backend, unlock_backend
+
+    def try_acquire(self, _connection, lecture_id):
+        return LectureLockManager().try_acquire(self.lock_backend, lecture_id)
+
+    def release(self, _connection, lecture_id):
+        return LectureLockManager().release(self.unlock_backend, lecture_id)
+
+
+def _holders(session, lecture):
+    return session.execute(
+        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = %s AND objid = %s AND granted",
+        (LOCK_NAMESPACE, lock_key(lecture["lecture_id"]) & 0xFFFFFFFF)).fetchall()
+
+
+def _job(db, lecture):
+    return LectureProcessingJobRepository().latest_for_lecture(db, lecture["lecture_id"])
+
+
+def _make_due(db, job_id):
+    db.execute("UPDATE public.lecture_processing_jobs SET next_attempt_after = now() WHERE job_id = %s",
+               (job_id,))
+
+
+def test_production_reproduced_a_leaked_lock_stops_the_run_at_attendance_and_the_job_now_waits(
+        db, queue, factory, provider, sessions):
+    """The wiring production ran: the Teams fetch's session lock leaks onto another backend."""
+    lecture = _seed(db)
+    backend_1099, other_backend = sessions(), sessions()
+    teams = FakeTeams(lecture, full=True)
+    service = _service(db, teams, teams_locks=PooledLocks(backend_1099, other_backend),
+                       lock_lecture=lambda _c, _l: True)               # the job took no lock then
+    service.queue(db, lecture["lecture_id"], requested_by="ops.user")
+
+    settled = _worker(service, factory).run_next()
+
+    outcome = settled["outcome"]
+    assert outcome["item_status"] == "LOCKED" and outcome["final_blocking_stage"] == "ATTENDANCE"
+    assert outcome["actions"] == ["BUILD_CANONICAL_CUES", "RESOLVE_SPEAKERS"]   # day-scoped: no lock
+    assert len(_holders(other_backend, lecture)) == 1                          # still held, idle
+    assert provider.calls_total == 0
+    # Fixed: a temporary lock is no longer a failed job. It waits, without spending the attempt.
+    assert settled["status"] == QUEUED and settled["error_code"] == "LECTURE_LOCKED"
+    assert _job(db, lecture)["attempt_count"] == 0                             # refunded
+    # Completed work is kept; the lecture resumes at attendance once the lock is gone.
+    state = _state(db, lecture)
+    assert state["stages"]["SPEAKERS"]["state"] == COMPLETE
+    assert state["next_executable_action"] == "RESOLVE_ATTENDANCE"
+
+
+def test_a_lock_held_by_another_backend_defers_the_job_before_teams_is_asked(
+        db, queue, factory, provider, sessions):
+    lecture = _seed(db)
+    holder = sessions()
+    assert LectureLockManager().try_acquire(holder, lecture["lecture_id"])
+    teams = FakeTeams(lecture, full=True)
+    service = _service(db, teams)
+    job = service.queue(db, lecture["lecture_id"], requested_by="ops.user")["job"]
+
+    settled = _worker(service, factory).run_next()
+
+    assert settled["status"] == QUEUED and settled["error_code"] == "LECTURE_LOCKED"
+    assert _job(db, lecture)["attempt_count"] == 0                             # refunded
+    assert teams.listings == 0 and provider.calls_total == 0                   # nothing asked or bought
+
+    # The holder lets go (its session ends, or an operator ends it): the next attempt finishes.
+    holder.close()
+    _make_due(db, job["job_id"])
+    settled = _worker(service, factory).run_next()
+    assert settled["status"] == COMPLETED, settled
+    assert teams.listings == 1 and provider.calls_total == 1
+    assert _qa_rows(db, lecture) == [("COMPLETED",)]
+
+
+def test_the_fixed_run_leaves_no_session_lock_behind(db, queue, factory, provider, sessions):
+    lecture = _seed(db)
+    observer = sessions()
+    service = _service(db, FakeTeams(lecture, full=True))
+    service.queue(db, lecture["lecture_id"], requested_by="ops.user")
+
+    assert _worker(service, factory).run_next()["status"] == COMPLETED
+
+    # Only the job's TRANSACTION lock remains (the test's transaction is still open), held by the
+    # job's own backend; no session lock exists that a commit would leave behind.
+    assert _holders(observer, lecture) == [(db.info.backend_pid,)]
+    assert db.execute("SELECT pg_advisory_unlock(%s, %s)",
+                      (LOCK_NAMESPACE, lock_key(lecture["lecture_id"]))).fetchone()[0] is False
+
+
+@pytest.mark.parametrize("end", ["commit", "rollback"])
+def test_the_job_lock_ends_with_its_transaction_whatever_the_outcome(sessions, end):
+    lecture = {"lecture_id": str(uuid.uuid4())}
+    job, other = sessions(autocommit=False), sessions()
+    assert lock_for_transaction(job, lecture["lecture_id"]) is True
+    assert LectureLockManager().try_acquire(other, lecture["lecture_id"]) is False   # excluded
+    # The orchestrator's per-stage lock on the job's own connection is the same session's: granted.
+    with LectureLockManager().hold(job, lecture["lecture_id"]):
+        pass
+    getattr(job, end)()
+    assert _holders(other, lecture) == []                                        # nothing leaked
+    assert LectureLockManager().try_acquire(other, lecture["lecture_id"]) is True
+    assert LectureLockManager().release(other, lecture["lecture_id"]) is True

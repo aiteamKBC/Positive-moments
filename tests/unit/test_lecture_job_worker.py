@@ -248,3 +248,40 @@ def test_teams_still_without_a_transcript_fails_with_its_answer_kept_for_the_con
     assert verdict == "FAILED" and detail["error_code"] == "TEAMS_TRANSCRIPT_UNAVAILABLE"
     assert detail["error_message"].startswith("Teams only has")
     assert detail["outcome"]["teams"]["reason"] == "TRANSCRIPT_UNUSABLE"
+
+
+# --- a lecture busy INSIDE the run (production job 0f25407b, 2026-11-20) -----------------------------
+
+def _locked_at_attendance():
+    """What the orchestrator returned: two stages done, then LOCKED at the first lecture-scoped one."""
+    result = processed(qa_state="MISSING", final_action="RESOLVE_ATTENDANCE")
+    result["processing"].update(item_status="LOCKED", error_code="LECTURE_LOCKED", provider_calls=0,
+                                actions=["BUILD_CANONICAL_CUES", "RESOLVE_SPEAKERS"])
+    return result
+
+
+def test_a_run_that_found_the_lecture_locked_waits_its_turn_instead_of_failing():
+    for reason in ("TEAMS_TRANSCRIPT_RETRY", "MANUAL_TRANSCRIPT_UPLOAD"):
+        queue = Queue({**job(attempt=1), "reason": reason})
+        recovery = Recovery(_locked_at_attendance())
+        _dispatching_worker(queue, recovery, recovery).run_next()
+        verdict, _, detail = queue.settled[0]
+        assert verdict == "QUEUED", reason
+        assert detail["error_code"] == "LECTURE_LOCKED" and detail["refund_attempt"] is True
+        assert detail["error_message"] == "lecture busy at ATTENDANCE: RESOLVE_ATTENDANCE"
+        assert detail["pipeline_run_id"] == "R1"
+        assert detail["outcome"]["actions"] == ["BUILD_CANONICAL_CUES", "RESOLVE_SPEAKERS"]
+
+
+def test_a_locked_run_on_the_last_attempt_still_waits_rather_than_failing():
+    queue = Queue(job(attempt=3, max_attempts=3))
+    worker(queue, Recovery(_locked_at_attendance())).run_next()
+    assert queue.settled[0][0] == "QUEUED" and queue.settled[0][2]["refund_attempt"] is True
+
+
+def test_a_stage_that_is_not_locked_but_stuck_still_fails_as_before():
+    result = processed(qa_state="MISSING", final_action="RESOLVE_ATTENDANCE")
+    result["processing"]["item_status"] = "FAILED"
+    queue = Queue(job())
+    worker(queue, Recovery(result)).run_next()
+    assert queue.settled[0][0] == "FAILED" and queue.settled[0][2]["error_code"] == "QA_MISSING"

@@ -19,7 +19,9 @@ from app.orchestration.teams_transcript_retry import (
     SUPPRESSED_DUPLICATE,
     TEAMS_TRANSCRIPT_UNAVAILABLE,
     TEAMS_UNREACHABLE,
+    LockHeldByCaller,
     TeamsTranscriptRetry,
+    lock_for_transaction,
     teams_reason_text,
     transcript_problem,
 )
@@ -110,16 +112,20 @@ class Orchestrator:
                               "error_code": None}]}
 
 
-def service(resolver, *, jobs=None, teams=None, orchestrator=None):
-    calls = []
+def service(resolver, *, jobs=None, teams=None, orchestrator=None, lock_free=True):
+    calls, locks = [], []
 
     def fetch(lecture_id):
         calls.append(lecture_id)
         return teams
+
+    def lock(_connection, lecture_id):
+        locks.append((lecture_id, len(calls)))           # and how many Teams calls preceded it
+        return lock_free
     retry = TeamsTranscriptRetry(resolver=resolver, jobs=jobs or Jobs(),
                                  orchestrator_factory=lambda _l: orchestrator or Orchestrator(),
-                                 fetch_transcript=fetch, clock=lambda: NOW)
-    retry.teams_calls = calls
+                                 fetch_transcript=fetch, clock=lambda: NOW, lock_lecture=lock)
+    retry.teams_calls, retry.lock_calls = calls, locks
     return retry
 
 
@@ -271,3 +277,61 @@ def test_the_operator_sees_plain_words_for_teams_answers():
     assert "refused" in teams_reason_text("GRAPH_REJECTED:400")
     assert "no transcript for this lecture" in teams_reason_text("NO_TRANSCRIPT_FOR_OCCURRENCE:NO_SAME_DAY_CANDIDATES")
     assert transcript_problem(state(blocking="TRANSCRIPT")) is not None
+
+
+# --- the lecture lock (production job 0f25407b, 2026-11-20) ------------------------------------------
+
+def test_the_lecture_lock_is_taken_once_before_teams_is_asked():
+    retry = service(Resolver(state(), RECOVERED, FINAL), teams=outcome(READY, "TRANSCRIPT_STORED"))
+    retry.process(Connection(), LECTURE)
+    assert retry.lock_calls == [(LECTURE, 0)] and retry.teams_calls == [LECTURE]
+
+
+def test_a_lecture_held_elsewhere_is_deferred_before_teams_or_any_stage():
+    orchestrator = Orchestrator()
+    retry = service(Resolver(state()), teams=outcome(READY, "TRANSCRIPT_STORED"),
+                    orchestrator=orchestrator, lock_free=False)
+    with pytest.raises(LectureBusy):
+        retry.process(Connection(), LECTURE)
+    assert retry.teams_calls == [] and orchestrator.runs == []
+
+
+def test_a_refused_plan_takes_no_lock():
+    retry = service(Resolver(state(qa="COMPLETE")))
+    with pytest.raises(ProcessingRefused):
+        retry.process(Connection(), LECTURE)
+    assert retry.lock_calls == []
+
+
+class _TxConnection:
+    def __init__(self, granted=True, autocommit=False):
+        self.autocommit, self.granted, self.sql = autocommit, granted, []
+
+    def execute(self, sql, params=None):
+        self.sql.append((sql, params))
+        granted = self.granted
+
+        class Cursor:
+            def fetchone(self):
+                return (granted,)
+        return Cursor()
+
+
+def test_the_lock_is_the_transaction_form_of_the_shared_lecture_lock():
+    from app.orchestration.locks import LOCK_NAMESPACE, lock_key
+    connection = _TxConnection()
+    assert lock_for_transaction(connection, LECTURE) is True
+    assert connection.sql == [("SELECT pg_try_advisory_xact_lock(%s, %s)", (LOCK_NAMESPACE, lock_key(LECTURE)))]
+    assert lock_for_transaction(_TxConnection(granted=False), LECTURE) is False
+
+
+def test_the_lock_is_refused_on_an_autocommit_connection_where_it_would_protect_nothing():
+    connection = _TxConnection(autocommit=True)
+    with pytest.raises(PlatformError):
+        lock_for_transaction(connection, LECTURE)
+    assert connection.sql == []
+
+
+def test_the_teams_fetch_takes_no_lock_of_its_own():
+    held = LockHeldByCaller()
+    assert held.try_acquire(object(), LECTURE) is True and held.release(object(), LECTURE) is True

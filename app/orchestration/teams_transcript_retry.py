@@ -32,6 +32,22 @@ DUPLICATE PAID QA
 The queue's guarantees (one active job per lecture across every reason, leases, attempts), the
 scheduler cycle lock and the lecture lock inside the run, and stage resolution: QA runs only when
 the resolver says it is owed, so a lecture whose QA is done buys nothing.
+
+THE LECTURE LOCK (2026-11-20, production job 0f25407b)
+------------------------------------------------------
+The Publisher's transcript worker takes the lecture's SESSION advisory lock on its own autocommit
+connection. That is sound on the direct endpoint the Publisher daemon is required to use, but this
+worker's connections are the pooled DATABASE_URL: the lock and its unlock reached different server
+backends, the lock stayed on one of them, and the lecture's first lecture-scoped stage
+(RESOLVE_ATTENDANCE) found it busy.
+
+So the worker holds the lecture's lock as a TRANSACTION advisory lock on the job's own connection,
+taken before Teams is asked and kept through the pipeline run. The server releases it at the job's
+commit or rollback, whatever happens, and a transaction never leaves its backend, so it cannot
+leak through the pooler. The Teams fetch is told the caller holds the lock (LockHeldByCaller) and
+takes none of its own. Same namespace and key as every other lecture lock, so the scheduler, the
+Publisher daemon and the console still exclude this run; the orchestrator's own per-stage lock on
+the same connection is the same session's and is granted.
 """
 from __future__ import annotations
 
@@ -39,12 +55,12 @@ import logging
 from datetime import date as _date
 from datetime import datetime, timezone
 
-from app.common.errors import PlatformError
+from app.common.errors import DATABASE_ERROR, PlatformError
 from app.db.repositories.lecture_processing_jobs import (
     REASON_TEAMS_TRANSCRIPT_RETRY,
     LectureProcessingJobRepository,
 )
-from app.orchestration.locks import LectureBusy
+from app.orchestration.locks import LOCK_NAMESPACE, LectureBusy, lock_key
 from app.orchestration.stages import (
     COMPLETE,
     MEETING,
@@ -103,6 +119,36 @@ _TEAMS_REASONS = (
 LECTURE_END = "SELECT scheduled_end FROM public.lecture_sessions WHERE lecture_id = %s"
 TRANSCRIPT_STAGES = (TRANSCRIPT, SELECTION)
 LEGACY_SYNC_STAGES = ("LEGACY_QA_SYNC", "PERFECT_SYNC")
+TRANSACTION_LOCK = "SELECT pg_try_advisory_xact_lock(%s, %s)"
+
+
+def lock_for_transaction(connection, lecture_id) -> bool:
+    """
+    Take the lecture's lock for the caller's open transaction (see THE LECTURE LOCK). False when
+    another session holds it. Refused on an autocommit connection, where it would end with the
+    statement and protect nothing.
+    """
+    if getattr(connection, "autocommit", False):
+        raise PlatformError(DATABASE_ERROR, "the lecture lock needs the job's transaction, "
+                                            "not an autocommit connection")
+    try:
+        row = connection.execute(TRANSACTION_LOCK, (LOCK_NAMESPACE, lock_key(lecture_id))).fetchone()
+    except Exception as exc:
+        raise PlatformError(DATABASE_ERROR, "lecture lock acquire failed") from exc
+    return bool(row and row[0])
+
+
+class LockHeldByCaller:
+    """
+    The Teams fetch's lock manager: the job already holds this lecture's lock in its transaction,
+    so the fetch takes no session lock on its own (pooled, autocommit) connection.
+    """
+
+    def try_acquire(self, connection, lecture_id) -> bool:
+        return True
+
+    def release(self, connection, lecture_id) -> bool:
+        return True
 
 
 def teams_reason_text(reason: str | None) -> str:
@@ -125,12 +171,14 @@ def transcript_problem(state) -> str | None:
 
 class TeamsTranscriptRetry:
     def __init__(self, *, resolver, orchestrator_factory=None, fetch_transcript=None, jobs=None,
-                 clock=None):
+                 clock=None, lock_lecture=None):
         self.resolver = resolver
         # Worker side only: (lecture_id) -> PipelineOrchestrator narrowed to that lecture, and
         # (lecture_id) -> TranscriptOutcome from the Publisher's lecture-scoped Teams worker.
         self.orchestrator_factory = orchestrator_factory
         self.fetch_transcript = fetch_transcript
+        # (connection, lecture_id) -> bool: the lecture's lock for the job's transaction.
+        self.lock_lecture = lock_lecture or lock_for_transaction
         self.jobs = jobs or LectureProcessingJobRepository()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.log = logging.getLogger(__name__)
@@ -244,6 +292,10 @@ class TeamsTranscriptRetry:
                 raise ProcessingRefused(NOTHING_TO_PROCESS, {**plan, "qa_state": COMPLETE})
             raise ProcessingRefused(plan["reason"], plan, detail=plan["reason_message"])
 
+        # Held until the job commits or rolls back; another holder means another process owns
+        # the lecture right now - the worker defers without spending an attempt.
+        if not self.lock_lecture(connection, lecture_id):
+            raise LectureBusy(lecture_id)
         teams = None
         if plan["problem"] is not None:
             teams = self._ask_teams(lecture_id)

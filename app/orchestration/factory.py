@@ -219,9 +219,10 @@ def build_teams_transcript_retry(settings, *, worker: bool = False,
     The console (`worker=False`) only plans and queues: no Graph client, no orchestrator. The
     background worker (`worker=True`) gets the Publisher's lecture-scoped Teams transcript worker
     on its own autocommit connection, and the same lecture-scoped orchestrator the manual
-    transcript worker uses, with the QA provider allowed.
+    transcript worker uses, with the QA provider allowed. The job holds the lecture's lock in its
+    own transaction, so the Teams worker takes none on its (pooled) connection.
     """
-    from app.orchestration.teams_transcript_retry import TeamsTranscriptRetry
+    from app.orchestration.teams_transcript_retry import LockHeldByCaller, TeamsTranscriptRetry
 
     resolver = build_resolver(perfect_eligibility_version=perfect_eligibility_version,
                               recording_link_mode=_recording_link_mode(settings))
@@ -239,7 +240,7 @@ def build_teams_transcript_retry(settings, *, worker: bool = False,
     teams = TranscriptWorker(
         connect=lambda: psycopg.connect(settings.database_url, prepare_threshold=None,
                                         **DB_CONNECT_KWARGS),
-        gateway=TranscriptGateway(graph), graph_client=graph)
+        gateway=TranscriptGateway(graph), graph_client=graph, lock_manager=LockHeldByCaller())
 
     def orchestrator_factory(lecture_id):
         return build_orchestrator(
