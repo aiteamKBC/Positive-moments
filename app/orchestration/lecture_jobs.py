@@ -51,7 +51,7 @@ from app.db.repositories.lecture_processing_jobs import (
 )
 from app.orchestration.locks import LectureBusy, SchedulerCycleBusy
 from app.orchestration.runner import PROVIDER_ACTIONS
-from app.orchestration.stages import COMPLETE, NOT_APPLICABLE
+from app.orchestration.stages import COMPLETE, ITEM_LOCKED, NOT_APPLICABLE
 from app.orchestration.transcript_recovery import NOTHING_TO_PROCESS, ProcessingRefused
 
 LECTURE_JOB_WORKER_VERSION = "lecture_job_worker_v1"
@@ -205,6 +205,15 @@ class LectureJobWorker:
             # The job's purpose is met. Later stages that wait on an external source (attendance,
             # a recording) are the nightly cycle's and the console's, as for any lecture.
             return self._settle(job, "complete", outcome=outcome, pipeline_run_id=run_id)
+        if processing.get("item_status") == ITEM_LOCKED:
+            # Another process held the lecture when a stage needed it (the orchestrator records
+            # LOCKED, retryable). Temporary, like LectureBusy above: what ran is kept, the job
+            # waits its turn without spending an attempt.
+            return self._settle(job, "defer", error_code="LECTURE_LOCKED",
+                                error_message=(f"lecture busy at {processing.get('final_blocking_stage')}: "
+                                               f"{processing.get('final_action')}"),
+                                outcome=outcome, pipeline_run_id=run_id,
+                                delay=self.busy_retry_seconds, refund=True)
         if processing.get("final_action") in PROVIDER_ACTIONS:
             # The run was committed, but the paid step is still ahead: the provider failed or its
             # circuit is open. Everything before it is kept; only QA is attempted again.
