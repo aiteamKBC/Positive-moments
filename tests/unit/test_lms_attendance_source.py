@@ -649,3 +649,90 @@ def test_lms_queries_are_plain_selects_on_the_pipeline_connection():
         assert upper.lstrip().startswith("SELECT")
         for forbidden in ("INSERT", "UPDATE ", "DELETE", "CREATE", "ALTER", "TRUNCATE"):
             assert forbidden not in upper
+
+
+# -- 10. where the lms_sync foreign tables are read (2026-11-20) ---------------------------
+# postgres_fdw keeps its remote transaction open until the LOCAL transaction ends, so a
+# foreign read on the scheduler cycle's connection held an LMS session idle in transaction
+# for the rest of the cycle; the LMS server's 5-minute timeout killed it and the cycle's
+# COMMIT failed. The reads now go to their own short-lived autocommit connection.
+
+class RegisterConnection(FakeConnection):
+    """A FakeConnection opened by the register factory: records that it was closed."""
+    closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.closed = True
+        return False
+
+
+FOREIGN_READS = [lms.LMS_SYNC_PRESENT_SQL, lms.LMS_SYNC_OCCURRENCE_STATUS_SQL, lms.LMS_ATTENDANCE_SQL]
+
+
+def _split(fail_on=None):
+    caller = FakeConnection(persisted=persisted_verified("O1"))
+    reg = RegisterConnection(statuses=[("O1", "completed")],
+                             register=[register(1), register(2, "absent")], fail_on=fail_on)
+    opened = []
+    return caller, reg, opened, lms.LmsAttendanceSource(lambda: opened.append(reg) or reg)
+
+
+def test_foreign_tables_are_read_on_their_own_connection_never_the_cycles():
+    caller, reg, opened, source = _split()
+    decision = source.decide(caller, "L1")
+    assert decision.used and decision.source_rows_present == 1
+    assert caller.sql == [lms.PERSISTED_MATCH_SQL]           # the cycle's transaction: local only
+    assert reg.sql == FOREIGN_READS and reg.closed and len(opened) == 1
+
+
+def test_the_split_decision_equals_the_single_connection_decision():
+    caller, _, _, source = _split()
+    single = FakeConnection(persisted=persisted_verified("O1"), statuses=[("O1", "completed")],
+                            register=[register(1), register(2, "absent")])
+    assert source.decide(caller, "L1") == lms.LmsAttendanceSource().decide(single, "L1")
+
+
+@pytest.mark.parametrize("persisted", [None, [(matching.AMBIGUOUS,) + (None,) * 7]])
+def test_no_verified_match_opens_no_register_connection(persisted):
+    opened = []
+    source = lms.LmsAttendanceSource(lambda: opened.append(1))
+    assert not source.decide(FakeConnection(persisted=persisted), "L1").used
+    assert opened == []
+
+
+def test_a_failing_foreign_read_is_unavailable_and_still_closes_its_connection():
+    caller, reg, _, source = _split(fail_on="lms_sync.live_session_learner_attendance a")
+    decision = source.decide(caller, "L1")
+    assert decision.status == lms.UNAVAILABLE and decision.reason == "RuntimeError"
+    assert reg.closed and caller.rolled_back == 1
+
+
+def test_a_register_connection_that_cannot_open_is_unavailable():
+    def refuse():
+        raise OSError("connection refused")
+    decision = lms.LmsAttendanceSource(refuse).decide(
+        FakeConnection(persisted=persisted_verified("O1")), "L1")
+    assert decision.status == lms.UNAVAILABLE and decision.reason == "OSError"
+
+
+def test_register_connections_are_autocommit_with_no_prepared_statements(monkeypatch):
+    import psycopg
+    calls = []
+    monkeypatch.setattr(psycopg, "connect", lambda url, **kw: calls.append((url, kw)) or "conn")
+    assert lms.register_connection_factory("postgresql://example.invalid/db")() == "conn"
+    assert calls == [("postgresql://example.invalid/db",
+                      {"autocommit": True, "prepare_threshold": None})]
+
+
+def test_the_stage_runner_reads_the_register_on_its_own_connection():
+    from types import SimpleNamespace
+    from app.orchestration.runner import StageRunner
+    with_db = StageRunner(settings=SimpleNamespace(database_url="postgresql://example.invalid/db"),
+                          persist=False)
+    assert with_db._resolution_service().lms_attendance_source.register_connection is not None
+    # No settings (the dry-run planner): nothing to connect to; reads stay on the caller's.
+    without = StageRunner(settings=None, persist=False)
+    assert without._resolution_service().lms_attendance_source.register_connection is None

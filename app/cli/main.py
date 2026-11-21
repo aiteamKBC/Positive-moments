@@ -795,9 +795,9 @@ def main(argv: list[str] | None = None) -> int:
             # is ever written to public.kbc_attendance.
             settings.require_database()
             # The same source selection the orchestrator uses: kbc_attendance first, the
-            # LMS register (lms_sync foreign tables on this connection) for lectures it
-            # does not answer.
-            from app.attendance.lms_source import LmsAttendanceSource
+            # LMS register (lms_sync foreign tables, on their own autocommit connection) for
+            # lectures it does not answer.
+            from app.attendance.lms_source import LmsAttendanceSource, register_connection_factory
             resolution = SpeakerResolutionService(
                 inventory_repository=SpeakerInventoryReadRepository(),
                 attendance_repository=AttendanceSourceRepository(),
@@ -806,7 +806,8 @@ def main(argv: list[str] | None = None) -> int:
                 role_repository=SpeakerRoleRepository(),
                 run_repository=SpeakerResolutionRunRepository(),
                 legacy_diagnostic_repository=None,
-                lms_attendance_source=LmsAttendanceSource())
+                lms_attendance_source=LmsAttendanceSource(
+                    register_connection_factory(settings.database_url)))
             engagement = EngagementService(
                 input_repository=EngagementInputRepository(),
                 engagement_repository=EngagementRepository(),

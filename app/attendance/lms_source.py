@@ -16,7 +16,9 @@ exposes the LMS register as postgres_fdw foreign tables in schema `lms_sync`
 (`live_session_learner_attendance`, `live_session_occurrences`, `live_sessions`,
 server `lms_attendance_source`). So every process that runs attendance - scheduler,
 backfill, Operations, CLI - reaches it with no new setting and without
-LMS_DATABASE_URL. Plain SELECTs only, inside a savepoint: if the foreign tables are
+LMS_DATABASE_URL. Plain SELECTs only: the saved match inside a savepoint on the caller's
+connection, the foreign tables on a short-lived autocommit connection to the same
+database (register_connection_factory - why: 2026-11-20). If the foreign tables are
 missing or fail, the savepoint is rolled back, the decision is LMS_UNAVAILABLE, and
 the lecture keeps its kbc_attendance answer (i.e. keeps waiting).
 
@@ -227,8 +229,36 @@ class _Occurrence:
     status: str
 
 
+def register_connection_factory(database_url: str):
+    """
+    Short-lived autocommit connections to the pipeline database for the lms_sync reads.
+
+    postgres_fdw keeps its REMOTE transaction open until the LOCAL top-level transaction
+    ends; a savepoint does not end it. Read on the scheduler cycle's own connection, the
+    remote LMS session then sat idle in transaction for the rest of the cycle, the LMS
+    server's idle_in_transaction_session_timeout (5 min) ended it, and the cycle's COMMIT
+    failed on `remote SQL command: COMMIT TRANSACTION` - losing the whole night
+    (2026-11-20, both cycles). In autocommit every foreign read is its own local
+    transaction, so its remote transaction commits immediately and none outlives the read.
+    No prepared statements (pooled endpoint).
+    """
+    import psycopg
+
+    def _open():
+        return psycopg.connect(database_url, autocommit=True, prepare_threshold=None)
+    return _open
+
+
 class LmsAttendanceSource:
-    """Read-only, on the caller's connection, inside a savepoint."""
+    """
+    Read-only. The saved match is read on the caller's connection, inside a savepoint.
+    The lms_sync foreign tables are read on `register_connection` (see
+    register_connection_factory) when one is given; None keeps them on the caller's
+    connection, as before.
+    """
+
+    def __init__(self, register_connection=None):
+        self.register_connection = register_connection
 
     def decide(self, connection, lecture_id) -> LmsAttendanceDecision:
         try:
@@ -248,6 +278,13 @@ class LmsAttendanceSource:
             return LmsAttendanceDecision(NO_SAVED_MATCH)
         if match.status != matching.VERIFIED or not match.links:
             return decide(match, {}, ())
+        if self.register_connection is None:
+            return self._read_register(connection, match)
+        with self.register_connection() as register:
+            return self._read_register(register, match)
+
+    @staticmethod
+    def _read_register(connection, match) -> LmsAttendanceDecision:
         if not connection.execute(LMS_SYNC_PRESENT_SQL).fetchone()[0]:
             return LmsAttendanceDecision(UNAVAILABLE, reason="lms_sync foreign tables absent")
         ids = [link.occurrence_id for link in match.links]
