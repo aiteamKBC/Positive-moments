@@ -36,7 +36,7 @@ instructed not to.
 import logging
 
 from app.attendance.coverage import classify, is_authoritative
-from app.attendance.lms_source import LmsAttendanceSource
+from app.attendance.lms_source import LmsAttendanceSource, register_connection_factory
 from app.attendance.recovery import AttendanceRecoveryService
 from app.attendance.resolver import RESOLVER_VERSION
 from app.attendance.roles import ROLE_ALGORITHM_VERSION
@@ -608,8 +608,8 @@ class StageRunner:
     # -- service construction -----------------------------------------------
 
     def _resolution_service(self):
-        # The LMS register (lms_sync foreign tables on this same connection) answers only
-        # lectures kbc_attendance does not.
+        # The LMS register (lms_sync foreign tables, read on their own autocommit
+        # connection) answers only lectures kbc_attendance does not.
         return SpeakerResolutionService(
             inventory_repository=SpeakerInventoryReadRepository(),
             attendance_repository=AttendanceSourceRepository(),
@@ -618,7 +618,13 @@ class StageRunner:
             role_repository=SpeakerRoleRepository(),
             run_repository=SpeakerResolutionRunRepository(),
             legacy_diagnostic_repository=None,
-            lms_attendance_source=LmsAttendanceSource())
+            lms_attendance_source=LmsAttendanceSource(self._lms_register_connection()))
+
+    def _lms_register_connection(self):
+        # lms_sync reads must not hold a foreign transaction open for the whole cycle
+        # (app.attendance.lms_source.register_connection_factory).
+        database_url = getattr(self.settings, "database_url", "") if self.settings else ""
+        return register_connection_factory(database_url) if database_url else None
 
     def _engagement_service(self):
         return EngagementService(
