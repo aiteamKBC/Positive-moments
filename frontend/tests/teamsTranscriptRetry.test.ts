@@ -47,6 +47,34 @@ describe('ProcessingJobStatus for a Teams transcript retry', () => {
     expect(text).not.toContain('..')
   })
 
+  const failedAtAttendance = {
+    status: 'FAILED' as const, attempt_count: 1, finished_at: '2026-11-20T12:00:00Z',
+    last_error_code: 'STOPPED_AT', last_error_message: 'stopped at ATTENDANCE: RESOLVE_ATTENDANCE',
+  }
+
+  it('shows a failed attempt as Resolved once its lecture has completed, keeping the history', () => {
+    const wrapper = mount(ProcessingJobStatus, { props: { job: job({ ...failedAtAttendance,
+      lecture_outcome: { bucket: 'complete', resolved: true, next_action: 'NOTHING_TO_DO' } }) } })
+    const text = wrapper.text()
+    expect(text).toContain('Resolved')
+    expect(text).not.toContain('Failed')
+    expect(text).toContain('The lecture has since completed (next: Nothing to do).')
+    expect(text).toContain('This attempt stopped')
+    expect(text).toContain('stopped at ATTENDANCE: RESOLVE_ATTENDANCE.')
+    // The server's own status stays reachable on the badge.
+    expect(wrapper.find('[title="FAILED"]').exists()).toBe(true)
+  })
+
+  it('keeps a failed attempt Failed while its lecture is still unresolved', () => {
+    for (const lecture_outcome of [undefined, { bucket: 'failed', resolved: false, next_action: 'ACQUIRE_TRANSCRIPT' }]) {
+      const text = mount(ProcessingJobStatus, { props: { job: job({ ...failedAtAttendance, lecture_outcome }) } }).text()
+      expect(text).toContain('Failed')
+      expect(text).not.toContain('Resolved')
+      expect(text).toContain('Stopped ')
+      expect(text).not.toContain('since completed')
+    }
+  })
+
   it("keeps a manual upload's job named as before", () => {
     const text = mount(ProcessingJobStatus, { props: { job: job({ reason: 'MANUAL_TRANSCRIPT_UPLOAD' }) } }).text()
     expect(text).toContain('Uploaded transcript processing:')

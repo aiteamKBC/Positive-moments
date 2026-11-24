@@ -168,8 +168,9 @@ def transcript_recovery_view(request):
         result = service.uploads.recovery_queue(
             connection, date_from=date_from, date_to=date_to, limit=limit)
         # The background processing jobs, newest first, so the dashboard shows what the uploads
-        # became (Queued, Running, Completed, Failed). Absent before migration 030.
-        result["jobs"] = (service.jobs.recent(connection, limit=RECENT_JOBS)
+        # became (Queued, Running, Completed, Failed). Absent before migration 030. A failed job
+        # carries its lecture's current outcome, so a since-completed lecture reads as resolved.
+        result["jobs"] = (service.recent_jobs(connection, limit=RECENT_JOBS)
                           if service.jobs.available(connection) else [])
         result["queue_installed"] = bool(service.jobs.available(connection))
         return Response(result)

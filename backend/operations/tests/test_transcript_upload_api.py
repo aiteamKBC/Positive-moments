@@ -37,7 +37,7 @@ class _Base(TestCase):
         # Plain data by default: a MagicMock reaching the JSON renderer never finishes encoding.
         # Migration 030 is applied unless a test says otherwise.
         self.service.jobs.available.return_value = True
-        self.service.jobs.recent.return_value = []
+        self.service.recent_jobs.return_value = []
         self.service.queue_processing.return_value = {
             "queued": False, "created": False, "reason": "NOTHING_TO_PROCESS",
             "reason_message": "Nothing to process.", "job": None}
@@ -278,7 +278,7 @@ class RecoveryListTests(_Base):
     def test_it_lists_the_recent_processing_jobs(self):
         self.service.uploads.recovery_queue.return_value = {"lectures": []}
         self.service.jobs.available.return_value = True
-        self.service.jobs.recent.return_value = [{"job_id": "J1", "status": "RUNNING"}]
+        self.service.recent_jobs.return_value = [{"job_id": "J1", "status": "RUNNING"}]
         body = self.recovery().json()
         self.assertEqual((body["jobs"][0]["status"], body["queue_installed"]), ("RUNNING", True))
 
@@ -287,7 +287,7 @@ class RecoveryListTests(_Base):
         self.service.jobs.available.return_value = False
         body = self.recovery().json()
         self.assertEqual((body["jobs"], body["queue_installed"]), ([], False))
-        self.service.jobs.recent.assert_not_called()
+        self.service.recent_jobs.assert_not_called()
 
     def test_it_takes_no_writes(self):
         self.assertEqual(self.client.post(reverse("operations-transcript-recovery")).status_code, 405)

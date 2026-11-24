@@ -76,6 +76,7 @@ from app.orchestration.transcript_recovery import (
     NOTHING_TO_PROCESS,
     QUEUE_UNAVAILABLE,
     ProcessingRefused,
+    with_lecture_outcome,
 )
 
 TEAMS_TRANSCRIPT_RETRY_VERSION = "teams_transcript_retry_v1"
@@ -189,6 +190,8 @@ class TeamsTranscriptRetry:
         plan = self.plan(connection, lecture_id)
         job = (self.jobs.latest_for_lecture(connection, str(lecture_id))
                if self.jobs.available(connection) else None)
+        # A failed job carries the lecture's current outcome, as in the recovery list.
+        job = with_lecture_outcome(connection, self.resolver, [job])[0] if job else None
         return {"lecture_id": str(lecture_id), "plan": plan, "job": job}
 
     def plan(self, connection, lecture_id, *, worker: bool = False) -> dict:

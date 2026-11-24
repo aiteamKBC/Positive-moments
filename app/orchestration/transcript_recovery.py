@@ -29,8 +29,9 @@ import logging
 from datetime import date as _date
 from datetime import datetime, timezone
 
-from app.db.repositories.lecture_processing_jobs import ACTIVE, LectureProcessingJobRepository
+from app.db.repositories.lecture_processing_jobs import ACTIVE, FAILED, LectureProcessingJobRepository
 from app.db.repositories.manual_transcripts import ManualTranscriptRepository
+from app.orchestration.reconciliation import BUCKET_COMPLETE, bucket_for
 from app.orchestration.runner import PROVIDER_ACTIONS
 from app.orchestration.stages import (
     COMPLETE,
@@ -78,6 +79,30 @@ PROCESSING_MESSAGES = {
 # QUEUES the lecture (queue_processing, public.lecture_processing_jobs) and the background worker in
 # the positive-moments-backfill service runs process() with the provider allowed, where no HTTP
 # timeout exists (app/orchestration/lecture_jobs.py). The server CLI remains a manual fallback.
+
+
+def with_lecture_outcome(connection, resolver, jobs: list[dict]) -> list[dict]:
+    """
+    Attach each FAILED job's lecture's CURRENT outcome as `lecture_outcome`. Read-only.
+
+    A job row is the history of one attempt and is never rewritten: an attempt that failed stays
+    FAILED even after the lecture settled another way (the nightly cycle, a later job). Whether
+    that failure is still open is a question about the lecture, so it is answered with the day
+    report's own rule (reconciliation.bucket_for): `resolved` is true exactly when Operations
+    shows the lecture as Complete. Each lecture is resolved once; other jobs are left as they are.
+    """
+    outcomes: dict[str, dict] = {}
+    for job in jobs:
+        if not job or job.get("status") != FAILED:
+            continue
+        lecture_id = str(job["lecture_id"])
+        if lecture_id not in outcomes:
+            state = resolver.for_lecture(connection, lecture_id)
+            bucket = bucket_for(state)
+            outcomes[lecture_id] = {"bucket": bucket, "resolved": bucket == BUCKET_COMPLETE,
+                                    "next_action": state.get("next_action")}
+        job["lecture_outcome"] = outcomes[lecture_id]
+    return jobs
 
 
 class ProcessingRefused(RuntimeError):
@@ -146,9 +171,14 @@ class ManualTranscriptRecovery:
                 "reason_message": None if created else PROCESSING_MESSAGES[ALREADY_QUEUED],
                 "plan": plan, "job": job}
 
+    def recent_jobs(self, connection, limit: int = 20) -> list[dict]:
+        """The recent background jobs, newest first, a FAILED one with its lecture's current outcome."""
+        return with_lecture_outcome(connection, self.resolver, self.jobs.recent(connection, limit=limit))
+
     def _latest_job(self, connection, lecture_id):
-        return (self.jobs.latest_for_lecture(connection, lecture_id)
-                if self.jobs.available(connection) else None)
+        job = (self.jobs.latest_for_lecture(connection, lecture_id)
+               if self.jobs.available(connection) else None)
+        return with_lecture_outcome(connection, self.resolver, [job])[0] if job else None
 
     def plan_processing(self, connection, lecture_id, *, target=None,
                         provider_allowed: bool | None = None) -> dict:
