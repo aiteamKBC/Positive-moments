@@ -20,7 +20,14 @@ const LABELS = {
   FAILED: { label: 'Failed', tone: 'error' },
 } as const
 
-const badge = computed(() => LABELS[props.job.status] ?? { label: humanise(props.job.status), tone: 'quiet' })
+/**
+ * A failed attempt whose lecture has since completed some other way (the nightly cycle, a later
+ * job). The job stays FAILED on the server as history; it is shown as resolved, not as open.
+ */
+const resolved = computed(() => props.job.status === 'FAILED' && props.job.lecture_outcome?.resolved === true)
+const badge = computed(() => (resolved.value
+  ? { label: 'Resolved', tone: 'ok' as const }
+  : LABELS[props.job.status] ?? { label: humanise(props.job.status), tone: 'quiet' }))
 /** Which request this job is: a manual upload's processing, or a Teams transcript retry. */
 const teamsRetry = computed(() => props.job.reason === 'TEAMS_TRANSCRIPT_RETRY')
 const kind = computed(() => (teamsRetry.value ? 'Teams transcript retry' : 'Uploaded transcript processing'))
@@ -42,10 +49,17 @@ const detail = computed(() => {
       return `Finished ${cairoDateTime(job.finished_at)}.`
         + (teamsRetry.value && job.outcome?.teams ? ' The transcript was retrieved from Teams.' : '')
         + (job.outcome?.final_action ? ` Next for this lecture: ${actionLabel(job.outcome.final_action)}.` : '')
-    case 'FAILED':
-      return `Stopped ${cairoDateTime(job.finished_at)} after ${job.attempt_count} attempt`
+    case 'FAILED': {
+      const stopped = `stopped ${cairoDateTime(job.finished_at)} after ${job.attempt_count} attempt`
         + `${job.attempt_count === 1 ? '' : 's'}: `
         + `${(job.last_error_message || humanise(job.last_error_code)).replace(/\.\s*$/, '')}.`
+      if (resolved.value) {
+        return 'The lecture has since completed'
+          + (job.lecture_outcome?.next_action ? ` (next: ${actionLabel(job.lecture_outcome.next_action)})` : '')
+          + `. This attempt ${stopped}`
+      }
+      return stopped.charAt(0).toUpperCase() + stopped.slice(1)
+    }
     default:
       return ''
   }

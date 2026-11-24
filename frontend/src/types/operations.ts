@@ -260,6 +260,11 @@ export interface ProcessingJob {
   /** Present in the recent-jobs list. */
   subject?: string
   session_date?: string
+  /**
+   * Recent-jobs list, FAILED jobs only: the lecture's outcome NOW. The job row stays FAILED as
+   * history; `resolved` is true when Operations shows the lecture as Complete.
+   */
+  lecture_outcome?: { bucket: string; resolved: boolean; next_action: string | null }
 }
 
 /** Retry Teams transcript: the server's plan for one lecture (GET teams-transcript-retry/). */
