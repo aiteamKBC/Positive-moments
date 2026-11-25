@@ -53,6 +53,8 @@ from app.db.repositories.transcript_selections import (
 from app.graph.auth import build_graph_client
 from app.graph.calendar import CalendarGateway
 from app.graph.meetings import OnlineMeetingGateway
+from app.lectures.matching import normalize_group
+from app.lectures.models import CalendarDiscoveryBatch
 from app.lectures.service import LectureDiscoveryService, select_single_lecture
 from app.transcripts.graph import TranscriptGateway
 from app.transcripts.service import TranscriptAcquisitionService
@@ -139,6 +141,38 @@ def json_default(value):
     return value.isoformat() if isinstance(value, (date, datetime)) else str(value)
 
 
+class SubjectFilteredCalendar:
+    """
+    discover-day --subject: an operator's targeted re-discovery of ONE lecture series on a past
+    day. Only calendar events whose normalized subject equals `subject` reach discovery, so other
+    lectures on that day are neither registered nor updated. Matching itself is unchanged.
+    """
+
+    def __init__(self, calendar, subject: str):
+        self.calendar = calendar
+        self.calendar_user_upn = calendar.calendar_user_upn
+        self.wanted = normalize_group(subject)
+
+    def discover_calendar_events(self, target_date):
+        batch = self.calendar.discover_calendar_events(target_date)
+        kept = [event for event in batch.eligible_events if normalize_group(event.subject) == self.wanted]
+        return CalendarDiscoveryBatch(batch.calendar_events_found, kept)
+
+
+class SubjectFilteredRuns:
+    """Records the --subject filter on the discovery run, so the row never reads as a full day."""
+
+    def __init__(self, runs, subject: str):
+        self.runs, self.subject = runs, subject
+
+    def start(self, *args, **kwargs):
+        return self.runs.start(*args, **kwargs)
+
+    def complete(self, connection, run_id, summary):
+        metadata = {**summary.get("metadata", {}), "subject_filter": self.subject}
+        return self.runs.complete(connection, run_id, {**summary, "metadata": metadata})
+
+
 def guard_write_command(args) -> None:
     """
     Phase 3C2 human-safe canary guard.
@@ -182,6 +216,9 @@ def build_parser() -> argparse.ArgumentParser:
     discover = commands.add_parser("discover-day")
     discover.add_argument("--date", required=True, type=parse_date)
     discover.add_argument("--dry-run", action="store_true")
+    discover.add_argument("--subject",
+                          help="only calendar events with exactly this subject (normalized); "
+                               "a targeted re-discovery that leaves the day's other lectures alone")
     discover.add_argument("--json", action="store_true")
     acquire = commands.add_parser("acquire-transcripts")
     acquire.add_argument("--date", required=True, type=parse_date)
@@ -515,12 +552,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "discover-day":
             settings.require_discovery()
             client = build_graph_client(settings)
+            calendar = CalendarGateway(client, settings.calendar_user_upn)
+            runs = DiscoveryRunRepository()
+            if args.subject:
+                calendar = SubjectFilteredCalendar(calendar, args.subject)
+                runs = SubjectFilteredRuns(runs, args.subject)
             service = LectureDiscoveryService(
-                calendar=CalendarGateway(client, settings.calendar_user_upn),
+                calendar=calendar,
                 meetings=OnlineMeetingGateway(client, settings.calendar_user_upn),
                 aptem_repository=AptemRepository(),
                 lecture_repository=LectureSessionRepository(),
-                run_repository=DiscoveryRunRepository(),
+                run_repository=runs,
                 qa_validation_repository=QaValidationRepository(),
                 lms_repository=(LmsModuleRepository(settings.lms_database_url)
                                 if settings.lms_database_url else None),

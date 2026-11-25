@@ -172,3 +172,70 @@ def test_aptem_still_stops_discovery_when_it_returns_no_groups():
         assert exc.code == "no_active_aptem_groups"
     else:
         raise AssertionError("an empty Aptem source must still stop discovery")
+
+
+# --- the one explicit exception: "Charl- strategic management" -> LMS "Strategic Management" -------
+
+CHARL = "Charl- strategic management"
+
+
+def test_10_the_charl_series_matches_the_live_strategic_management_module():
+    result = match(CHARL, aptem=["Ray-PMO"], lms=["Strategic Management", "Data & AI"])
+    assert (result.eligible, result.matched_source, result.module) == (True, "lms", "Strategic Management")
+    # Same normalization as every subject: case and repeated spaces only.
+    assert match("  CHARL-  Strategic   Management ", lms=["Strategic Management"]).eligible
+
+
+def test_10b_the_exception_lapses_when_the_module_is_not_a_live_lms_title():
+    assert not match(CHARL, aptem=["Strategic Management"], lms=["Data & AI"]).eligible   # Aptem never stands in
+    assert not match(CHARL, lms=["Strategic Management - Level 7", "Charl-Strategic Management"]).eligible
+    assert not match(CHARL, aptem=["Ray-PMO"], lms=[]).eligible
+
+
+def test_10c_the_exception_is_exact_and_one_way():
+    live = ["Strategic Management"]
+    for other in ("Charl-strategic management", "Charl - strategic management", "Charl- strategic management 2",
+                  "Charl- strategic management - Jan 26", "Charl- Strategic Human Resource",
+                  "G2-Keith-Strategy & Planning"):
+        assert not match(other, lms=live).eligible, other
+    # The target title keeps its own ordinary match; nothing else is redirected to it.
+    assert match("Strategic Management", lms=live).module == "Strategic Management"
+
+
+def test_10d_a_direct_match_always_wins_over_the_exception():
+    result = match(CHARL, lms=["Strategic Management", "Charl- Strategic Management"])
+    assert result.module == "Charl- Strategic Management"
+
+
+def test_10e_through_discovery_the_charl_series_is_one_registered_lms_lecture():
+    summary, registry = discover(
+        [_event("a", CHARL), _event("b", "Weekly Meeting with Egypt team", hour=11),
+         _event("c", "Ray-PMO", hour=15)],
+        aptem=["Ray-PMO"], lms=Lms(["Strategic Management"]))
+    by_subject = {row.subject: row for row in registry.rows.values()}
+    assert sorted(by_subject) == [CHARL, "Ray-PMO"]
+    assert by_subject[CHARL].module == "Strategic Management"
+    assert summary["module_match_sources"] == {"aptem": 1, "lms": 1, "both": 0}
+    (excluded,) = summary["non_canonical_calendar_event_details"]
+    assert excluded["subject"] == "Weekly Meeting with Egypt team"
+
+
+def test_11_discover_day_subject_filter_registers_only_that_series_and_marks_the_run():
+    from app.cli.main import SubjectFilteredCalendar, SubjectFilteredRuns, build_parser
+
+    calendar = ManyEvents([_event("a", CHARL), _event("b", "Advanced Project and Logistics Management", hour=11),
+                           _event("c", "Weekly Meeting with Egypt team", hour=15)])
+    calendar.calendar_user_upn = "calendar@example.test"
+    runs, registry = Runs(), Registry()
+    svc = service(registry, SubjectFilteredRuns(runs, CHARL),
+                  calendar=SubjectFilteredCalendar(calendar, "  charl-  STRATEGIC management "),
+                  aptem=Groups(["Ray-PMO"]))
+    svc.lms_repository = Lms(["Strategic Management", "Advanced Project and Logistics Management"])
+    summary = svc.discover_day(object(), object(), DAY)
+
+    assert [row.subject for row in registry.rows.values()] == [CHARL]     # the other match is left alone
+    assert summary["canonical_lecture_candidates"] == 1
+    assert summary["unmatched_count"] == 0
+    (recorded,) = runs.summaries
+    assert recorded["metadata"]["subject_filter"] == CHARL
+    assert build_parser().parse_args(["discover-day", "--date", "2026-11-21"]).subject is None

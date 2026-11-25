@@ -45,6 +45,17 @@ class ModuleMatch:
         return APTEM if self.matched_in_aptem else LMS if self.matched_in_lms else NONE
 
 
+# ONE explicit, reviewed exception - not an alias mechanism (approved 2026-11-25).
+# The Teams series "Charl- strategic management" is the MBA module
+# MOD-2026082213EA24F03A1D, whose live LMS title is "Strategic Management".
+# Only this exact (normalized) subject, only when nothing matches it directly,
+# and only while that title is a live LMS module: it resolves to the LMS
+# title, so the lecture is recorded exactly as if the subject had matched it.
+LMS_SUBJECT_EXCEPTIONS = {
+    "charl- strategic management": "Strategic Management",
+}
+
+
 def match_module(subject: str, aptem_index: dict[str, str],
                  lms_index: dict[str, str]) -> ModuleMatch:
     """
@@ -54,6 +65,8 @@ def match_module(subject: str, aptem_index: dict[str, str],
     """
     wanted = normalize_group(subject)
     aptem, lms = aptem_index.get(wanted), lms_index.get(wanted)
+    if aptem is None and lms is None and wanted in LMS_SUBJECT_EXCEPTIONS:
+        lms = lms_index.get(normalize_group(LMS_SUBJECT_EXCEPTIONS[wanted]))
     # LMS titles can carry HTML entities ("Strategy &amp; Planning"); the
     # stored module is the readable form.
     module = aptem if aptem is not None else (html.unescape(lms) if lms is not None else None)
