@@ -564,3 +564,95 @@ def test_msp_production_files_review_state_recovered_by_the_audited_reselection(
     world.run(rounds=14)
     assert _sources(world) == [(1, long["id"], "LOCATED")] and len(world.bunny.fetch_calls) == 1
     assert _view(world)["verified_ready"]
+
+
+# =========================================================================== 2026-11-23 Advanced Research Methods
+# A 21 s false start on call A, then the lecture on a NEW call B 38.5 s later (production offsets on the 10:00 slot).
+# The false start's MP4 is named 0.25 s before part 1 and 38.76 s before part 2: before the fix it fit both parts, so
+# the lecture went to review PART_2:FILE_FITS_SEVERAL_PARTS and reselect-recording repeated the same refusal.
+ARM_SHORT = (START - timedelta(seconds=56.749422), START - timedelta(seconds=35.429422))
+ARM_LONG = (START - timedelta(seconds=18.235821), END + timedelta(minutes=39, seconds=3.332519))
+
+
+def _arm_false_start(world):
+    short = world.rgraph.recording(*ARM_SHORT, call_id="call-a")
+    world.rgraph.mp4(started=START - timedelta(seconds=57), duration_seconds=21.376, size=130_237,
+                     teams_source={"application": "Teams", "externalId": "call-a", "threadId": world.thread})
+    return short
+
+
+def _arm_lecture(world):
+    correlation = f"corr-arm-{world.lecture_id[:8]}"
+    long = world.rgraph.recording(*ARM_LONG, call_id="call-b", correlation=correlation)
+    world.rgraph.mp4(started=START - timedelta(seconds=19),
+                     duration_seconds=(ARM_LONG[1] - ARM_LONG[0]).total_seconds() + 0.06,
+                     teams_source={"application": "Teams", "externalId": "call-b", "threadId": world.thread})
+    world.transcript(*ARM_LONG, correlation, call_id="call-b")
+    return long
+
+
+def test_arm_daily_the_false_start_never_blocks_the_lecture_which_is_imported_once(url):
+    world = World(url)
+    short = _arm_false_start(world)
+    world.run(rounds=3)
+    assert _sources(world) == [(1, short["id"], "LOCATED")] and world.videos() == []   # production at 12:13
+    long = _arm_lecture(world)
+    world.run(rounds=16)
+    assert _recording_reviews(world) == [] and _recording_state(world) == ("LOCATED", 2)
+    assert _sources(world) == [(1, short["id"], "LOCATED"), (2, long["id"], "LOCATED")]
+    [video] = world.videos()
+    assert video[0] == 2 and video[2] == "VERIFIED" and len(world.bunny.fetch_calls) == 1 and world.ready()
+    assert [p["source_part_index"] for p in _view(world)["parts"]] == [2]
+    world.reconciler.run("FULL")
+    world.run(rounds=6)
+    assert len(world.bunny.fetch_calls) == 1 and len(world.videos()) == 1
+
+
+def test_arm_review_state_is_recovered_by_the_audited_reselection_once(url):
+    world = World(url)
+    short = _arm_false_start(world)
+    world.run(rounds=3)
+    with psycopg.connect(world.url, autocommit=True) as c:                   # production on 2026-11-23 12:58
+        c.execute("UPDATE public.bunny_recording_discoveries SET status = 'REVIEW_REQUIRED', reason_code = "
+                  "'FILE_FITS_SEVERAL_PARTS', review_reason = 'PART_2:FILE_FITS_SEVERAL_PARTS', "
+                  "next_check_after = NULL WHERE lecture_id = %s", (world.lecture_id,))
+        c.execute("UPDATE public.bunny_publisher_jobs SET status = 'REVIEW_REQUIRED', finished_at = now(), "
+                  "last_error_code = 'FILE_FITS_SEVERAL_PARTS' WHERE lecture_id = %s AND job_kind = "
+                  "'RESOLVE_RECORDING' AND status IN ('QUEUED', 'RETRY_WAIT')", (world.lecture_id,))
+    long = _arm_lecture(world)
+    _past_lookback(world)
+    world.run(rounds=3)
+    assert world.videos() == [] and _sources(world) == [(1, short["id"], "LOCATED")]   # nothing on its own
+    plan = _plan(world)                                                          # recording-preview, read-only
+    assert plan["blocking"] == [] and plan["selection"]["part_index"] == 2
+    assert plan["action"] == reselection.RESELECT_AND_IMPORT
+    assert [(c["duration_seconds"], c["duration_source"], c["locate_status"]) for c in plan["selection"]["candidates"]
+            ] == [(21.376, "video_facet", "LOCATED"), (9561.628, "video_facet", "LOCATED")]
+    assert _sources(world) == [(1, short["id"], "LOCATED")]                       # the preview wrote nothing
+    result = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                               library_id=LIBRARY_ID, planner=world.planner)
+    assert result["applied"] and result["selected_part"] == 2
+    assert result["queued"]["jobs_created"] == {"IMPORT_VIDEO": 1}
+    world.run(rounds=14)
+    assert _sources(world) == [(1, short["id"], "LOCATED"), (2, long["id"], "LOCATED")]
+    assert [v[0] for v in world.videos(live=True)] == [2] and len(world.bunny.fetch_calls) == 1
+    assert _view(world)["verified_ready"]
+    again = reselection.apply(_connect(world), _worker(world), world.lecture_id, actor=ACTOR, reason=REASON,
+                              library_id=LIBRARY_ID, planner=world.planner)
+    assert again["applied"] is False and len(world.bunny.fetch_calls) == 1          # NO_CHANGE, nothing re-uploaded
+
+
+def test_arm_without_a_decisive_identity_the_lecture_stays_in_review(url):
+    """The same recordings, but the false start's file has no source facet and no indexed length: still review."""
+    world = World(url)
+    world.rgraph.recording(*ARM_SHORT, call_id="call-a")
+    world.rgraph.mp4(started=START - timedelta(seconds=57), duration_seconds=None, size=130_237)
+    _arm_lecture(world)
+    _window_closed(world)
+    world.run(rounds=8)
+    assert _recording_state(world)[0] == "REVIEW_REQUIRED" and world.videos() == []
+    review = world.q("SELECT review_reason FROM public.bunny_recording_discoveries WHERE lecture_id = %s",
+                     world.lecture_id)[0][0]
+    assert review == "PART_2:FILE_FITS_SEVERAL_PARTS"
+    plan = _plan(world)
+    assert plan["action"] == reselection.BLOCKED
