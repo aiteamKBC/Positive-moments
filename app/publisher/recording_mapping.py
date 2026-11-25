@@ -16,9 +16,11 @@ No database, no Graph, no clock. Every rule reuses an existing validated one:
 * FILE (which MP4 is a part's recording): the Recording Link identity rule
   (app/recordings/matching.py) - the lecture's exact normalized subject, its
   business date, and a file-name time 0..120 s BEFORE the part's Graph
-  createdDateTime - applied PER PART. A file that fits two parts, or a part
-  that two different files fit, is ambiguous; byte-identical copies of one file
-  collapse first (app/recordings/resolution.collapse_copies).
+  createdDateTime - applied PER PART. A file that fits two parts goes to one
+  of them only when its Teams call identity or its measured duration proves
+  which (shared_file_owner); otherwise it, like a part that two different
+  files fit, is ambiguous. Byte-identical copies of one file collapse first
+  (app/recordings/resolution.collapse_copies).
   A part the file-name rule leaves with NO file may instead be proven by the
   Teams source facet Teams writes on the driveItem (teams_source_file): its
   externalId IS the part's callId and its threadId IS the lecture's meeting
@@ -259,12 +261,50 @@ def teams_source_file(part, candidates, *, expected_subject, session_date, threa
     return Exact(file, round(part.created_at.timestamp() - file.file_timestamp, 3), part), None
 
 
+def shared_file_owner(candidate, fits, *, thread_id) -> tuple[tuple | None, str | None]:
+    """
+    ((part, lead), method) when exactly ONE of the parts a file's name fits is proven to be its recording,
+    else (None, None): the file stays shared and every part it fits stays FILE_FITS_SEVERAL_PARTS.
+
+    2026-11-18 / 2026-11-23: Teams was stopped after a 21-26 s false start and restarted 38-60 s later on a
+    NEW call. The false start's MP4 is named within 120 s of BOTH recordings, so the file-name rule alone
+    cannot place it. The evidence that can, in this order:
+      * CALL: the Teams source facet (externalId = the callRecording's callId). Used only when the facet's
+        threadId IS the lecture's meeting thread. It must name exactly one of the fitting parts' calls; a
+        facet naming none of them, or another thread, or a lecture thread that is unknown, decides nothing
+        (a file of one call is never given to another). When it names several (parts of one call), only
+        those parts go on to the duration check.
+      * DURATION, only without a usable call answer: the file's measured length (video facet) is checked
+        against each remaining part with check_duration, unchanged. Exactly one LOCATED and every other
+        DURATION_MISMATCH decides; an unknown length, a second match or an origin ambiguity does not.
+    The part's file is still verified afterwards exactly as before (map_part: duration, origin, copies).
+    """
+    if candidate.teams_call_id is not None:
+        if not thread_id or candidate.teams_thread_id != thread_id:
+            return None, None
+        named = [(p, lead) for p, lead in fits if p.call_id and p.call_id == candidate.teams_call_id]
+        if len(named) == 1:
+            return named[0], "teams_source"
+        if not named:
+            return None, None
+        fits = named
+    duration = candidate.duration_seconds
+    if duration is None or duration <= 0:
+        return None, None
+    verdicts = [((p, lead), check_duration(p, duration, lead)[0]) for p, lead in fits]
+    if any(status not in (LOCATED, DURATION_MISMATCH) for _, status in verdicts):
+        return None, None
+    located = [fit for fit, status in verdicts if status == LOCATED]
+    return (located[0], "duration") if len(located) == 1 else (None, None)
+
+
 def assign_files(parts, candidates, *, subject, session_date: str, thread_id: str | None = None,
                  all_recordings=()) -> tuple[list, dict]:
     """
     Per part, the candidate files that pass the identity rule for THAT part
     (copies collapsed), plus diagnostics. A file fitting several parts goes to
-    none of them: it is reported, and those parts are ambiguous. A part with no
+    the one part shared_file_owner proves, or else to none of them: it is
+    reported, and those parts are ambiguous. A part with no
     file at all may be proven by the Teams source facet (teams_source_file).
     """
     expected = normalize_subject(subject)
@@ -287,10 +327,16 @@ def assign_files(parts, candidates, *, subject, session_date: str, thread_id: st
         diagnostics["same_subject_date"] += 1
         if len(fits) > 1:
             diagnostics["files_fitting_several_parts"] += 1
-            taken.add(candidate.physical_id)
-            for p, _ in fits:
-                shared[p.recording_id] = shared.get(p.recording_id, 0) + 1
-            continue
+            owner, method = shared_file_owner(candidate, fits, thread_id=thread_id)
+            if owner is not None:
+                key = f"shared_files_resolved_by_{method}"
+                diagnostics[key] = diagnostics.get(key, 0) + 1
+                fits = [owner]                     # the one part this file is proven to be; the others never see it
+            else:
+                taken.add(candidate.physical_id)
+                for p, _ in fits:
+                    shared[p.recording_id] = shared.get(p.recording_id, 0) + 1
+                continue
         for p, lead in fits:
             taken.add(candidate.physical_id)
             per_part[p.recording_id].append(Exact(candidate, lead, p))

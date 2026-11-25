@@ -657,3 +657,170 @@ def test_a_september_2_shaped_file_with_the_wrong_duration_is_a_mismatch():
     for measured in (8034.22 + 30, 8034.22 - 30, 8034.22 + 5.267 + 15):
         assert rm.check_duration(_graph_part(created, 8034.22), measured, 5.267)[:2] == (
             rm.DURATION_MISMATCH, "FILE_DURATION_CONTRADICTS_RECORDING")
+
+
+# -- a false start's file named within 120 s of the restarted lecture (2026-11-18, 2026-11-23) ----------------------
+# Production, read-only, 2026-11-25. Advanced Research Methods 2026-11-23 (slot 10:00-12:00 UTC): a 21 s false start
+# on call A at 09:59:03.250578, then the lecture on a NEW call B at 09:59:41.764179 until 12:39:03.332519. The false
+# start's MP4 is named 09:59:03, i.e. 0.25 s before part 1 AND 38.76 s before part 2, so it fit both parts and BOTH
+# went AMBIGUOUS: review PART_2:FILE_FITS_SEVERAL_PARTS, although part 2 has its own MP4 named 0.764 s before it.
+# Offsets are production's, shifted onto the synthetic START; the lecture MP4's duration (Graph + 0.06 s) is
+# representative (that file's metadata was never read by the publisher).
+ARM_SHORT = (START - timedelta(seconds=56.749422), START - timedelta(seconds=35.429422))
+ARM_LONG = (START - timedelta(seconds=18.235821), END + timedelta(minutes=39, seconds=3.332519))
+ARM_SHORT_NAMED, ARM_LONG_NAMED = START - timedelta(seconds=57), START - timedelta(seconds=19)
+
+
+def _arm(g, *, facets=True, short_duration=21.376):
+    short = g.recording(*ARM_SHORT, call_id="call-a", correlation="corr-arm-a")
+    long = g.recording(*ARM_LONG, call_id="call-b", correlation="corr-arm-b")
+
+    def facet(r):
+        return {"application": "Teams", "externalId": r["callId"], "threadId": THREAD} if facets else None
+    long_seconds = (ARM_LONG[1] - ARM_LONG[0]).total_seconds()
+    files = (g.mp4(started=ARM_SHORT_NAMED, duration_seconds=short_duration, size=130_237, teams_source=facet(short)),
+             g.mp4(started=ARM_LONG_NAMED, duration_seconds=long_seconds + 0.06, teams_source=facet(long)))
+    return short, long, files
+
+
+def test_arm_production_shape_the_false_start_file_fits_both_parts():
+    g = FakeRecordingGraph()
+    _, _, (short_mp4, _) = _arm(g)
+    parts = _select(g).parts
+    leads = [round(p.created_at.timestamp() - _candidates(short_mp4)[0].file_timestamp, 3) for p in parts]
+    assert leads == [0.251, 38.764] and all(0 <= lead <= 120 for lead in leads)     # the production evidence
+
+
+def test_arm_the_false_start_file_is_proven_by_its_teams_call_and_the_lecture_is_selected():
+    g = FakeRecordingGraph()
+    _, _, (short_mp4, long_mp4) = _arm(g)
+    mappings, diagnostics = _proven_map(g, short_mp4, long_mp4)
+    assert [m.locate_status for m in mappings] == [rm.LOCATED, rm.LOCATED]
+    assert [m.candidate.item_id for m in mappings] == [short_mp4["id"], long_mp4["id"]]
+    assert [m.classification for m in mappings] == ["FRAGMENT", "FULL"]
+    assert diagnostics["files_fitting_several_parts"] == 1 and diagnostics["shared_files_resolved_by_teams_source"] == 1
+    assert mappings[0].lead_seconds == 0.251 and mappings[1].lead_seconds == 0.764
+    selection = rm.select_recording(mappings)
+    assert (selection.part_index, selection.rule) == (2, rm.RULE_LONGEST_RECORDING)
+
+
+def test_arm_without_any_source_facet_the_measured_durations_decide():
+    g = FakeRecordingGraph()
+    _, _, (short_mp4, long_mp4) = _arm(g, facets=False)
+    mappings, diagnostics = _proven_map(g, short_mp4, long_mp4)
+    assert [m.locate_status for m in mappings] == [rm.LOCATED, rm.LOCATED]
+    assert [m.candidate.item_id for m in mappings] == [short_mp4["id"], long_mp4["id"]]
+    assert diagnostics["shared_files_resolved_by_duration"] == 1
+    assert rm.select_recording(mappings).part_index == 2
+
+
+def test_arm_a_stored_verified_false_start_is_kept_and_the_lecture_located_beside_it():
+    """Production order: part 1 alone was verified at 12:13 while the lecture was still recording."""
+    g = FakeRecordingGraph()
+    short, _, (short_mp4, long_mp4) = _arm(g)
+    stored = {short["id"]: {"part_index": 1, "locate_status": rm.LOCATED,
+                            "source_drive_id": short_mp4["parentReference"]["driveId"],
+                            "source_item_id": short_mp4["id"], "source_duration_seconds": 21.376}}
+    mappings, _ = _proven_map(g, short_mp4, long_mp4)
+    merged, conflict = rm.merge_with_stored(mappings, stored)
+    assert conflict is None and [m.locate_status for m in merged] == [rm.LOCATED, rm.LOCATED]
+    assert rm.select_recording(merged, stored).part_index == 2
+
+
+def test_cjo_four_parts_the_false_start_file_no_longer_blocks_the_lecture():
+    """
+    Customer Journey Optimisation 2026-11-18 (production offsets): a 26 s false start, the lecture 60.36 s later on a
+    new call, then two short fragments that production verified (leads 71.04 s / 21.267 s). The false start's
+    file-name time is not on record: it is named here like ARM's (0.27 s early), which fits part 1 and part 2 (60.63 s).
+    """
+    g = FakeRecordingGraph()
+    base = START - timedelta(minutes=3, seconds=55.733297)                     # 08:56:04.266703 on a 09:00 slot
+    rows = [g.recording(base + timedelta(seconds=a), base + timedelta(seconds=b), call_id=c) for a, b, c in (
+        (0, 26.14, "call-1"), (60.36146, 5628.50146, "call-2"), (5798.773167, 5884.393167, "call-3"),
+        (6207.000788, 6240.720788, "call-4"))]
+    first = g.mp4(started=base - timedelta(seconds=0.266703), duration_seconds=26.2,
+                  teams_source={"application": "Teams", "externalId": "call-1", "threadId": THREAD})
+    files = [first] + [g.recorded_file(r, lead=lead, duration=d, thread=THREAD) for r, lead, d in (
+        (rows[1], 0.628, None), (rows[2], 71.04, 85.696), (rows[3], 21.267, 33.792))]
+    occurrence = _select(g)
+    assert occurrence.status == rm.SELECTED and len(occurrence.parts) == 4
+    mappings, diagnostics = _proven_map(g, *files)
+    assert [m.locate_status for m in mappings] == [rm.LOCATED] * 4
+    assert [m.candidate.item_id for m in mappings] == [f["id"] for f in files]
+    assert diagnostics["shared_files_resolved_by_teams_source"] == 1
+    assert rm.select_recording(mappings).part_index == 2
+
+
+def test_a_shared_file_without_identity_or_decisive_duration_stays_ambiguous():
+    # no facet and no measured length
+    g = FakeRecordingGraph()
+    _, _, (short_mp4, long_mp4) = _arm(g, facets=False, short_duration=None)
+    mappings, diagnostics = _proven_map(g, short_mp4, long_mp4)
+    assert {(m.locate_status, m.reason) for m in mappings} == {(rm.AMBIGUOUS, "FILE_FITS_SEVERAL_PARTS")}
+    assert not any(k.startswith("shared_files_resolved") for k in diagnostics)
+    # no facet, and the file's length fits BOTH parts (two equally short false starts 40 s apart)
+    g2 = FakeRecordingGraph()
+    g2.recording(START, START + timedelta(seconds=20), call_id="a")
+    g2.recording(START + timedelta(seconds=40), START + timedelta(seconds=60), call_id="b")
+    g2.recording(START + timedelta(minutes=3), END, call_id="c")
+    shared = g2.mp4(started=START - timedelta(seconds=1), duration_seconds=20.05)
+    mappings2, _ = _proven_map(g2, shared)
+    assert [m.reason for m in mappings2[:2]] == ["FILE_FITS_SEVERAL_PARTS"] * 2
+    # no facet, and the length contradicts every part
+    g3 = FakeRecordingGraph()
+    _, _, (short3, long3) = _arm(g3, facets=False, short_duration=500)
+    assert _proven_map(g3, short3, long3)[0][1].reason == "FILE_FITS_SEVERAL_PARTS"
+
+
+def test_a_shared_file_whose_facet_cannot_be_trusted_decides_nothing_even_when_the_duration_would():
+    for thread, facet in ((THREAD, {"application": "Teams", "externalId": "call-other", "threadId": THREAD}),
+                          (THREAD, {"application": "Teams", "externalId": "call-a", "threadId": "19:other@thread.v2"}),
+                          (None, {"application": "Teams", "externalId": "call-a", "threadId": THREAD})):
+        g = FakeRecordingGraph()
+        _, _, (short_mp4, long_mp4) = _arm(g)
+        short_mp4["source"] = facet
+        mappings, diagnostics = _proven_map(g, short_mp4, long_mp4, thread=thread)
+        assert {m.reason for m in mappings} == {"FILE_FITS_SEVERAL_PARTS"}, facet
+        assert not any(k.startswith("shared_files_resolved") for k in diagnostics)
+
+
+def test_a_file_of_one_call_is_never_given_to_another_call_even_when_the_duration_points_there():
+    g = FakeRecordingGraph()
+    _, _, (short_mp4, long_mp4) = _arm(g)
+    short_mp4["source"] = {"application": "Teams", "externalId": "call-b", "threadId": THREAD}   # names the lecture
+    mappings, diagnostics = _proven_map(g, short_mp4, long_mp4)
+    assert diagnostics["shared_files_resolved_by_teams_source"] == 1
+    assert mappings[0].locate_status == rm.NOT_FOUND                            # never placed on call A's part
+    # call B now has two candidate files: the 21 s one contradicts it, so only the lecture's own file remains
+    assert (mappings[1].locate_status, mappings[1].candidate.item_id) == (rm.LOCATED, long_mp4["id"])
+
+
+def test_legitimate_parts_of_one_call_are_told_apart_by_duration_only():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(seconds=30), call_id="c")
+    b = g.recording(START + timedelta(seconds=50), END, call_id="c")
+    named_a = g.mp4(started=START - timedelta(seconds=1), duration_seconds=30.05,
+                    teams_source={"application": "Teams", "externalId": "c", "threadId": THREAD})
+    file_b = g.recorded_file(b, lead=0.5, thread=THREAD)
+    mappings, diagnostics = _proven_map(g, named_a, file_b)
+    assert [m.candidate.item_id for m in mappings] == [named_a["id"], file_b["id"]]
+    assert [m.locate_status for m in mappings] == [rm.LOCATED, rm.LOCATED]
+    assert diagnostics["shared_files_resolved_by_duration"] == 1
+    # the same call, and a length that fits both parts: still ambiguous
+    g2 = FakeRecordingGraph()
+    g2.recording(START, START + timedelta(seconds=30), call_id="c")
+    g2.recording(START + timedelta(seconds=50), START + timedelta(seconds=80), call_id="c")
+    g2.recording(START + timedelta(minutes=3), END, call_id="d")
+    both = g2.mp4(started=START - timedelta(seconds=1), duration_seconds=30.05,
+                  teams_source={"application": "Teams", "externalId": "c", "threadId": THREAD})
+    assert [m.reason for m in _proven_map(g2, both)[0][:2]] == ["FILE_FITS_SEVERAL_PARTS"] * 2
+
+
+def test_a_part_of_unknown_length_is_never_resolved_by_duration():
+    g = FakeRecordingGraph()
+    g.recording(START, START + timedelta(seconds=20), call_id="a")
+    g.recording(START + timedelta(seconds=40), None, call_id="b")                # still recording
+    occurrence = _select(g)
+    shared = _candidates(g.mp4(started=START - timedelta(seconds=1), duration_seconds=20.05))[0]
+    fits = [(p, round(p.created_at.timestamp() - shared.file_timestamp, 3)) for p in occurrence.parts]
+    assert rm.shared_file_owner(shared, fits, thread_id=THREAD) == (None, None)
